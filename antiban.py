@@ -145,13 +145,13 @@ class AntiBanTiming:
             jitter_min = -int(base_interval * 0.18)
             jitter_max = int(base_interval * 0.28)
             jitter = random.randint(jitter_min, jitter_max)
-            sleep_secs = max(18, base_interval + jitter)
+            sleep_secs = max(5, base_interval + jitter)
             reason = f"Modo Diurno Turbo (Intervalo {base_interval}s con jitter {jitter:+d}s)"
 
         return sleep_secs, is_night, transition, reason
 
     @staticmethod
-    def inter_query_sleep(min_s=0.65, max_s=1.45):
+    def inter_query_sleep(min_s=0.3, max_s=0.6):
         time.sleep(random.uniform(min_s, max_s))
 
     @staticmethod

@@ -136,6 +136,8 @@ def init_db():
             seo_title TEXT,
             seo_description TEXT,
             value_add_tip TEXT,
+            image_urls_json TEXT DEFAULT '[]',
+            visual_notes TEXT DEFAULT '',
             status TEXT DEFAULT 'alerted',
             bought_price REAL DEFAULT 0,
             sold_price REAL DEFAULT 0,
@@ -147,6 +149,12 @@ def init_db():
         cols = [col[1] for col in c.execute("PRAGMA table_info(cex_cache)").fetchall()]
         if "box_id" not in cols:
             c.execute("ALTER TABLE cex_cache ADD COLUMN box_id TEXT DEFAULT '';")
+
+        deal_cols = [col[1] for col in c.execute("PRAGMA table_info(deals)").fetchall()]
+        if "image_urls_json" not in deal_cols:
+            c.execute("ALTER TABLE deals ADD COLUMN image_urls_json TEXT DEFAULT '[]';")
+        if "visual_notes" not in deal_cols:
+            c.execute("ALTER TABLE deals ADD COLUMN visual_notes TEXT DEFAULT '';")
 
         c.execute("DELETE FROM market_seen_items WHERE seen_at < datetime('now', '-45 days')")
         c.execute("DELETE FROM seen_items WHERE seen_at < datetime('now', '-45 days')")
@@ -1555,7 +1563,7 @@ def build_kit_folder_name(platform, item_id, ai_data):
     return f"{datetime.now().strftime('%Y%m%d_%H%M')}_{plat_tag}_{model_slug}_{item_id}"
 
 
-def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, optimal_price, landed_cost, enhanced_photos):
+def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, optimal_price, landed_cost, enhanced_photos, image_urls=None):
     kit_path = os.path.join(KITS_DIR, kit_folder)
     os.makedirs(kit_path, exist_ok=True)
 
@@ -1589,6 +1597,7 @@ def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, opt
         "identified_model": (ai_data or {}).get("identified_model", title),
         "visual_notes": visual_notes,
         "item_url": item_url,
+        "image_urls": image_urls or [],
         "landed_cost": round(landed_cost, 2),
         "optimal_price": round(optimal_price, 2),
         "seo_title": seo_title,
@@ -1598,7 +1607,7 @@ def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, opt
     with open(os.path.join(kit_path, "meta.json"), "w", encoding="utf-8") as mf:
         json.dump(meta_obj, mf, ensure_ascii=False, indent=2)
 
-    for i, p_bytes in enumerate(enhanced_photos, start=1):
+    for i, p_bytes in enumerate(enhanced_photos or [], start=1):
         with open(os.path.join(kit_path, f"foto_{i}_limpia.jpg"), "wb") as f:
             f.write(p_bytes)
 
@@ -1608,9 +1617,10 @@ def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, opt
 def register_deal_in_db(
     conn, deal_id, platform, item_id, target, title, description, price, landed_cost, fees,
     optimal_price, net_profit, ai_data, cex_data, item_url, checkout_url, image_url, kit_folder,
-    seller_city="España", is_local=False
+    seller_city="España", is_local=False, image_urls=None
 ):
     try:
+        urls_list = image_urls if isinstance(image_urls, list) and image_urls else ([image_url] if image_url else [])
         c = conn.cursor()
         c.execute(
             """INSERT OR REPLACE INTO deals (
@@ -1618,8 +1628,9 @@ def register_deal_in_db(
                 price, landed_cost, fees, optimal_price, net_profit, deal_score,
                 identified_model, cex_search_query, cex_box_name, cex_cash, cex_voucher, cex_sell,
                 item_url, checkout_url, image_url, kit_folder, seller_city, is_local,
-                fast_msg, haggle_msg, seo_title, seo_description, value_add_tip
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                fast_msg, haggle_msg, seo_title, seo_description, value_add_tip,
+                image_urls_json, visual_notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 deal_id,
                 platform.upper(),
@@ -1651,7 +1662,9 @@ def register_deal_in_db(
                 ai_data.get("haggle_message", ""),
                 ai_data.get("identified_model", title[:48]),
                 "",
-                ai_data.get("value_add_tip", "")
+                ai_data.get("value_add_tip", ""),
+                json.dumps(urls_list[:6], ensure_ascii=False),
+                ai_data.get("visual_notes", "")
             )
         )
         conn.commit()
@@ -1659,7 +1672,7 @@ def register_deal_in_db(
         print(f"[WARN] Error guardando deal en BD ({deal_id}): {e}")
 
 
-# ==================== ENVÍO DE ALERTAS A DISCORD ====================
+# ==================== ENVÍO DE ALERTAS A DISCORD (2 FASES: FLASH + EDICIÓN IA) ====================
 
 SCORE_BADGES = {
     10: "🚨 10/10 • COMPRA A CIEGAS (ARBITRAJE PURO CEX)",
@@ -1668,12 +1681,134 @@ SCORE_BADGES = {
 }
 
 
+def send_flash_discord_alert(
+    platform, item_id, title, price, landed_cost=0.0, item_url="",
+    image_url="", seller_city="España", is_local=False, target=None
+):
+    """
+    Fase 1 ('Flash Alert' sin IA, ~50ms):
+    Dispara un mensaje instantáneo a Discord en cuanto un anuncio recién subido (<10 min)
+    supera passes_filters(), antes siquiera de descargar las 3 fotos o llamar a Gemini.
+    Devuelve un descriptor {'via': 'bot'|'webhook', 'message_id': str} para editarlo en Fase 2.
+    """
+    clean_t = re.sub(r"\s+", " ", (title or "").strip())
+    loc_str = f" 🔥 **EN MANO ({seller_city})**" if is_local else f" ({seller_city})"
+    flash_content = (
+        f"⚡ **[FLASH SIN IA] {clean_t} - {price:.0f}€ -> [COMPRAR YA]({item_url})**\n"
+        f"⏳ *Puesto en casa: ~{landed_cost:.0f}€{loc_str} • Descargando 3 fotos y auditando con Gemini 2.5 Flash + CeX...*"
+    )
+    flash_components = [
+        {
+            "type": 1,
+            "components": [
+                {"type": 2, "style": 5, "label": f"⚡ COMPRAR YA ({price:.0f}€)", "url": item_url},
+                {"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:flash_{item_id}"}
+            ]
+        }
+    ]
+
+    if BOT_TOKEN and ALERTS_CHANNEL_ID:
+        bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
+        bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+        try:
+            r = requests.post(
+                bot_api_url,
+                headers=bot_headers,
+                json={"content": flash_content, "components": flash_components},
+                timeout=6
+            )
+            if r.status_code in (200, 201):
+                msg_id = r.json().get("id")
+                if msg_id:
+                    return {"via": "bot", "message_id": str(msg_id)}
+        except Exception as e:
+            print(f"[WARN] Fallo enviando Flash Alert por Bot API: {e}")
+
+    if WEBHOOK_URL and "http" in WEBHOOK_URL:
+        sep = "&" if "?" in WEBHOOK_URL else "?"
+        wh_wait_url = f"{WEBHOOK_URL}{sep}wait=true"
+        try:
+            r = requests.post(
+                wh_wait_url,
+                json={"content": flash_content},
+                timeout=6
+            )
+            if r.status_code in (200, 201):
+                msg_id = r.json().get("id")
+                if msg_id:
+                    return {"via": "webhook", "message_id": str(msg_id)}
+        except Exception as e:
+            print(f"[WARN] Fallo enviando Flash Alert por Webhook: {e}")
+
+    return None
+
+
+def resolve_flash_discord_alert(
+    flash_message, approved=False, reason="", delete_on_reject=False,
+    title="", price=0.0, item_url=""
+):
+    """
+    Si la IA o la regla matemática CeX rechaza el anuncio tras enviar un Flash Alert,
+    borra el mensaje Flash o lo edita in-situ a '❌ DESCARTADO POR IA ({reason})'.
+    """
+    if not flash_message or not isinstance(flash_message, dict):
+        return
+    msg_id = flash_message.get("message_id")
+    via = flash_message.get("via")
+    if not msg_id:
+        return
+
+    should_delete = delete_on_reject or (os.getenv("DELETE_REJECTED_FLASH", "false").lower() == "true")
+    clean_t = re.sub(r"\s+", " ", (title or "").strip())[:70]
+    clean_reason = re.sub(r"\s+", " ", (reason or "No supera auditoría IA/CeX").strip())[:180]
+    rejected_content = f"❌ **DESCARTADO POR IA ({clean_reason})** — ~~{clean_t} ({price:.0f}€)~~"
+
+    if via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
+        msg_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{msg_id}"
+        bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+        try:
+            if should_delete:
+                requests.delete(msg_url, headers=bot_headers, timeout=6)
+            else:
+                dismiss_comp = [
+                    {
+                        "type": 1,
+                        "components": [
+                            {"type": 2, "style": 4, "label": "Borrar aviso", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:rej_{msg_id}"}
+                        ]
+                    }
+                ]
+                requests.patch(
+                    msg_url,
+                    headers=bot_headers,
+                    json={"content": rejected_content, "embeds": [], "components": dismiss_comp},
+                    timeout=6
+                )
+        except Exception as e:
+            print(f"[WARN] Error actualizando Flash Alert descartado (Bot): {e}")
+
+    elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
+        base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
+        msg_url = f"{base_wh}/messages/{msg_id}"
+        try:
+            if should_delete:
+                requests.delete(msg_url, timeout=6)
+            else:
+                requests.patch(
+                    msg_url,
+                    json={"content": rejected_content, "embeds": []},
+                    timeout=6
+                )
+        except Exception as e:
+            print(f"[WARN] Error actualizando Flash Alert descartado (Webhook): {e}")
+
+
 def send_discord_alert(
     conn, platform, item_id, title, description, price, landed_cost, fees,
-    target, ai_data, cex_data, enhanced_cover_bytes, kit_folder, optimal_price,
-    charger_penalty, net_profit, item_url, checkout_url=None, image_url="",
+    target, ai_data, cex_data, enhanced_cover_bytes=None, kit_folder="", optimal_price=0.0,
+    charger_penalty=0.0, net_profit=0.0, item_url="", checkout_url=None, image_url="",
     seller_city="España", is_local=False, country_tag="ES", shipping_label="📦 Envío disponible",
-    price_drop_info=None
+    price_drop_info=None, image_urls=None, flash_message=None
 ):
     plat = platform.upper()
     deal_id = f"{plat[:3]}_{item_id}"[:40]
@@ -1685,7 +1820,7 @@ def send_discord_alert(
     register_deal_in_db(
         conn, deal_id, plat, item_id, target, title, description, price, landed_cost, fees,
         optimal_price, net_profit, ai_data, cex_data, item_url, checkout_target_url, image_url,
-        kit_folder, seller_city=seller_city, is_local=is_local
+        kit_folder, seller_city=seller_city, is_local=is_local, image_urls=image_urls
     )
 
     score = int(ai_data.get("deal_score", 8))
@@ -1753,7 +1888,7 @@ def send_discord_alert(
         color = 0xFFAA00 if score == 10 else (0x2ECC71 if is_local else PLATFORM_COLORS.get(plat, 0x3498DB))
         profit_block = (
             f"💰 **Reventa Rápida (<48h):** **{optimal_price:.0f}€** *(Beneficio limpio: **`+{net_profit:.0f}€`**)*\n"
-            f"📁 **Kit:** `{kit_folder}`\n"
+            f"📁 **Kit bajo demanda:** Pulsa **✅ ¡Comprado!** para limpiar fotos y generar anuncio\n"
             f"💬 **Mensaje Compra Rápida:**\n```text\n{fast_msg}\n```"
         )
         block_title = "📦 Rentabilidad y Acción Rápida"
@@ -1776,6 +1911,9 @@ def send_discord_alert(
         ],
         "footer": {"text": footer_text}
     }
+
+    if not enhanced_cover_bytes and image_url:
+        embed["image"] = {"url": image_url}
 
     has_valid_checkout = bool(checkout_url and checkout_url != item_url and "transaction/buy" not in str(checkout_url))
     buy_label = "⚡ Pago Directo (1-Tap)" if has_valid_checkout else f"⚡ Comprar en {plat.capitalize()}"
@@ -1801,6 +1939,43 @@ def send_discord_alert(
         }
     ]
 
+    # Si existe un mensaje Flash previo (Fase 1), editarlo in-situ con el embed completo y la nota IA
+    if flash_message and isinstance(flash_message, dict) and flash_message.get("message_id"):
+        f_id = flash_message["message_id"]
+        f_via = flash_message.get("via")
+        verified_header = (
+            f"✅ **[APROBADO POR IA • {score}/10]** **{identified_model}** — **{price:.0f}€** "
+            f"*(Limpio: **+{net_profit:.0f}€**)* ➔ [**[COMPRAR YA]**]({final_buy_url})"
+        )
+        if f_via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
+            patch_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
+            bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+            try:
+                r = requests.patch(
+                    patch_url,
+                    headers=bot_headers,
+                    json={"content": verified_header, "embeds": [embed], "components": components},
+                    timeout=10
+                )
+                if r.status_code in (200, 201):
+                    return
+            except Exception as e:
+                print(f"[WARN] Fallo editando Flash Alert en Bot API, enviando nuevo: {e}")
+
+        elif f_via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
+            base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
+            patch_url = f"{base_wh}/messages/{f_id}"
+            try:
+                r = requests.patch(
+                    patch_url,
+                    json={"content": verified_header, "embeds": [embed]},
+                    timeout=10
+                )
+                if r.status_code in (200, 201):
+                    return
+            except Exception as e:
+                print(f"[WARN] Fallo editando Flash Alert en Webhook, enviando nuevo: {e}")
+
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}"}
@@ -1813,13 +1988,11 @@ def send_discord_alert(
                 mp.addpart(name="files[0]", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
                 r = requests.post(bot_api_url, headers=bot_headers, multipart=mp, timeout=15)
             else:
-                if image_url:
-                    embed["image"] = {"url": image_url}
                 r = requests.post(
                     bot_api_url,
                     headers={**bot_headers, "Content-Type": "application/json"},
                     json={"embeds": [embed], "components": components},
-                    timeout=12
+                    timeout=10
                 )
             if r.status_code in (200, 201):
                 return

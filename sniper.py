@@ -17,12 +17,12 @@ from core_engine import (
     WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL, LOCAL_KEYWORDS,
     init_db, load_config, purge_old_kits,
     check_item_seen_or_dropped, is_duplicate_recent_deal, mark_item_seen, count_platform_seen,
-    passes_filters, fetch_cex_live, download_item_images, enhance_and_clean_image,
+    passes_filters, fetch_cex_live, download_item_images,
     analyze_and_generate_kit, evaluate_deal_math_and_score,
-    build_kit_folder_name, save_resale_kit, send_discord_alert
+    build_kit_folder_name, send_flash_discord_alert, resolve_flash_discord_alert, send_discord_alert
 )
 
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "38"))
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "8"))
 
 ITALIAN_OR_FOREIGN_HINTS = [
     "azzurra", "spedizione", "perfettamente", "funzionante", "scatola",
@@ -283,11 +283,15 @@ def main():
                         mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                         continue
 
-                    created_at_ms = item.get("created_at")
-                    if created_at_ms and not price_drop_info:
+                    created_at_ms = item.get("created_at") or item.get("creation_date") or item.get("modified_at")
+                    age_days = None
+                    if created_at_ms:
                         try:
-                            age_days = (time.time() - (float(created_at_ms) / 1000.0)) / 86400.0
-                            if age_days > 4.0:
+                            ts_val = float(created_at_ms)
+                            if ts_val > 1e11:
+                                ts_val = ts_val / 1000.0
+                            age_days = max(0.0, (time.time() - ts_val) / 86400.0)
+                            if not price_drop_info and age_days > 4.0:
                                 mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                                 continue
                         except Exception:
@@ -295,10 +299,30 @@ def main():
 
                     is_foreign, country_tag = is_foreign_listing(item, title, desc)
                     landed_cost, fees = estimate_landed_cost(price, is_local, is_foreign)
-
-                    # FASE 2 ("El Punto Dulce"): Descargar hasta 3 fotos clave SOLO para candidatos filtrados
+                    slug = item.get("web_slug", "")
+                    item_url = f"https://es.wallapop.com/item/{slug}" if slug else f"https://es.wallapop.com/item/{item_id}"
+                    city = item.get("location", {}).get("city") or "España"
                     img_urls = extract_image_urls(item)
                     cover_url = img_urls[0] if img_urls else ""
+
+                    # FASE 1.5 ("Flash Alert"): Disparo instantáneo pre-IA si el anuncio tiene <10 min (age_days < 0.007)
+                    flash_msg = None
+                    if age_days is not None and age_days < 0.007:
+                        print(f"[⚡ FLASH WALLAPOP <10min] {title} ({price:.0f}€) -> Enviando alerta instantánea sin IA...")
+                        flash_msg = send_flash_discord_alert(
+                            platform="WALLAPOP",
+                            item_id=item_id,
+                            title=title,
+                            price=price,
+                            landed_cost=landed_cost,
+                            item_url=item_url,
+                            image_url=cover_url,
+                            seller_city=city,
+                            is_local=is_local,
+                            target=target
+                        )
+
+                    # FASE 2 ("El Punto Dulce"): Descargar hasta 3 fotos clave SOLO para candidatos filtrados
                     raw_photos = download_item_images(img_urls, rotator=rotator, max_images=3)
 
                     round_evaluated += 1
@@ -310,6 +334,11 @@ def main():
                     )
 
                     if not ai_data:
+                        if flash_msg:
+                            resolve_flash_discord_alert(
+                                flash_msg, approved=False, reason="Fallo temporal de conexión con IA",
+                                title=title, price=price, item_url=item_url
+                            )
                         fail_cnt = item_eval_fails.get(item_id, 0) + 1
                         item_eval_fails[item_id] = fail_cnt
                         if fail_cnt >= 2:
@@ -322,6 +351,11 @@ def main():
                     if not ai_data.get("is_valid_deal", False) or ai_data.get("is_pro_seller", False) or ai_data.get("has_defect_or_missing_parts", False):
                         reason = ai_data.get("reject_reason") or "Descartado en inspección visual IA"
                         print(f"[WALLAPOP DESCARTADO IA] {title} ({price:.0f}€) -> {reason}")
+                        if flash_msg:
+                            resolve_flash_discord_alert(
+                                flash_msg, approved=False, reason=reason,
+                                title=title, price=price, item_url=item_url
+                            )
                         continue
 
                     # FASE 3: Verificación CeX España en vivo + Regla de Amortización + Rating Determinista
@@ -342,28 +376,14 @@ def main():
                     )
                     if not approved:
                         print(f"[WALLAPOP DESCARTADO - {score}/10] {title} ({price:.0f}€ | Casa: {landed_cost:.0f}€) -> {reject_msg}")
+                        if flash_msg:
+                            resolve_flash_discord_alert(
+                                flash_msg, approved=False, reason=reject_msg,
+                                title=title, price=price, item_url=item_url
+                            )
                         continue
 
-                    slug = item.get("web_slug", "")
-                    item_url = f"https://es.wallapop.com/item/{slug}" if slug else f"https://es.wallapop.com/item/{item_id}"
-                    city = item.get("location", {}).get("city") or "España"
                     kit_folder = build_kit_folder_name("WALLAPOP", item_id, ai_data)
-
-                    enhanced_photos = []
-                    try:
-                        for p_bytes in raw_photos:
-                            try:
-                                enhanced_photos.append(enhance_and_clean_image(p_bytes))
-                            except Exception:
-                                pass
-                        save_resale_kit(
-                            kit_folder, "WALLAPOP", item_id, title, item_url,
-                            ai_data, optimal_price, landed_cost, enhanced_photos
-                        )
-                    except Exception as e_kit:
-                        print(f"[WARN] Error guardando kit Wallapop: {e_kit}")
-
-                    enhanced_cover = enhanced_photos[0] if enhanced_photos else (raw_photos[0] if raw_photos else None)
                     print(f"[🔥 CHOLLO WALLAPOP ({score}/10) +{best_net_profit:.0f}€] {title} ({landed_cost:.0f}€ puesto en casa) -> Alertando Discord!")
                     send_discord_alert(
                         conn=conn,
@@ -377,7 +397,7 @@ def main():
                         target=target,
                         ai_data=ai_data,
                         cex_data=cex_data,
-                        enhanced_cover_bytes=enhanced_cover,
+                        enhanced_cover_bytes=None,
                         kit_folder=kit_folder,
                         optimal_price=optimal_price,
                         charger_penalty=charger_penalty,
@@ -389,7 +409,9 @@ def main():
                         is_local=is_local,
                         country_tag=country_tag,
                         shipping_label="📦 Wallapop Envíos",
-                        price_drop_info=price_drop_info
+                        price_drop_info=price_drop_info,
+                        image_urls=img_urls,
+                        flash_message=flash_msg
                     )
 
                     timing.item_processing_sleep()

@@ -17,6 +17,7 @@ import re
 import json
 import glob
 import time
+import asyncio
 from datetime import datetime
 from PIL import Image, ImageOps, ImageEnhance
 
@@ -27,7 +28,9 @@ from curl_cffi import requests as cffi_requests
 
 from core_engine import (
     DB_PATH, CONFIG_PATH, KITS_DIR,
-    init_db, load_config, fetch_cex_live
+    init_db, load_config, fetch_cex_live,
+    download_item_images, enhance_and_clean_image,
+    build_kit_folder_name, save_resale_kit
 )
 
 # ==================== CONFIGURACIÓN Y VARIABLES ====================
@@ -555,6 +558,27 @@ async def finalize_listing(interaction_or_channel, user_id, use_original_photos=
                     output_photos.append(f.read())
             except Exception:
                 pass
+        if not output_photos:
+            meta_p = os.path.join(kit_dir, "meta.json")
+            if os.path.exists(meta_p):
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as mf:
+                        mdata = json.load(mf)
+                    urls = mdata.get("image_urls") or []
+                    plat_m = str(mdata.get("platform", "")).upper()
+                    raw_imgs = await asyncio.to_thread(
+                        download_item_images, urls, None, 3, plat_m in ("EBAY", "TODOCOLECCION")
+                    )
+                    for idx_p, rb in enumerate(raw_imgs, start=1):
+                        try:
+                            clean_b = enhance_and_clean_image(rb)
+                        except Exception:
+                            clean_b = rb
+                        output_photos.append(clean_b)
+                        with open(os.path.join(kit_dir, f"foto_{idx_p}_limpia.jpg"), "wb") as pf:
+                            pf.write(clean_b)
+                except Exception:
+                    pass
 
     ai_result = call_ai_copywriter(
         product_name=session["kit_title"],
@@ -805,6 +829,25 @@ class PortfolioView(discord.ui.View):
         await interaction.response.send_modal(MarkSoldModal(deal_id, item["model"], item["bought_price"]))
 
 
+def _generate_kit_photos_sync(kit_folder, plat, item_id, title, item_url, ai_data_kit, optimal_price, landed_cost, img_urls):
+    enhanced_photos = []
+    try:
+        raw_photos = download_item_images(
+            img_urls, rotator=None, max_images=3, force_safari=(str(plat).upper() in ("EBAY", "TODOCOLECCION"))
+        )
+        for p_bytes in raw_photos:
+            try:
+                enhanced_photos.append(enhance_and_clean_image(p_bytes))
+            except Exception:
+                enhanced_photos.append(p_bytes)
+        save_resale_kit(
+            kit_folder, plat, item_id, title, item_url,
+            ai_data_kit, optimal_price, landed_cost, enhanced_photos, image_urls=img_urls
+        )
+    except Exception as e:
+        print(f"[WARN] Error generando fotos del kit al comprar ({kit_folder}): {e}")
+
+
 # ==================== INTERACCIONES PERSISTENTES EN ALERTAS (#avisos_chollos) ====================
 
 @bot.event
@@ -823,10 +866,26 @@ async def on_interaction(interaction: discord.Interaction):
 
     conn = init_db()
     c = conn.cursor()
+
+    # 4. BOTÓN: 🚫 Descartar (también funciona para avisos Flash o antiguos)
+    if action == "hide":
+        try:
+            c.execute("UPDATE deals SET status = 'discarded' WHERE deal_id = ?", (deal_id,))
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+        try:
+            await interaction.message.delete()
+        except Exception:
+            await interaction.response.send_message("🚫 Chollo descartado.", ephemeral=True)
+        return
+
     c.execute(
         """SELECT deal_id, platform, item_id, title, price, landed_cost, optimal_price, net_profit,
                   identified_model, cex_search_query, item_url, kit_folder, fast_msg, haggle_msg,
-                  seo_title, seo_description, value_add_tip, mode, radar_id
+                  seo_title, seo_description, value_add_tip, mode, radar_id,
+                  image_url, COALESCE(image_urls_json, '[]'), COALESCE(visual_notes, '')
            FROM deals WHERE deal_id = ?""",
         (deal_id,)
     )
@@ -840,7 +899,8 @@ async def on_interaction(interaction: discord.Interaction):
     (
         _, plat, item_id, title, price, landed_cost, optimal_price, net_profit,
         model_name, cex_q, item_url, kit_folder, fast_msg, haggle_msg,
-        seo_title, seo_desc, tip, mode, radar_id
+        seo_title, seo_desc, tip, mode, radar_id,
+        image_url, image_urls_json, visual_notes
     ) = row
 
     # 1. BOTÓN: 📋 Mensajes / Regateo 1-Clic
@@ -891,13 +951,45 @@ async def on_interaction(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
-    # 3. BOTÓN: ✅ ¡Comprado! -> Cartera + Lanzar Reventa
+    # 3. BOTÓN: ✅ ¡Comprado! -> Cartera + Generar Kit Bajo Demanda + Lanzar Reventa
     elif action == "buy":
-        c.execute("UPDATE deals SET status = 'bought', bought_price = ? WHERE deal_id = ?", (landed_cost, deal_id))
+        ai_data_kit = {
+            "identified_model": model_name or title,
+            "value_add_tip": tip or "Venta rápida en 48h",
+            "visual_notes": visual_notes or ""
+        }
+        if not kit_folder:
+            kit_folder = build_kit_folder_name(plat, item_id, ai_data_kit)
+
+        c.execute(
+            "UPDATE deals SET status = 'bought', bought_price = ?, kit_folder = ? WHERE deal_id = ?",
+            (landed_cost, kit_folder, deal_id)
+        )
         conn.commit()
         conn.close()
 
-        full_kit_path = os.path.join(KITS_DIR, kit_folder) if kit_folder else ""
+        try:
+            img_urls = json.loads(image_urls_json or "[]")
+            if not isinstance(img_urls, list):
+                img_urls = []
+        except Exception:
+            img_urls = []
+        if not img_urls and image_url:
+            img_urls = [image_url]
+
+        full_kit_path = os.path.join(KITS_DIR, kit_folder)
+        need_photo_download = False
+
+        if mode != "personal":
+            existing_clean = glob.glob(os.path.join(full_kit_path, "foto_*_limpia.jpg")) if os.path.exists(full_kit_path) else []
+            if not os.path.exists(full_kit_path):
+                save_resale_kit(
+                    kit_folder, plat, item_id, title, item_url,
+                    ai_data_kit, optimal_price, landed_cost, [], image_urls=img_urls
+                )
+            if not existing_clean and img_urls:
+                need_photo_download = True
+
         kit_info = get_kit_info_by_folder(full_kit_path)
         if not kit_info:
             kit_info = {
@@ -920,17 +1012,12 @@ async def on_interaction(interaction: discord.Interaction):
             )
         else:
             await interaction.response.send_modal(ExtrasModal(kit_info))
-        return
-
-    # 4. BOTÓN: 🚫 Descartar
-    elif action == "hide":
-        c.execute("UPDATE deals SET status = 'discarded' WHERE deal_id = ?", (deal_id,))
-        conn.commit()
-        conn.close()
-        try:
-            await interaction.message.delete()
-        except Exception:
-            await interaction.response.send_message("🚫 Chollo descartado.", ephemeral=True)
+            if need_photo_download:
+                await asyncio.to_thread(
+                    _generate_kit_photos_sync,
+                    kit_folder, plat, item_id, title, item_url,
+                    ai_data_kit, optimal_price, landed_cost, img_urls
+                )
         return
 
 

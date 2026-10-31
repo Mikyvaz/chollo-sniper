@@ -8,7 +8,7 @@ services:
     env_file:
       - .env
     environment:
-      - SCAN_INTERVAL_SECONDS=38
+      - SCAN_INTERVAL_SECONDS=8
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
     volumes:

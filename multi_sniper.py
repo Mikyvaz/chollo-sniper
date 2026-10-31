@@ -23,9 +23,9 @@ from core_engine import (
     WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL,
     init_db, load_config,
     check_item_seen_or_dropped, is_duplicate_recent_deal, mark_item_seen, count_platform_seen,
-    passes_filters, fetch_cex_live, download_item_images, enhance_and_clean_image,
+    passes_filters, fetch_cex_live, download_item_images,
     analyze_and_generate_kit, evaluate_deal_math_and_score,
-    build_kit_folder_name, save_resale_kit, send_discord_alert,
+    build_kit_folder_name, send_discord_alert,
     fetch_cashconverters, fetch_milanuncios, fetch_ebay_es, fetch_todocoleccion
 )
 
@@ -252,21 +252,6 @@ def main():
                             continue
 
                         kit_folder = build_kit_folder_name(plat, item_id, ai_data)
-                        enhanced_photos = []
-                        try:
-                            for p_bytes in raw_photos:
-                                try:
-                                    enhanced_photos.append(enhance_and_clean_image(p_bytes))
-                                except Exception:
-                                    pass
-                            save_resale_kit(
-                                kit_folder, plat, item_id, title, item["url"],
-                                ai_data, optimal_price, landed_cost, enhanced_photos
-                            )
-                        except Exception as e_kit:
-                            print(f"[WARN] Error guardando kit {plat}: {e_kit}")
-
-                        enhanced_cover = enhanced_photos[0] if enhanced_photos else (raw_photos[0] if raw_photos else None)
                         print(f"[🔥 CHOLLO {plat} ({score}/10) +{best_net_profit:.0f}€] {title} ({landed_cost:.0f}€) -> Alertando Discord!")
                         send_discord_alert(
                             conn=conn,
@@ -280,7 +265,7 @@ def main():
                             target=target,
                             ai_data=ai_data,
                             cex_data=cex_data,
-                            enhanced_cover_bytes=enhanced_cover,
+                            enhanced_cover_bytes=None,
                             kit_folder=kit_folder,
                             optimal_price=optimal_price,
                             charger_penalty=charger_penalty,
@@ -292,7 +277,8 @@ def main():
                             is_local=item.get("is_local", False),
                             country_tag="ES",
                             shipping_label=item.get("shipping_label", store["default_shipping"]),
-                            price_drop_info=price_drop_info
+                            price_drop_info=price_drop_info,
+                            image_urls=img_urls
                         )
                         timing.item_processing_sleep()
 

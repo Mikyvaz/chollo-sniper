@@ -89,13 +89,7 @@
       "platforms": ["wallapop", "ebay", "milanuncios"],
       "keywords": "ssd sata 1tb 2tb 4tb",
       "wallapop_keywords": [
-        "ssd 1tb",
-        "ssd 2tb",
-        "ssd 4tb",
-        "samsung 870 evo",
-        "samsung 860 evo",
-        "crucial mx500",
-        "ssd sata"
+        "ssd"
       ],
       "vinted_keywords": [
         "ssd sata"
@@ -174,10 +168,8 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
       "keywords": "nintendo 3ds consola",
       "wallapop_keywords": [
-        "consola nintendo 3ds",
-        "new nintendo 3ds",
-        "nintendo 3ds xl",
-        "new 2ds xl"
+        "nintendo 3ds",
+        "nintendo 2ds"
       ],
       "vinted_keywords": [
         "nintendo 3ds",
@@ -247,8 +239,7 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
       "keywords": "nintendo switch oled",
       "wallapop_keywords": [
-        "nintendo switch oled",
-        "switch oled consola"
+        "nintendo switch oled"
       ],
       "vinted_keywords": [
         "nintendo switch oled"
@@ -297,8 +288,7 @@
       "keywords": "steam deck rog ally legion go",
       "wallapop_keywords": [
         "steam deck",
-        "asus rog ally",
-        "lenovo legion go"
+        "rog ally"
       ],
       "vinted_keywords": [
         "steam deck",
@@ -353,10 +343,7 @@
       "keywords": "canon g7x sx740 sx730 rx100",
       "wallapop_keywords": [
         "canon g7x",
-        "canon g7 x",
         "canon sx740",
-        "canon sx730",
-        "canon sx720",
         "sony rx100"
       ],
       "vinted_keywords": [
@@ -439,9 +426,7 @@
       "keywords": "sony a6000 zv-e10 fujifilm x-t20 x-t30",
       "wallapop_keywords": [
         "sony a6000",
-        "sony zv-e10",
-        "fujifilm x-t20",
-        "fujifilm x-t30"
+        "sony zv-e10"
       ],
       "vinted_keywords": [
         "sony a6000",
@@ -506,12 +491,7 @@
       "platforms": ["wallapop", "todocoleccion", "milanuncios"],
       "keywords": "pokemon nintendo ds",
       "wallapop_keywords": [
-        "pokemon heartgold",
-        "pokemon soulsilver",
-        "pokemon platino",
-        "pokemon blanco 2",
-        "pokemon negro 2",
-        "pokemon esmeralda"
+        "pokemon"
       ],
       "vinted_keywords": [
         "pokemon heartgold",
@@ -572,11 +552,8 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
       "keywords": "mac mini m1 m2 ipad 9 ipad 10 ipad air m1",
       "wallapop_keywords": [
-        "mac mini m1",
-        "mac mini m2",
-        "ipad 9 generacion",
-        "ipad 10 generacion",
-        "ipad air m1"
+        "mac mini",
+        "ipad 10"
       ],
       "vinted_keywords": [
         "mac mini m1",
@@ -696,8 +673,7 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
       "keywords": "consola nintendo switch",
       "wallapop_keywords": [
-        "consola nintendo switch",
-        "nintendo switch lite"
+        "nintendo switch"
       ],
       "vinted_keywords": [
         "consola nintendo switch",
@@ -759,10 +735,7 @@
       "platforms": ["wallapop", "milanuncios", "cashconverters", "ebay"],
       "keywords": "rtx 3060 3070 3080 4060",
       "wallapop_keywords": [
-        "rtx 3060",
-        "rtx 3070",
-        "rtx 3080",
-        "rtx 4060"
+        "rtx"
       ],
       "vinted_keywords": [
         "rtx 3060",
@@ -826,8 +799,7 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
       "keywords": "ps vita",
       "wallapop_keywords": [
-        "ps vita",
-        "psvita consola"
+        "ps vita"
       ],
       "vinted_keywords": [
         "ps vita consola",
@@ -980,8 +952,7 @@
       "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
       "keywords": "kindle paperwhite",
       "wallapop_keywords": [
-        "kindle paperwhite 11",
-        "kindle oasis"
+        "kindle paperwhite"
       ],
       "vinted_keywords": [
         "kindle paperwhite 11",
