@@ -1,0 +1,1093 @@
+{
+  "min_net_profit_eur": 35,
+  "min_deal_score": 8,
+  "min_personal_savings_eur": 25,
+  "price_drop_threshold_pct": 15,
+  "price_drop_min_eur": 10,
+  "global_blacklist": [
+    "busco",
+    "compro",
+    "cambio por",
+    "alquilo",
+    "alquiler",
+    "caja vacia",
+    "caja vacía",
+    "solo caja",
+    "solo la caja",
+    "solo funda",
+    "solo carcasa",
+    "cristal templado",
+    "para piezas",
+    "no enciende",
+    "averiado",
+    "averiada",
+    "bloqueado",
+    "bloqueada",
+    "icloud",
+    "mdm",
+    "bypass",
+    "sin funcionar",
+    "no funciona",
+    "sin probar",
+    "para reparar",
+    "servicio tecnico",
+    "servicio técnico",
+    "reparacion",
+    "reparación",
+    "cartucho r4",
+    "mig switch",
+    "cuenta digital",
+    "cuenta con juegos",
+    "codigo digital",
+    "código digital",
+    "cherche",
+    "achete",
+    "achète",
+    "boite vide",
+    "boîte vide",
+    "seule boite",
+    "seule boîte",
+    "coque seule",
+    "housse seule",
+    "verre trempé",
+    "verre trempe",
+    "pour pieces",
+    "pour pièces",
+    "ne s'allume pas",
+    "en panne",
+    "bloqué",
+    "bloquée",
+    "cerco",
+    "scambio",
+    "scatola vuota",
+    "solo scatola",
+    "solo custodia",
+    "vetro temperato",
+    "per parti",
+    "per pezzi",
+    "non si accende",
+    "guasto",
+    "guasta",
+    "bloccato",
+    "looking for",
+    "empty box",
+    "box only",
+    "case only",
+    "for parts",
+    "not working",
+    "faulty",
+    "for repair"
+  ],
+  "targets": [
+    {
+      "id": "ssd_sata_server",
+      "name": "💾 [PERSONAL SERVIDOR] SSD SATA 2.5\" (1TB / 2TB / 4TB)",
+      "enabled": true,
+      "mode": "personal",
+      "tier": "hot",
+      "min_savings_eur": 25,
+      "platforms": ["wallapop", "ebay", "milanuncios"],
+      "keywords": "ssd sata 1tb 2tb 4tb",
+      "wallapop_keywords": [
+        "ssd 1tb",
+        "ssd 2tb",
+        "ssd 4tb",
+        "samsung 870 evo",
+        "samsung 860 evo",
+        "crucial mx500",
+        "ssd sata"
+      ],
+      "vinted_keywords": [
+        "ssd sata"
+      ],
+      "multi_keywords": [
+        "ssd sata 1tb",
+        "ssd sata 2tb",
+        "samsung 870 evo 1tb",
+        "crucial mx500 1tb"
+      ],
+      "min_price": 18,
+      "max_price": 135,
+      "submodel_price_caps": [
+        {
+          "match_any": ["1tb", "1 tb", "960gb", "960 gb", "1000gb"],
+          "unless_any": ["2tb", "2 tb", "4tb", "4 tb", "1.92tb", "3.84tb", "lote", "pack", "x2", "2x"],
+          "max_price": 50
+        }
+      ],
+      "cex_cash_ref": "Uso Personal Homelab • Ref mercado usado: 1TB (~65-75€) | 2TB (~125-140€) | 4TB (~230-260€)",
+      "est_resale": "Ahorro Directo Servidor",
+      "ai_valuation_guide": "MODO COMPRA PERSONAL PARA SERVIDOR LINUX: El usuario busca discos SSD de formato 2.5 pulgadas SATA III de 1TB en adelante (1TB, 960GB, 1.92TB, 2TB, 3.84TB, 4TB) en buen estado de salud para su servidor. 1) RECHAZA SIEMPRE discos NVMe M.2 (formato chicle PCIe), discos duros mecánicos HDD (7200rpm/5400rpm) y capacidades menores de 960GB (rechaza 120GB, 240GB, 250GB, 480GB, 500GB, 512GB). 2) Modelos TOP buscados: Samsung 860/870 EVO/PRO/QVO, Crucial MX500/BX500, Kingston KC600, WD Blue 3D / Red SA500, SanDisk Ultra 3D, o Enterprise SATA (Intel D3-S4510/S4610, Micron 5200/5300/5400, Samsung PM883/SM883, Seagate IronWolf 125). 3) En 'estimated_resale_price' pon el valor real de mercado de segunda mano en buen estado para calcular el ahorro del usuario: 960GB/1TB = 70€ (78€ si es PRO/Enterprise o precintado), 1.92TB/2TB = 135€ (150€ si es PRO/Enterprise/Nuevo), 3.84TB/4TB = 250€. 4) Es CHOLLO VÁLIDO (is_valid_deal: true) si: 1TB cuesta <= 48€ puesto en casa, 2TB cuesta <= 95€ puesto en casa, o 4TB cuesta <= 175€ puesto en casa, y no presenta sectores defectuosos ni fallos SMART.",
+      "must_contain_any": [
+        "1tb",
+        "1 tb",
+        "960gb",
+        "960 gb",
+        "1.92tb",
+        "2tb",
+        "2 tb",
+        "3.84tb",
+        "4tb",
+        "4 tb",
+        "1000gb"
+      ],
+      "blacklist": [
+        "nvme",
+        "m.2",
+        "m2",
+        "pcie",
+        "externo",
+        "externe",
+        "external",
+        "portable",
+        "portatil",
+        "portátil",
+        "portatile",
+        "samsung t7",
+        "samsung t5",
+        "sandisk extreme",
+        "sshd",
+        "ibrido",
+        "hibrido",
+        "120gb",
+        "128gb",
+        "240gb",
+        "250gb",
+        "256gb",
+        "480gb",
+        "500gb",
+        "512gb",
+        "hdd",
+        "7200rpm",
+        "5400rpm",
+        "carcasa",
+        "caja externa",
+        "adaptador"
+      ]
+    },
+    {
+      "id": "new_3ds_family",
+      "name": "🕹️ New 3DS / New 3DS XL / New 2DS XL / 3DS XL",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "keywords": "nintendo 3ds consola",
+      "wallapop_keywords": [
+        "consola nintendo 3ds",
+        "new nintendo 3ds",
+        "nintendo 3ds xl",
+        "new 2ds xl"
+      ],
+      "vinted_keywords": [
+        "nintendo 3ds",
+        "nintendo 2ds"
+      ],
+      "multi_keywords": [
+        "new nintendo 3ds",
+        "nintendo 3ds xl",
+        "new 2ds xl"
+      ],
+      "min_price": 30,
+      "max_price": 105,
+      "submodel_price_caps": [
+        {
+          "match_any": ["2ds"],
+          "unless_any": ["xl", "ll", "new"],
+          "max_price": 25
+        },
+        {
+          "match_any": ["3ds"],
+          "unless_any": ["xl", "ll", "new", "2ds"],
+          "max_price": 40
+        },
+        {
+          "match_any": ["3ds xl", "3ds ll"],
+          "unless_any": ["new"],
+          "max_price": 76
+        }
+      ],
+      "cex_cash_ref": "58€ (3DS) | 102€ (3DS XL) | 129€ (New 2DS XL) | 148€-170€ (New 3DS XL) efectivo CeX",
+      "est_resale": "135€ - 210€",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Pokémon, Mario o Layton, cajas vacías, cartuchos R4 o consolas DSi/DS Lite antiguas). Mira las fotos para distinguir el modelo exacto: 1) 'Nintendo 2DS' plana sin bisagra (forma de cuña): CeX paga solo 32€, recházala si cuesta más de 25€. 2) 'Nintendo 3DS' pequeña antigua (2011, sin C-Stick): CeX paga 58€, recházala si cuesta más de 40€. 3) 'Nintendo 3DS XL' (antigua grande sin el pequeño C-Stick gris sobre X/Y): CeX paga 102€ cash, es chollo hasta 76€. 4) 'New Nintendo 3DS' / 'New Nintendo 3DS XL' (tienen el pequeño C-Stick gris encima de X/Y) y 'New Nintendo 2DS XL' (plegable tipo concha): CeX paga entre 129€ y 170€ en efectivo, son CHOLLAZO hasta 105€. En cex_search_query pon exactamente 'New Nintendo 3DS XL', 'Nintendo 3DS XL', 'New Nintendo 2DS XL' o 'Nintendo 3DS Consola' según lo que veas en las fotos.",
+      "must_contain_any": [
+        "3ds",
+        "2ds"
+      ],
+      "blacklist": [
+        "solo bolsa",
+        "solo funda",
+        "funda para",
+        "solo cargador",
+        "cargador original nintendo",
+        "solo juego",
+        "juego 3ds",
+        "juego nintendo 3ds",
+        "juego para 3ds",
+        "juegos de ",
+        "juegos para ",
+        "lote juegos",
+        "lote de juegos",
+        "pack de juegos",
+        "inazuma eleven",
+        "estuche para",
+        "lapiz tactil",
+        "stylus",
+        "lot de jeux",
+        "lotto giochi",
+        "protector pantalla"
+      ]
+    },
+    {
+      "id": "switch_oled",
+      "name": "⚡ Nintendo Switch OLED (Con Joy-Cons)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "keywords": "nintendo switch oled",
+      "wallapop_keywords": [
+        "nintendo switch oled",
+        "switch oled consola"
+      ],
+      "vinted_keywords": [
+        "nintendo switch oled"
+      ],
+      "multi_keywords": [
+        "nintendo switch oled"
+      ],
+      "min_price": 55,
+      "max_price": 98,
+      "cex_cash_ref": "94€ (Sin Caja) | 101€ (Con Caja) efectivo CeX | 165€-175€ PVP CeX",
+      "est_resale": "145€ - 175€",
+      "ai_valuation_guide": "CRÍTICO: Debe ser la consola Nintendo Switch OLED funcional (marco fino y soporte trasero ancho) CON SUS DOS JOY-CONS acoplados. CeX España paga 94€ en efectivo Sin Caja (y 101€ Con Caja), y se revende rápido en Wallapop por 150-165€. RECHAZA SIEMPRE si en las fotos aparece solo la pantalla/tablet sin Joy-Cons, si tiene drift o pantalla rayada/rota, o si es solo la caja o el dock suelto. En cex_search_query usa 'Nintendo Switch OLED'.",
+      "must_contain_any": [
+        "oled"
+      ],
+      "blacklist": [
+        "switch lite",
+        "solo tablet",
+        "sin joycon",
+        "sin joy-con",
+        "senza joycon",
+        "sans joycon",
+        "dock suelto",
+        "solo dock",
+        "solo funda",
+        "funda para",
+        "solo mando",
+        "solo joycon",
+        "joycon suelto",
+        "joy-con suelto",
+        "pantalla rota",
+        "edicion coleccionista",
+        "collector",
+        "divine edition",
+        "deluxe edition",
+        "limited edition"
+      ]
+    },
+    {
+      "id": "steam_deck_handhelds",
+      "name": "🎮 Consolas PC (Steam Deck LCD/OLED / ASUS ROG Ally Z1E / Legion Go)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay"],
+      "keywords": "steam deck rog ally legion go",
+      "wallapop_keywords": [
+        "steam deck",
+        "asus rog ally",
+        "lenovo legion go"
+      ],
+      "vinted_keywords": [
+        "steam deck",
+        "rog ally"
+      ],
+      "multi_keywords": [
+        "steam deck",
+        "asus rog ally"
+      ],
+      "min_price": 115,
+      "max_price": 255,
+      "submodel_price_caps": [
+        {
+          "match_any": ["64gb", "64 gb", "64 go"],
+          "unless_any": ["oled", "512gb", "1tb", "rog ally", "legion go"],
+          "max_price": 175
+        },
+        {
+          "match_any": ["256gb", "256 gb", "256 go"],
+          "unless_any": ["oled", "512gb", "1tb", "rog ally", "legion go"],
+          "max_price": 188
+        }
+      ],
+      "cex_cash_ref": "182€ (Deck 64GB) | 195€ (256GB) | 227€ (512GB) | 336€ (Deck OLED / Legion Go) | 272€ (ROG Ally Z1E) en CeX",
+      "est_resale": "255€ - 420€",
+      "ai_valuation_guide": "CRÍTICO: Evalúa consolas PC portátiles completas y funcionales: 1) Valve Steam Deck LCD: 64GB (CeX paga 182€ cash, revende a 250€ -> acepta solo <= 175€), 256GB (CeX paga 195€ cash, revende a 270€ -> acepta <= 188€), 512GB (CeX paga 227€ cash, revende a 300€ -> acepta <= 215€). 2) Steam Deck OLED (512GB/1TB): CeX paga 336€-384€ cash, revende a 420€ -> chollazo hasta 255€. 3) ASUS ROG Ally Z1 Extreme (CeX paga 272€ cash, revende a 345€; ojo: la versión Z1 normal básica solo da 192€ en CeX, acéptala solo <= 175€). 4) Lenovo Legion Go (CeX paga 336€ cash). En cex_search_query pon 'Valve Steam Deck 64GB', 'Valve Steam Deck 256GB', 'Valve Steam Deck 512GB', 'Valve Steam Deck OLED 512GB', 'Asus ROG Ally Z1 Extreme' o 'Lenovo Legion Go'.",
+      "must_contain_any": [
+        "steam deck",
+        "steamdeck",
+        "rog ally",
+        "legion go"
+      ],
+      "blacklist": [
+        "jsaux",
+        "solo dock",
+        "dock para",
+        "funda para",
+        "solo funda",
+        "protector",
+        "skin",
+        "vinilo",
+        "soporte"
+      ]
+    },
+    {
+      "id": "digicams_premium",
+      "name": "📸 Digicams Cotizadas (Canon G7X / SX740 / SX730 / Sony RX100)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay", "todocoleccion"],
+      "keywords": "canon g7x sx740 sx730 rx100",
+      "wallapop_keywords": [
+        "canon g7x",
+        "canon g7 x",
+        "canon sx740",
+        "canon sx730",
+        "canon sx720",
+        "sony rx100"
+      ],
+      "vinted_keywords": [
+        "canon g7x",
+        "canon sx740",
+        "sony rx100"
+      ],
+      "multi_keywords": [
+        "canon g7x",
+        "canon sx740",
+        "sony rx100"
+      ],
+      "min_price": 45,
+      "max_price": 180,
+      "submodel_price_caps": [
+        {
+          "match_any": ["sx720", "sx 720", "sx730", "sx 730"],
+          "unless_any": ["sx740", "g7x", "g7 x"],
+          "max_price": 98
+        },
+        {
+          "match_any": ["rx100", "rx 100", "dsc-rx100"],
+          "unless_any": ["m2", "m3", "m4", "m5", "m6", "m7", "mark ii", "mark iii", "mark iv", "mark v", "mk ii", "mk iii", " ii", " iii", " iv"],
+          "max_price": 82
+        }
+      ],
+      "cex_cash_ref": "88€ (RX100 M1) | 108€ (SX720/730) | 172€ (SX740) | 187€-279€ (G7X M1/M2) en CeX",
+      "est_resale": "140€ - 420€",
+      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos el modelo exacto y generación (Mark I, II, III, IV): 1) Sony DSC-RX100 Mark I (primera generación sin visor EVF): CeX paga 88€ cash y se revende a 135€, acéptala solo si cuesta <= 82€. RX100 Mark III/IV/V (M3/M4/M5): CeX paga 159€-234€ cash, son chollazo hasta 180€. 2) Canon PowerShot SX720 HS / SX730 HS: CeX paga 101€-108€ cash, acepta solo <= 98€. 3) Canon PowerShot SX740 HS: CeX paga 172€ cash, chollazo hasta 165€. 4) Canon PowerShot G7X Mark I (187€ cash CeX) y G7X Mark II/III (279€-315€ cash CeX): chollazo hasta 180€. En cex_search_query especifica siempre el modelo exacto (ej: 'Sony Cyber-shot DSC-RX100', 'Sony DSC-RX100M3', 'Canon PowerShot SX720 HS', 'Canon PowerShot SX740 HS', 'Canon PowerShot G7 X Mark II').",
+      "must_contain_any": [
+        "g7x",
+        "g7 x",
+        "g9x",
+        "g9 x",
+        "g5x",
+        "sx740",
+        "sx730",
+        "sx720",
+        "rx100",
+        "rx 100"
+      ],
+      "blacklist": [
+        "a410",
+        "a420",
+        "a430",
+        "a460",
+        "a470",
+        "a480",
+        "a490",
+        "a520",
+        "a530",
+        "sx200",
+        "sx210",
+        "sx220",
+        "sx230",
+        "sx240",
+        "sx260",
+        "sx400",
+        "sx410",
+        "sx420",
+        "sx500",
+        "sx510",
+        "solo funda",
+        "funda de cuero",
+        "funda para",
+        "solo bateria",
+        "bateria para",
+        "cargador para",
+        "solo cargador",
+        "tripode"
+      ]
+    },
+    {
+      "id": "mirrorless_cameras",
+      "name": "📷 Mirrorless & Vlogging (Sony A6000/ZV-E10 / Fujifilm X-T20/X-T30)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay"],
+      "keywords": "sony a6000 zv-e10 fujifilm x-t20 x-t30",
+      "wallapop_keywords": [
+        "sony a6000",
+        "sony zv-e10",
+        "fujifilm x-t20",
+        "fujifilm x-t30"
+      ],
+      "vinted_keywords": [
+        "sony a6000",
+        "sony zv-e10",
+        "fujifilm x-t20",
+        "fujifilm x-t30"
+      ],
+      "multi_keywords": [
+        "sony a6000",
+        "sony zv-e10",
+        "fujifilm x-t20"
+      ],
+      "min_price": 100,
+      "max_price": 260,
+      "submodel_price_caps": [
+        {
+          "match_any": ["x-t10", "xt10"],
+          "unless_any": ["x-t20", "xt20", "x-t30", "xt30"],
+          "max_price": 112
+        },
+        {
+          "match_any": ["a6000", "alpha 6000", "ilce-6000"],
+          "unless_any": ["zv-e10", "x-t20", "x-t30"],
+          "max_price": 195
+        }
+      ],
+      "cex_cash_ref": "140€ (A6000 Cuerpo) | 206€ (A6000 + 16-50mm) | 241€-270€ (ZV-E10) | 243€ (Fuji X-T20) | 312€ (Fuji X-T30) en CeX",
+      "est_resale": "230€ - 450€",
+      "ai_valuation_guide": "CRÍTICO: Mira las fotos para comprobar si la cámara incluye objetivo (ej. 16-50mm / 18-55mm -> pon includes_kit_lens=true) o si es SOLO CUERPO (includes_kit_lens=false): 1) Sony Alpha A6000: con objetivo 16-50mm CeX paga 206€ cash (acepta hasta 195€); si es SOLO CUERPO sin objetivo CeX paga 140€ cash (recházala si cuesta más de 132€). 2) Sony ZV-E10: CeX paga 241€ (cuerpo) a 270€ (con 16-50mm) cash, es chollazo hasta 255€. 3) Fujifilm X-T10 (CeX paga 117€ cuerpo, acepta <= 112€), Fujifilm X-T20 (CeX paga 243€ cash, chollazo hasta 235€), Fujifilm X-T30 (CeX paga 312€ cash, chollazo hasta 260€). En cex_search_query escribe 'Sony Alpha ILCE-6000 16-50mm' (o 'Sony Alpha ILCE-6000 Cuerpo' si no lleva lente), 'Sony ZV-E10', 'Fujifilm X-T20' o 'Fujifilm X-T30'.",
+      "must_contain_any": [
+        "a6000",
+        "zv-e10",
+        "zve10",
+        "x-t10",
+        "xt10",
+        "x-t20",
+        "xt20",
+        "x-t30",
+        "xt30"
+      ],
+      "blacklist": [
+        "smallrig",
+        "cage",
+        "jaula",
+        "solo funda",
+        "funda para",
+        "solo bateria",
+        "cargador para",
+        "dummy battery",
+        "protector",
+        "instax",
+        "solo objetivo",
+        "solo lente"
+      ]
+    },
+    {
+      "id": "pokemon_ds_gba",
+      "name": "🐉 Joyas Pokémon DS/GBA (HeartGold/SoulSilver/Platino/Blanco 2/Esmeralda)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "todocoleccion", "milanuncios"],
+      "keywords": "pokemon nintendo ds",
+      "wallapop_keywords": [
+        "pokemon heartgold",
+        "pokemon soulsilver",
+        "pokemon platino",
+        "pokemon blanco 2",
+        "pokemon negro 2",
+        "pokemon esmeralda"
+      ],
+      "vinted_keywords": [
+        "pokemon heartgold",
+        "pokemon soulsilver"
+      ],
+      "multi_keywords": [
+        "pokemon heartgold",
+        "pokemon soulsilver",
+        "pokemon blanco 2",
+        "pokemon esmeralda"
+      ],
+      "min_price": 15,
+      "max_price": 60,
+      "cex_cash_ref": "68€ a 99€ efectivo CeX (HeartGold/SoulSilver/Blanco 2/Platino/Esmeralda)",
+      "est_resale": "90€ - 150€",
+      "ai_valuation_guide": "CRÍTICO: Acepta SOLO ediciones originales PAL España (ESP): Pokémon Oro HeartGold (CeX paga 78€ cash), Plata SoulSilver (87€ cash), Platino (78€ cash), Blanco 2 (84€ cash), Negro 2 (73€ cash), Esmeralda (99€ cash), Cristal (68€ cash), Rojo Fuego (65€ cash) y Verde Hoja (65€ cash). Verifica en las fotos que NO sea reproducción de AliExpress ni versión extranjera (FRA/ITA/NOE/USA) ni caja vacía sin cartucho. En cex_search_query pon 'Pokemon Oro HeartGold', 'Pokemon Plata SoulSilver', 'Pokemon Edicion Platino', 'Pokemon Edicion Blanca 2', 'Pokemon Edicion Negra 2' o 'Pokemon Edicion Esmeralda'.",
+      "must_contain_any": [
+        "heartgold",
+        "heart gold",
+        "soulsilver",
+        "soul silver",
+        "platino",
+        "blanco 2",
+        "negro 2",
+        "esmeralda",
+        "cristal",
+        "rojo fuego",
+        "verde hoja"
+      ],
+      "blacklist": [
+        "mundo misterioso",
+        "ranger",
+        "rumble",
+        "dash",
+        "repro",
+        "replica",
+        "réplica",
+        "copia",
+        "compatible",
+        "aliexpress",
+        "custom",
+        "solo caja",
+        "caja vacia",
+        "caja vacía",
+        "sin juego",
+        "carta",
+        "tcg",
+        "peluche",
+        "guia"
+      ]
+    },
+    {
+      "id": "apple_high_liquidity",
+      "name": "🍎 Apple Alta Liquidez (Mac Mini M1/M2 / iPad 9ª-10ª Gen / iPad Air M1)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "keywords": "mac mini m1 m2 ipad 9 ipad 10 ipad air m1",
+      "wallapop_keywords": [
+        "mac mini m1",
+        "mac mini m2",
+        "ipad 9 generacion",
+        "ipad 10 generacion",
+        "ipad air m1"
+      ],
+      "vinted_keywords": [
+        "mac mini m1",
+        "mac mini m2",
+        "ipad 9",
+        "ipad 10"
+      ],
+      "multi_keywords": [
+        "mac mini m1",
+        "mac mini m2",
+        "ipad 10 generacion"
+      ],
+      "min_price": 85,
+      "max_price": 245,
+      "submodel_price_caps": [
+        {
+          "match_any": ["ipad 9", "ipad 9a", "ipad 9ª", "9 generacion", "9ª generacion", "9ª generación", "9eme", "9ème", "9 eme", "9 ème", "ipad 10.2", "a2602", "a2603"],
+          "unless_any": ["pro", "air", "m1", "m2", "ipad 10 ", "10 generacion", "10ª", "256gb", "256 gb"],
+          "max_price": 118
+        },
+        {
+          "match_any": ["ipad 10", "ipad 10a", "ipad 10ª", "10 generacion", "10ª generacion", "10ª generación", "10eme", "10ème", "10 eme", "a2696", "a2757"],
+          "unless_any": ["pro", "air", "m1", "m2", "256gb", "256 gb"],
+          "max_price": 175
+        },
+        {
+          "match_any": ["mac mini m1", "a2348"],
+          "unless_any": ["m2", "16gb", "16 gb", "512gb", "512 gb", "1tb", "1 tb"],
+          "max_price": 188
+        },
+        {
+          "match_any": ["ipad air 5", "ipad air m1", "a2588", "a2589"],
+          "unless_any": ["m2", "256gb", "256 gb"],
+          "max_price": 198
+        }
+      ],
+      "cex_cash_ref": "123€ (iPad 9) | 182€ (iPad 10) | 195€ (Mac Mini M1) | 208€ (iPad Air M1) | 261€ (Mac Mini M2) en CeX",
+      "est_resale": "175€ - 355€",
+      "ai_valuation_guide": "CRÍTICO: Rechaza cualquier equipo con bloqueo iCloud, MDM, cristal con grietas ('fissure') o Mac Mini Intel antiguo (2010-2018 con puertos FireWire/USB-A antiguos o Core i5/i7). Precios reales CeX España y topes de compra: 1) Apple iPad 9 64GB WiFi (CeX paga 123€ cash, PVP 205€ -> acepta solo <= 118€). 2) Apple iPad 10 64GB WiFi (CeX paga 182€ cash, PVP 305€ -> acepta <= 175€). 3) Apple iPad Air 5 M1 64GB WiFi (CeX paga 208€ cash, PVP 345€ -> acepta <= 198€). 4) Apple Mac Mini M1 8GB/256GB (CeX paga 195€ cash, PVP 325€ -> acepta <= 188€). 5) Apple Mac Mini M2 8GB/256GB (CeX paga 261€ cash, PVP 420€ -> chollazo hasta 245€). En cex_search_query usa exactamente 'Apple iPad 9 64GB WiFi', 'Apple iPad 10 64GB WiFi', 'Apple iPad Air 5 64GB WiFi', 'Apple Mac Mini M1 8GB 256GB' o 'Apple Mac Mini M2 8GB 256GB'.",
+      "must_contain_any": [
+        "mac mini",
+        "ipad 9",
+        "ipad 9a",
+        "ipad 9ª",
+        "ipad 10",
+        "ipad 10a",
+        "ipad 10ª",
+        "ipad air 5",
+        "ipad air m1",
+        "ipad air m2",
+        "m1",
+        "m2"
+      ],
+      "blacklist": [
+        "icloud",
+        "bloqueado",
+        "mdm",
+        "bypass",
+        "2007",
+        "2009",
+        "2010",
+        "2011",
+        "2012",
+        "2014",
+        "2015",
+        "2016",
+        "2017",
+        "2018",
+        "2019",
+        "a1347",
+        "intel",
+        "i3",
+        "i5",
+        "i7",
+        "core i5",
+        "core i7",
+        "core i3",
+        "ddr3",
+        "catalina",
+        "mojave",
+        "ipad 2",
+        "ipad 3",
+        "ipad 4",
+        "ipad 5",
+        "ipad 6",
+        "ipad 7",
+        "ipad 8",
+        "ipad air 1",
+        "ipad air 2",
+        "ipad air 3",
+        "ipad air 4",
+        "ipad mini 1",
+        "ipad mini 2",
+        "ipad mini 3",
+        "ipad mini 4",
+        "16gb",
+        "32gb",
+        "32 go",
+        "16 go",
+        "32 gigas",
+        "16 gigas",
+        "nvme",
+        "ssd per macbook",
+        "solo caja",
+        "funda para",
+        "solo funda",
+        "teclado para",
+        "cristal roto"
+      ]
+    },
+    {
+      "id": "switch_std_lite",
+      "name": "🔋 Switch Estándar (<=62€) / Switch Lite (<=42€)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "keywords": "consola nintendo switch",
+      "wallapop_keywords": [
+        "consola nintendo switch",
+        "nintendo switch lite"
+      ],
+      "vinted_keywords": [
+        "consola nintendo switch",
+        "nintendo switch lite"
+      ],
+      "multi_keywords": [
+        "nintendo switch lite",
+        "consola nintendo switch"
+      ],
+      "min_price": 25,
+      "max_price": 62,
+      "submodel_price_caps": [
+        {
+          "match_any": ["lite"],
+          "unless_any": ["lote", "pack"],
+          "max_price": 42
+        }
+      ],
+      "cex_cash_ref": "50€ (Lite Sin Caja) | 70€ (Estándar Sin Caja) en efectivo CeX",
+      "est_resale": "80€ (Lite) - 108€ (Estándar)",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS NINTENDO SWITCH COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como FIFA/Overcooked/Mario, auriculares, mochilas, mandos, docks o consolas sin Joy-Cons). Mira las fotos: 1) 'Nintendo Switch Lite' (botones integrados, una sola pieza): CeX paga 50€ cash (PVP 95€), RECHAZA SIEMPRE cualquier Switch Lite que cueste más de 42€. En cex_search_query pon 'Nintendo Switch Lite'. 2) 'Nintendo Switch Estándar' (DEBE verse en las fotos con sus dos Joy-Cons acoplados; si es solo la pantalla/tablet sin Joy-Cons, pon is_valid_deal=false y has_defect_or_missing_parts=true): CeX paga 70€ cash Sin Caja (PVP 125€), acéptala hasta 62€. En cex_search_query pon 'Nintendo Switch Consola'.",
+      "must_contain_any": [
+        "switch"
+      ],
+      "blacklist": [
+        "solo tablet",
+        "sin joycon",
+        "sin joy-con",
+        "senza joycon",
+        "sans joycon",
+        "solo juego",
+        "juego switch",
+        "juego nintendo switch",
+        "juegos switch",
+        "cartucho",
+        "solo funda",
+        "funda para",
+        "volante",
+        "ring fit",
+        "just dance",
+        "fifa",
+        "solo mando",
+        "mando switch",
+        "mando pro",
+        "solo joycon",
+        "mandos sueltos",
+        "joycon suelto",
+        "joy-con",
+        "solo dock",
+        "dock suelto"
+      ]
+    },
+    {
+      "id": "rtx_gpus",
+      "name": "🧠 Tarjetas Gráficas RTX (3060 12GB / 3060 Ti / 3070 / 4060)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "milanuncios", "cashconverters", "ebay"],
+      "keywords": "rtx 3060 3070 3080 4060",
+      "wallapop_keywords": [
+        "rtx 3060",
+        "rtx 3070",
+        "rtx 3080",
+        "rtx 4060"
+      ],
+      "vinted_keywords": [
+        "rtx 3060",
+        "rtx 3070"
+      ],
+      "multi_keywords": [
+        "rtx 3060",
+        "rtx 3070",
+        "rtx 3080",
+        "rtx 4060"
+      ],
+      "min_price": 75,
+      "max_price": 175,
+      "submodel_price_caps": [
+        {
+          "match_any": ["8gb", "8 gb"],
+          "unless_any": ["3060 ti", "3060ti", "3070", "3080", "4060", "4070", "12gb"],
+          "max_price": 100
+        },
+        {
+          "match_any": ["3060"],
+          "unless_any": ["ti", "3070", "3080", "4060", "4070"],
+          "max_price": 115
+        },
+        {
+          "match_any": ["3060 ti", "3060ti", "3070"],
+          "unless_any": ["3080", "4060", "4070"],
+          "max_price": 152
+        }
+      ],
+      "cex_cash_ref": "122€ (3060 12GB) | 156€ (3060 Ti) | 162€ (3070) | 188€ (4060) | 237€ (3080) en CeX",
+      "est_resale": "165€ - 295€",
+      "ai_valuation_guide": "Verifica en las fotos que sea la tarjeta gráfica de escritorio completa y funcional (no caja vacía ni disipador suelto). Precios reales CeX España: RTX 3060 12GB (CeX paga 122€ cash, acepta <= 115€), RTX 3060 Ti 8GB (CeX paga 156€ cash, acepta <= 148€), RTX 3070 8GB (CeX paga 162€ cash, acepta <= 152€), RTX 4060 8GB (CeX paga 188€ cash, acepta <= 175€), RTX 3080 10GB (CeX paga 237€ cash, chollazo <= 175€). En cex_search_query usa 'GeForce RTX 3060 12GB', 'GeForce RTX 3060 Ti 8GB', 'GeForce RTX 3070 8GB', 'GeForce RTX 4060 8GB' o 'GeForce RTX 3080 10GB'.",
+      "must_contain_any": [
+        "3060",
+        "3070",
+        "3080",
+        "4060",
+        "4070"
+      ],
+      "blacklist": [
+        "solo caja",
+        "solo disipador",
+        "ventilador para",
+        "waterblock",
+        "bloque de agua",
+        "1050",
+        "1060",
+        "1650",
+        "1660",
+        "2060",
+        "artefactos"
+      ]
+    },
+    {
+      "id": "ps_vita",
+      "name": "💻 PS Vita (OLED 1000 / Slim 2000)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "keywords": "ps vita",
+      "wallapop_keywords": [
+        "ps vita",
+        "psvita consola"
+      ],
+      "vinted_keywords": [
+        "ps vita consola",
+        "playstation vita"
+      ],
+      "multi_keywords": [
+        "ps vita",
+        "playstation vita"
+      ],
+      "min_price": 35,
+      "max_price": 68,
+      "cex_cash_ref": "75€ (Vita 1000 Sin Caja) | 81€ (Vita 2000 Slim Sin Caja) efectivo CeX",
+      "est_resale": "115€ - 140€",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS PS VITA COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos de PS Vita, tarjetas de memoria sueltas, fundas o consolas PSP antiguas). CeX España paga 75€ cash por la PS Vita 1000 Sin Caja (PVP 135€) y 81€ cash por la PS Vita 2000 Slim Sin Caja (PVP 145€). En cex_search_query pon 'Playstation Vita Wifi' o 'Playstation Vita 2000'.",
+      "must_contain_any": [
+        "vita",
+        "psvita"
+      ],
+      "blacklist": [
+        "psp 1000",
+        "psp 2000",
+        "psp 3000",
+        "psp street",
+        "invizimals",
+        "fifa",
+        "solo funda",
+        "funda para",
+        "juego suelto",
+        "juego ps vita",
+        "juegos ps vita",
+        "lote juegos",
+        "lotto giochi",
+        "lot de jeux"
+      ]
+    },
+    {
+      "id": "retro_handhelds",
+      "name": "👾 Retro Portátiles (GBA SP AGS-101/001 / Game Boy Micro / Nintendo DSi XL)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "keywords": "game boy advance sp gameboy micro nintendo dsi xl",
+      "wallapop_keywords": [
+        "game boy advance sp",
+        "gameboy micro",
+        "nintendo dsi xl"
+      ],
+      "vinted_keywords": [
+        "game boy advance sp",
+        "nintendo dsi xl"
+      ],
+      "multi_keywords": [
+        "game boy advance sp",
+        "gameboy micro",
+        "nintendo dsi xl"
+      ],
+      "min_price": 18,
+      "max_price": 55,
+      "submodel_price_caps": [
+        {
+          "match_any": ["dsi xl", "dsi ll"],
+          "unless_any": ["advance sp", "gba sp", "micro"],
+          "max_price": 42
+        }
+      ],
+      "cex_cash_ref": "58€ (DSi XL) | 71€ (GBA SP) | 102€ (Game Boy Micro) en efectivo CeX",
+      "est_resale": "80€ - 165€",
+      "ai_valuation_guide": "CRÍTICO: Busca consolas portátiles retro originales de Nintendo en buen estado: 1) Game Boy Advance SP (plegable): CeX paga 71€ cash Sin Caja (PVP 115€), es chollo hasta 55€. 2) Game Boy Micro (metálica diminuta): CeX paga 102€ cash Sin Caja (PVP 165€), es chollazo hasta 55€. 3) Nintendo DSi XL: CeX paga 58€ cash Sin Caja (PVP 95€), es chollo si cuesta <= 42€. Rechaza consolas clónicas chinas (Anbernic, Miyoo, R36S) o DS Lite/DSi pequeñas normales. En cex_search_query usa 'Game Boy Advance SP', 'GameBoy Micro' o 'Nintendo DSi XL'.",
+      "must_contain_any": [
+        "advance sp",
+        "gba sp",
+        "micro",
+        "dsi xl"
+      ],
+      "blacklist": [
+        "anbernic",
+        "miyoo",
+        "r36s",
+        "powkiddy",
+        "sup",
+        "400 in 1",
+        "solo carcasa",
+        "carcasa para",
+        "solo funda",
+        "solo cargador"
+      ]
+    },
+    {
+      "id": "simracing_wheels",
+      "name": "🏎️ Volantes SimRacing (Logitech G29 / G923 / Thrustmaster T300)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "milanuncios", "cashconverters"],
+      "keywords": "volante logitech g29 t300",
+      "wallapop_keywords": [
+        "logitech g29",
+        "logitech g923",
+        "thrustmaster t300"
+      ],
+      "vinted_keywords": [
+        "logitech g29",
+        "thrustmaster t300"
+      ],
+      "multi_keywords": [
+        "logitech g29",
+        "thrustmaster t300"
+      ],
+      "min_price": 35,
+      "max_price": 82,
+      "submodel_price_caps": [
+        {
+          "match_any": ["g920"],
+          "unless_any": ["g29", "g923", "t300"],
+          "max_price": 48
+        },
+        {
+          "match_any": ["g29"],
+          "unless_any": ["g923", "t300", "shifter", "palanca"],
+          "max_price": 65
+        }
+      ],
+      "cex_cash_ref": "55€ (G920) | 72€ (G29 + Pedales) | 91€ (T300 RS) | 98€ (G923) en efectivo CeX",
+      "est_resale": "115€ - 165€",
+      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos que incluya VOLANTE Y PEDALES. Precios reales CeX España: Logitech G29 Volante + Pedales (CeX paga 72€ cash y 101€ vale, PVP 145€ -> acepta hasta 65€), Logitech G920 (CeX paga 55€ cash -> acepta <= 48€), Logitech G923 (CeX paga 98€ cash, PVP 165€ -> chollo hasta 82€), Thrustmaster T300 RS (CeX paga 91€ cash, PVP 175€ -> chollo hasta 82€). En cex_search_query pon 'Logitech G29 Volante + Pedales', 'Logitech G920 Volante + Pedales', 'Logitech G923 Volante + Pedales' o 'Thrustmaster T300 RS Volante + Pedales'.",
+      "must_contain_any": [
+        "g29",
+        "g920",
+        "g923",
+        "t300"
+      ],
+      "blacklist": [
+        "solo soporte",
+        "wheel stand",
+        "playseat",
+        "solo pomo",
+        "solo pedales",
+        "adaptador",
+        "g25",
+        "g27"
+      ]
+    },
+    {
+      "id": "kindle_ereaders",
+      "name": "📖 Kindle Paperwhite (10ª / 11ª Gen) y Oasis",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "keywords": "kindle paperwhite",
+      "wallapop_keywords": [
+        "kindle paperwhite 11",
+        "kindle oasis"
+      ],
+      "vinted_keywords": [
+        "kindle paperwhite 11",
+        "kindle oasis"
+      ],
+      "multi_keywords": [
+        "kindle paperwhite",
+        "kindle oasis"
+      ],
+      "min_price": 18,
+      "max_price": 46,
+      "submodel_price_caps": [
+        {
+          "match_any": ["10", "10a", "10ª", "10eme", "10ème", "pq94wif", "8gb", "8 gb"],
+          "unless_any": ["11", "11a", "11ª", "12", "6.8", "m2l3ek", "16gb", "oasis"],
+          "max_price": 30
+        }
+      ],
+      "cex_cash_ref": "35€ (PW 10ª Gen) | 50€-67€ (PW 11ª Gen) | 85€ (Oasis) en efectivo CeX",
+      "est_resale": "65€ - 125€",
+      "ai_valuation_guide": "CRÍTICO: Rechaza los Kindle básicos antiguos o Paperwhite viejos (1ª a 7ª gen con pantalla hundida y marco grueso). Precios reales CeX España: 1) Kindle Paperwhite 10ª Gen (frontal plano, micro-USB, PQ94WIF): CeX paga solo 35€ cash (PVP 65€), acéptalo SOLO si cuesta <= 30€. 2) Kindle Paperwhite 11ª Gen (pantalla 6.8\" marcos finos y USB-C, M2L3EK): CeX paga 50€ (8GB) a 67€ (16GB) cash, chollo hasta 46€. 3) Kindle Oasis (cuadrado con 2 botones laterales): CeX paga 85€+ cash, chollazo hasta 46€. En cex_search_query pon 'Amazon Kindle Paperwhite 10 8GB', 'Amazon Kindle Paperwhite 11 8GB', 'Amazon Kindle Paperwhite 11 16GB' o 'Amazon Kindle Oasis'.",
+      "must_contain_any": [
+        "kindle",
+        "paperwhite",
+        "oasis"
+      ],
+      "blacklist": [
+        "solo funda",
+        "funda para",
+        "carcasa para",
+        "pantalla rota",
+        "rayas en pantalla",
+        "coque kindle",
+        "custodia kindle",
+        "etui kindle",
+        "étui kindle",
+        "housse kindle"
+      ]
+    },
+    {
+      "id": "minipc_homelab",
+      "name": "🖥️ Mini PC HomeLab (Pausado: Sin liquidez efectiva en CeX)",
+      "enabled": false,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["ebay", "wallapop", "milanuncios", "cashconverters"],
+      "keywords": "thinkcentre tiny elitedesk mini optiplex micro",
+      "wallapop_keywords": [
+        "thinkcentre m720q",
+        "thinkcentre m920q"
+      ],
+      "vinted_keywords": [
+        "thinkcentre"
+      ],
+      "multi_keywords": [
+        "thinkcentre tiny"
+      ],
+      "min_price": 35,
+      "max_price": 75,
+      "cex_cash_ref": "Sin liquidez garantizada en CeX España",
+      "est_resale": "120€ - 165€",
+      "ai_valuation_guide": "Mini PCs corporativos 8ª Gen+.",
+      "must_contain_any": [
+        "thinkcentre",
+        "elitedesk",
+        "prodesk",
+        "optiplex"
+      ],
+      "blacklist": [
+        "celeron",
+        "pentium",
+        "core 2"
+      ]
+    },
+    {
+      "id": "graphing_calculators",
+      "name": "🧮 Calculadoras Gráficas (Pausado: CeX España no compra calculadoras)",
+      "enabled": false,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "keywords": "hp prime ti-nspire cx ti-84 plus ce",
+      "wallapop_keywords": [
+        "hp prime",
+        "ti-nspire cx"
+      ],
+      "vinted_keywords": [
+        "hp prime",
+        "ti-nspire"
+      ],
+      "multi_keywords": [
+        "calculadora hp prime"
+      ],
+      "min_price": 18,
+      "max_price": 45,
+      "cex_cash_ref": "No disponible en CeX España",
+      "est_resale": "80€ - 110€",
+      "ai_valuation_guide": "Calculadoras gráficas.",
+      "must_contain_any": [
+        "hp prime",
+        "nspire"
+      ],
+      "blacklist": [
+        "fx-82",
+        "fx-991"
+      ]
+    }
+  ]
+}

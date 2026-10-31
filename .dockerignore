@@ -1,0 +1,11 @@
+_archive/
+__pycache__/
+*.py[cod]
+*.bak*
+*.backup*
+.env
+data/
+kits/
+.git/
+AGENTS.md
+

@@ -1,0 +1,78 @@
+services:
+  wallapop-sniper:
+    build: .
+    image: boti-sniper:v4.1
+    container_name: wallapop-sniper
+    restart: unless-stopped
+    command: ["python", "-u", "sniper.py"]
+    env_file:
+      - .env
+    environment:
+      - SCAN_INTERVAL_SECONDS=38
+      - TZ=Europe/Madrid
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./data:/app/data
+      - ./kits:/app/kits
+      - ./config.json:/app/config.json:ro
+      - ./antiban.py:/app/antiban.py:ro
+      - ./core_engine.py:/app/core_engine.py:ro
+      - ./sniper.py:/app/sniper.py:ro
+
+  vinted-sniper:
+    image: boti-sniper:v4.1
+    container_name: vinted-sniper
+    restart: unless-stopped
+    command: ["python", "-u", "vinted_sniper.py"]
+    env_file:
+      - .env
+    environment:
+      - SCAN_INTERVAL_SECONDS=45
+      - TZ=Europe/Madrid
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./data:/app/data
+      - ./kits:/app/kits
+      - ./config.json:/app/config.json:ro
+      - ./antiban.py:/app/antiban.py:ro
+      - ./core_engine.py:/app/core_engine.py:ro
+      - ./vinted_sniper.py:/app/vinted_sniper.py:ro
+
+  multi-sniper:
+    image: boti-sniper:v4.1
+    container_name: multi-sniper
+    restart: unless-stopped
+    command: ["python", "-u", "multi_sniper.py"]
+    env_file:
+      - .env
+    environment:
+      - MULTI_SCAN_INTERVAL_SECONDS=45
+      - TZ=Europe/Madrid
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./data:/app/data
+      - ./kits:/app/kits
+      - ./config.json:/app/config.json:ro
+      - ./antiban.py:/app/antiban.py:ro
+      - ./core_engine.py:/app/core_engine.py:ro
+      - ./multi_sniper.py:/app/multi_sniper.py:ro
+
+  relister-bot:
+    image: boti-sniper:v4.1
+    container_name: relister-bot
+    restart: unless-stopped
+    command: ["python", "-u", "bot.py"]
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Madrid
+      - PYTHONIOENCODING=utf-8
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    volumes:
+      - ./data:/app/data
+      - ./kits:/app/kits
+      - ./config.json:/app/config.json
+      - ./antiban.py:/app/antiban.py:ro
+      - ./core_engine.py:/app/core_engine.py:ro
+      - ./bot.py:/app/bot.py:ro
