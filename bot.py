@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Boti Relister & Command Center v4.0 (El Bot Definitivo de Discord).
+Boti Relister & Command Center v4.3 (El Bot Definitivo de Discord).
 Incluye:
-- Botones interactivos persistentes en cada alerta de #avisos_chollos (¡Comprado! -> Reventa, Regateo 1-Clic, Grados CeX, Descartar).
-- /kits     : Centro de Reventa con IA Copywriter (tono Particular Meticuloso, 0 truncamientos JSON) y optimizador EXIF de fotos.
-- /tasar    : Tasador en vivo CeX España (Algolia) + Auditoría IA de precio de reventa en 48h y compra máxima recomendada.
-- /radares  : Panel de control en vivo para activar/pausar nichos y editar precios/filtros de config.json desde Discord.
-- /cartera  : Contabilidad de arbitraje (Stock comprado, Registrar Venta, Capital invertido, Beneficio Neto Real y ROI %).
-- /estado   : Telemetría en tiempo real de los 6 mercados (Wallapop, Vinted, Milanuncios, CashConverters, TodoColección, eBay).
+- Botones interactivos persistentes en cada alerta de #avisos_chollos (¡Comprado! -> Reventa, Regateo Multilingüe 1-Clic, Grados CeX, Descartar).
+- Soporte completo para Oportunidades de Chollo (Hacer Oferta) y enlaces directos 1-Tap.
+- /kits    : Centro de Reventa con IA Copywriter (tono Particular Meticuloso, 0 truncamientos JSON) y optimizador EXIF de fotos.
+- /tasar   : Tasador en vivo CeX España (Algolia) + Auditoría IA de precio de reventa en 48h y compra máxima recomendada.
+- /radares : Panel de control en vivo para activar/pausar nichos y editar precios/filtros de config.json desde Discord.
+- /cartera : Contabilidad de arbitraje (Stock comprado, Registrar Venta, Capital invertido, Beneficio Neto Real y ROI %).
+- /estado  : Telemetría en tiempo real de los 6 mercados (Wallapop, Vinted, Milanuncios, CashConverters, TodoColección, eBay).
 - /guia y /ayuda
 """
 
@@ -18,6 +19,7 @@ import json
 import glob
 import time
 import asyncio
+import urllib.parse
 from datetime import datetime
 from PIL import Image, ImageOps, ImageEnhance
 
@@ -30,7 +32,8 @@ from core_engine import (
     DB_PATH, CONFIG_PATH, KITS_DIR,
     init_db, load_config, fetch_cex_live,
     download_item_images, enhance_and_clean_image,
-    build_kit_folder_name, save_resale_kit
+    build_kit_folder_name, save_resale_kit,
+    normalize_and_build_links, generate_multilingual_haggle_msg
 )
 
 # ==================== CONFIGURACIÓN Y VARIABLES ====================
@@ -50,8 +53,16 @@ active_sessions = {}
 
 
 def save_config(cfg):
+    clean_cfg = dict(cfg)
+    clean_targets = []
+    for t in cfg.get("targets", []):
+        tc = dict(t)
+        if "direct_buy_max_price" in tc:
+            tc["max_price"] = int(tc.pop("direct_buy_max_price"))
+        clean_targets.append(tc)
+    clean_cfg["targets"] = clean_targets
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(clean_cfg, f, ensure_ascii=False, indent=2)
 
 
 # ==================== UTILIDADES DE KITS Y FOTOS ====================
@@ -136,7 +147,7 @@ def enhance_photo_organic(img_bytes):
         return buf.getvalue()
 
 
-# ==================== IA COPYWRITER Y TASADOR (0 TRUNCAMIENTOS JSON) ====================
+# ==================== IA COPYWRITER Y TASADOR ====================
 
 def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, desired_price="", seller_city=SELLER_CITY):
     prompt = f"""
@@ -156,7 +167,7 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
     - CIUDAD PARA TRATO EN MANO: {seller_city}
 
     REGLAS DE ORO DE REDACCIÓN NATURAL (OBLIGATORIAS):
-    1. TONO: Particular cuidadoso y honesto que cuida al máximo sus cosas. Cero lenguaje de marketing ni palabras grandilocuentes ("joya de la corona", "solución definitiva", "potencia tus partidas", "chollo", "ofertón", "experiencia inmersiva").
+    1. TONO: Particular cuidadoso y honesto que cuida al máximo sus cosas. Cero lenguaje de marketing ni palabras grandilocuentes.
     2. PROHIBIDO USAR FRASES DE ESLOGAN: La primera línea debe empezar directamente con:
        "Vendo [Producto exacto] en un estado [excelente / impoluto / muy bueno], ideal para [uso o público]. Funciona a la perfección, muy cuidado/a."
     3. MÁXIMO 1 SIGNO DE EXCLAMACIÓN EN TODO EL TEXTO: La única exclamación permitida va en la frase final: "¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!".
@@ -357,7 +368,7 @@ class ExtrasModal(discord.ui.Modal, title="Personalizar Anuncio y Extras"):
             ),
             color=0x2ECC71
         )
-        embed.set_footer(text=f"Boti Relister v4.0 • Trato en mano en {SELLER_CITY}")
+        embed.set_footer(text=f"Boti Relister v4.3 • Trato en mano en {SELLER_CITY}")
         view = PhotoChoiceView(user_id)
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -625,7 +636,7 @@ async def finalize_listing(interaction_or_channel, user_id, use_original_photos=
             f"📱 **Copia los bloques de abajo con 1 toque en tu móvil:**"
         )
     )
-    embed.set_footer(text="Boti Relister v4.0 • Redacción Natural Particular Meticuloso")
+    embed.set_footer(text="Boti Relister v4.3 • Redacción Natural Particular Meticuloso")
 
     files_to_send = [discord.File(io.BytesIO(pb), filename=f"foto_{i}.jpg") for i, pb in enumerate(output_photos[:6], start=1)]
 
@@ -648,6 +659,7 @@ class RadarEditModal(discord.ui.Modal):
     def __init__(self, target_idx, target_data):
         super().__init__(title=f"Editar: {target_data['name'][:32]}")
         self.target_idx = target_idx
+        base_max = target_data.get("direct_buy_max_price") or target_data.get("max_price", 100)
 
         self.min_p = discord.ui.TextInput(
             label="Precio Mínimo (€)",
@@ -656,8 +668,8 @@ class RadarEditModal(discord.ui.Modal):
             max_length=10
         )
         self.max_p = discord.ui.TextInput(
-            label="Precio Máximo (€)",
-            default=str(target_data.get("max_price", 100)),
+            label="Precio Máximo Compra Directa (€)",
+            default=str(base_max),
             required=True,
             max_length=10
         )
@@ -680,10 +692,13 @@ class RadarEditModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            cfg = load_config()
+            cfg = load_config(expand_for_offers=False)
             t = cfg["targets"][self.target_idx]
-            t["min_price"] = int(float(self.min_p.value.strip()))
-            t["max_price"] = int(float(self.max_p.value.strip()))
+            new_min = int(float(self.min_p.value.strip()))
+            new_max = int(float(self.max_p.value.strip()))
+            t["min_price"] = new_min
+            t["max_price"] = new_max
+            t["direct_buy_max_price"] = new_max
             tier_val = self.tier_in.value.strip().lower()
             t["tier"] = "hot" if "hot" in tier_val else "standard"
 
@@ -696,11 +711,12 @@ class RadarEditModal(discord.ui.Modal):
                 t["blacklist"] = current_bl
 
             save_config(cfg)
+            offer_max = int(round(new_max * 1.30))
             await interaction.response.send_message(
                 f"✅ **Radar actualizado en vivo en `config.json`:**\n"
                 f"• **Radar:** {t['name']}\n"
-                f"• **Nuevo rango:** `{t['min_price']}€ - {t['max_price']}€` | **Tier:** `{t['tier'].upper()}`\n"
-                f"• Los snipers aplicarán el cambio automáticamente en su siguiente ronda.",
+                f"• **Compra Directa:** `{new_min}€ - {new_max}€` *(Escaneo Ofertas +30%: hasta `{offer_max}€`)*\n"
+                f"• **Prioridad:** `{t['tier'].upper()}`",
                 ephemeral=True
             )
         except Exception as e:
@@ -714,7 +730,7 @@ class RadarActionView(discord.ui.View):
 
     @discord.ui.button(label="Activar / Pausar Radar", style=discord.ButtonStyle.primary, emoji="⏯️")
     async def toggle_radar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cfg = load_config()
+        cfg = load_config(expand_for_offers=False)
         t = cfg["targets"][self.target_idx]
         t["enabled"] = not t.get("enabled", True)
         save_config(cfg)
@@ -723,7 +739,7 @@ class RadarActionView(discord.ui.View):
 
     @discord.ui.button(label="Editar Precios / Prioridad / Blacklist", style=discord.ButtonStyle.success, emoji="✏️")
     async def edit_radar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cfg = load_config()
+        cfg = load_config(expand_for_offers=False)
         t = cfg["targets"][self.target_idx]
         await interaction.response.send_modal(RadarEditModal(self.target_idx, t))
 
@@ -736,11 +752,12 @@ class RadarSelectView(discord.ui.View):
             enabled = t.get("enabled", True)
             tier = t.get("tier", "hot").upper()
             mode = "SERVIDOR" if t.get("mode") == "personal" else "REVENTA"
+            base_max = t.get("direct_buy_max_price") or t.get("max_price", 100)
             plats = ",".join([p[:4].upper() for p in t.get("platforms", ["walla", "vint"])])
             options.append(discord.SelectOption(
                 label=f"{'🟢' if enabled else '🔴'} {t['name'][:85]}",
                 value=str(idx),
-                description=f"{t['min_price']}-{t['max_price']}€ • {tier} • {mode} • [{plats}]"[:95]
+                description=f"{t['min_price']}-{base_max}€ (Ofertas: {int(base_max*1.3)}€) • {tier} • {mode} [{plats}]"[:95]
             ))
         self.sel = discord.ui.Select(placeholder="Selecciona un radar para configurar o pausar...", options=options)
         self.sel.callback = self.on_select
@@ -751,16 +768,17 @@ class RadarSelectView(discord.ui.View):
         cfg = load_config()
         t = cfg["targets"][idx]
         enabled = t.get("enabled", True)
+        base_max = t.get("direct_buy_max_price") or t.get("max_price", 100)
         embed = discord.Embed(
             title=f"🎯 Configuración: {t['name']}",
             color=0x2ECC71 if enabled else 0xE74C3C,
             description=(
                 f"• **Estado:** {'🟢 Activo' if enabled else '🔴 Pausado'}\n"
                 f"• **Modo:** `{t.get('mode', 'resale').upper()}` | **Prioridad:** `{t.get('tier', 'hot').upper()}`\n"
-                f"• **Rango de Compra:** **`{t['min_price']}€ — {t['max_price']}€`**\n"
+                f"• **Rango Compra Directa:** **`{t['min_price']}€ — {base_max}€`**\n"
+                f"• **Techo Escaneo Ofertas (+30%):** **`hasta {t['max_price']}€`**\n"
                 f"• **Mercados:** `{', '.join(t.get('platforms', []))}`\n"
-                f"• **Ref. CeX / Mercado:** {t.get('cex_cash_ref', 'N/A')}\n"
-                f"• **Queries Wallapop:** `{', '.join(t.get('wallapop_keywords', [t.get('keywords', '')]))}`"
+                f"• **Ref. CeX / Mercado:** {t.get('cex_cash_ref', 'N/A')}"
             )
         )
         await interaction.response.send_message(embed=embed, view=RadarActionView(idx), ephemeral=True)
@@ -867,7 +885,6 @@ async def on_interaction(interaction: discord.Interaction):
     conn = init_db()
     c = conn.cursor()
 
-    # 4. BOTÓN: 🚫 Descartar (también funciona para avisos Flash o antiguos)
     if action == "hide":
         try:
             c.execute("UPDATE deals SET status = 'discarded' WHERE deal_id = ?", (deal_id,))
@@ -878,14 +895,15 @@ async def on_interaction(interaction: discord.Interaction):
         try:
             await interaction.message.delete()
         except Exception:
-            await interaction.response.send_message("🚫 Chollo descartado.", ephemeral=True)
+            await interaction.response.send_message("🚫 Aviso descartado.", ephemeral=True)
         return
 
     c.execute(
-        """SELECT deal_id, platform, item_id, title, price, landed_cost, optimal_price, net_profit,
+        """SELECT deal_id, platform, item_id, title, description, price, landed_cost, fees, optimal_price, net_profit,
                   identified_model, cex_search_query, item_url, kit_folder, fast_msg, haggle_msg,
                   seo_title, seo_description, value_add_tip, mode, radar_id,
-                  image_url, COALESCE(image_urls_json, '[]'), COALESCE(visual_notes, '')
+                  image_url, COALESCE(image_urls_json, '[]'), COALESCE(visual_notes, ''),
+                  COALESCE(deal_type, 'direct_chollo'), COALESCE(recommended_offer, 0)
            FROM deals WHERE deal_id = ?""",
         (deal_id,)
     )
@@ -893,28 +911,35 @@ async def on_interaction(interaction: discord.Interaction):
 
     if not row:
         conn.close()
-        await interaction.response.send_message("⚠️ Este anuncio es anterior a la base de datos v4.0 o ya no existe.", ephemeral=True)
+        await interaction.response.send_message("⚠️ Este anuncio es anterior a la base de datos actual o ya no existe.", ephemeral=True)
         return
 
     (
-        _, plat, item_id, title, price, landed_cost, optimal_price, net_profit,
+        _, plat, item_id, title, desc_text, price, landed_cost, fees, optimal_price, net_profit,
         model_name, cex_q, item_url, kit_folder, fast_msg, haggle_msg,
         seo_title, seo_desc, tip, mode, radar_id,
-        image_url, image_urls_json, visual_notes
+        image_url, image_urls_json, visual_notes,
+        deal_type, recommended_offer
     ) = row
 
-    # 1. BOTÓN: 📋 Mensajes / Regateo 1-Clic
+    clean_item_url, clean_checkout_url = normalize_and_build_links(plat, item_id, item_url)
+
+    # 1. BOTÓN: 📋 Mensajes / Regateo 1-Clic (con soporte multilingüe ES/FR/IT y oferta calculada)
     if action == "msg":
         conn.close()
-        f_msg = fast_msg or f"Hola! Me interesa el {model_name}, funciona todo bien? Si está disponible te lo compro ahora mismo por la aplicación."
-        h_price = max(10, int(price * 0.84))
-        h_msg = haggle_msg or f"Hola! Si te cuadran {h_price}€ te lo compro ahora mismo con pago inmediato por la aplicación, sin mareos. Gracias!"
+        offer_val = int(round(recommended_offer)) if recommended_offer and recommended_offer > 0 else max(15, int(round(price * 0.82)))
+        f_msg = fast_msg or f"¡Hola! Me interesa el {model_name}, ¿funciona todo correctamente? Si está disponible te lo compro ahora mismo por la aplicación."
+        msg_es = generate_multilingual_haggle_msg(title, desc_text, "ES", offer_val, model_name)
+        msg_fr = generate_multilingual_haggle_msg(title, desc_text, "FR", offer_val, model_name)
+        msg_it = generate_multilingual_haggle_msg(title, desc_text, "IT", offer_val, model_name)
+
         await interaction.response.send_message(
-            f"📱 **Toca el bloque que prefieras para copiarlo con 1 toque:**\n\n"
-            f"⚡ **Opción 1: Compra Directa / Asegurar Chollo ({price:.0f}€)**\n"
-            f"```text\n{f_msg}\n```\n"
-            f"🤝 **Opción 2: Regateo Rápido Pago Inmediato (~{h_price}€)**\n"
-            f"```text\n{h_msg}\n```",
+            f"🎯 **Oferta Recomendada para Rentabilidad Segura: `{offer_val}€`** *(Anuncio: `{price:.0f}€`)*\n"
+            f"👉 [Abrir Anuncio para Lanzar Oferta]({clean_item_url})\n\n"
+            f"🇪🇸 **Oferta en Español ({offer_val}€):**\n```text\n{msg_es}\n```\n"
+            f"🇫🇷 **Oferta en Francés (Vinted FR/BE - {offer_val}€):**\n```text\n{msg_fr}\n```\n"
+            f"🇮🇹 **Oferta en Italiano (Vinted IT - {offer_val}€):**\n```text\n{msg_it}\n```\n"
+            f"⚡ **Compra Directa ({price:.0f}€):**\n```text\n{f_msg}\n```",
             ephemeral=True
         )
         return
@@ -932,9 +957,10 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.followup.send(f"🔍 No se encontraron variantes activas en CeX España para `{q_use}`.", ephemeral=True)
             return
 
+        effective_landed = (recommended_offer + fees) if (deal_type == "offer_opportunity" and recommended_offer > 0) else landed_cost
         lines = []
         for v in variants[:6]:
-            diff_cash = v["cash"] - landed_cost
+            diff_cash = v["cash"] - effective_landed
             sign = "+" if diff_cash >= 0 else ""
             stock_icon = "🟢" if v.get("in_stock_online") else "⚪"
             lines.append(
@@ -944,15 +970,16 @@ async def on_interaction(interaction: discord.Interaction):
 
         embed = discord.Embed(
             title=f"🏪 Desglose CeX España en Vivo: {q_use}",
-            description=f"💳 **Tu coste puesto en casa:** **`{landed_cost:.0f}€`**\n\n" + "\n\n".join(lines),
+            description=f"💳 **Coste de referencia en casa:** **`{effective_landed:.0f}€`**\n\n" + "\n\n".join(lines),
             color=0xE74C3C
         )
-        embed.set_footer(text="Datos en tiempo real vía Algolia CeX España (🟢 =Con stock online)")
+        embed.set_footer(text="Datos en tiempo real vía Algolia CeX España (🟢 = Con stock online)")
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
-    # 3. BOTÓN: ✅ ¡Comprado! -> Cartera + Generar Kit Bajo Demanda + Lanzar Reventa
+    # 3. BOTÓN: ✅ ¡Comprado! -> Cartera + Generar Kit Bajo Demanda
     elif action == "buy":
+        real_paid_landed = (recommended_offer + fees) if (deal_type == "offer_opportunity" and recommended_offer > 0) else landed_cost
         ai_data_kit = {
             "identified_model": model_name or title,
             "value_add_tip": tip or "Venta rápida en 48h",
@@ -963,7 +990,7 @@ async def on_interaction(interaction: discord.Interaction):
 
         c.execute(
             "UPDATE deals SET status = 'bought', bought_price = ?, kit_folder = ? WHERE deal_id = ?",
-            (landed_cost, kit_folder, deal_id)
+            (real_paid_landed, kit_folder, deal_id)
         )
         conn.commit()
         conn.close()
@@ -984,8 +1011,8 @@ async def on_interaction(interaction: discord.Interaction):
             existing_clean = glob.glob(os.path.join(full_kit_path, "foto_*_limpia.jpg")) if os.path.exists(full_kit_path) else []
             if not os.path.exists(full_kit_path):
                 save_resale_kit(
-                    kit_folder, plat, item_id, title, item_url,
-                    ai_data_kit, optimal_price, landed_cost, [], image_urls=img_urls
+                    kit_folder, plat, item_id, title, clean_item_url,
+                    ai_data_kit, optimal_price, real_paid_landed, [], image_urls=img_urls
                 )
             if not existing_clean and img_urls:
                 need_photo_download = True
@@ -1006,7 +1033,7 @@ async def on_interaction(interaction: discord.Interaction):
             await interaction.response.send_message(
                 f"🎉 **¡Compra Personal Registrada para tu Servidor!**\n"
                 f"• **Disco / Hardware:** `{model_name}`\n"
-                f"• **Coste Puesto en Casa:** **`{landed_cost:.0f}€`** *(Ahorro estimado: **`+{net_profit:.0f}€`**)*\n"
+                f"• **Coste Puesto en Casa:** **`{real_paid_landed:.0f}€`** *(Ahorro estimado: **`+{net_profit:.0f}€`**)*\n"
                 f"• Guardado en `/cartera`.",
                 ephemeral=False
             )
@@ -1015,8 +1042,8 @@ async def on_interaction(interaction: discord.Interaction):
             if need_photo_download:
                 await asyncio.to_thread(
                     _generate_kit_photos_sync,
-                    kit_folder, plat, item_id, title, item_url,
-                    ai_data_kit, optimal_price, landed_cost, img_urls
+                    kit_folder, plat, item_id, title, clean_item_url,
+                    ai_data_kit, optimal_price, real_paid_landed, img_urls
                 )
         return
 
@@ -1044,7 +1071,7 @@ async def slash_kits(interaction: discord.Interaction):
         return
     view = KitSelectView(kits)
     embed = discord.Embed(
-        title="📦 Centro de Reventa Automático (Boti Relister v4.0)",
+        title="📦 Centro de Reventa Automático (Boti Relister v4.3)",
         description="Selecciona cualquier chollo detectado o comprado para generar su anuncio optimizado:",
         color=0x9B59B6
     )
@@ -1054,7 +1081,7 @@ async def slash_kits(interaction: discord.Interaction):
 
 @bot.tree.command(name="tasar", description="Tasa cualquier producto en vivo con CeX España + IA de Reventa")
 @app_commands.describe(
-    producto="Modelo a tasar (ej: 'New Nintendo 3DS XL', 'Samsung 870 EVO 1TB', 'Sony A6000')",
+    producto="Modelo a tasar (ej: 'New Nintendo 3DS XL', 'WD Red 4TB', 'Sony A6000')",
     precio_compra="Precio que te piden por él con envío incluido (opcional)"
 )
 async def slash_tasar(interaction: discord.Interaction, producto: str, precio_compra: float = 0.0):
@@ -1110,7 +1137,7 @@ async def slash_tasar(interaction: discord.Interaction, producto: str, precio_co
 
     cex_url = f"https://es.webuy.com/search?stext={urllib.parse.quote(producto)}"
     embed.add_field(name="🔗 Enlaces Directos", value=f"[Abrir en CeX webuy.com]({cex_url})", inline=False)
-    embed.set_footer(text="Boti Tasador v4.0 • Algolia CeX Live + Gemini Flash Auditor")
+    embed.set_footer(text="Boti Tasador v4.3 • Algolia CeX Live + Gemini Flash Auditor")
     await interaction.followup.send(embed=embed)
 
 
@@ -1122,20 +1149,24 @@ async def slash_radares(interaction: discord.Interaction):
     for t in targets:
         st = "🟢" if t.get("enabled", True) else "🔴"
         tier_icon = "🔥" if t.get("tier", "hot") == "hot" else "⏱️"
+        base_max = t.get("direct_buy_max_price") or t.get("max_price", 100)
         plats = "/".join([p[:2].upper() for p in t.get("platforms", [])])
-        lines.append(f"{st} {tier_icon} **{t['name']}** — `{t['min_price']}€ a {t['max_price']}€` *[{plats}]*")
+        lines.append(
+            f"{st} {tier_icon} **{t['name']}** — Directo: `{t['min_price']}-{base_max}€` "
+            f"*(Ofertas: `{t['max_price']}€`)* *[{plats}]*"
+        )
 
     embed = discord.Embed(
         title="🎛️ Centro de Control de Radares (`config.json` en Vivo)",
         description=(
             f"💰 **Margen mín. Reventa:** `+{cfg.get('min_net_profit_eur', 35)}€` | "
             f"💾 **Ahorro mín. Servidor:** `+{cfg.get('min_personal_savings_eur', 25)}€` | "
-            f"⭐ **Nota mín.:** `{cfg.get('min_deal_score', 8)}/10`\n\n"
+            f"🤝 **Modo Ofertas (+30%):** `ACTIVO`\n\n"
             + "\n".join(lines)
         )[:4000],
         color=0x1ABC9C
     )
-    embed.set_footer(text="🔥 = Escaneo en cada ronda (Hot Tier) • ⏱️ = Escaneo alterno (Standard Tier)")
+    embed.set_footer(text="🔥 = Hot Tier • 🤝 = Escanea hasta +30% sobre el precio máximo para cazar Oportunidades de Oferta")
     await interaction.response.send_message(embed=embed, view=RadarSelectView(targets))
 
 
@@ -1195,7 +1226,7 @@ async def slash_cartera(interaction: discord.Interaction):
             + ("\n".join(stock_lines[:15]) if stock_lines else "*(No tienes artículos marcados como comprados actualmente. Pulsa **✅ ¡Comprado!** en cualquier alerta de `#avisos_chollos` para añadirlo a tu cartera).*")
         )
     )
-    embed.set_footer(text="Boti Portfolio Manager v4.0 • Selecciona un artículo abajo cuando lo vendas")
+    embed.set_footer(text="Boti Portfolio Manager v4.3 • Selecciona un artículo abajo cuando lo vendas")
     await interaction.response.send_message(embed=embed, view=PortfolioView(active_items))
 
 
@@ -1213,7 +1244,7 @@ async def slash_estado(interaction: discord.Interaction):
     cex_cnt = c.fetchone()[0]
 
     c.execute(
-        """SELECT platform, identified_model, price, net_profit, deal_score, item_url
+        """SELECT platform, identified_model, price, net_profit, deal_score, item_url, COALESCE(deal_type, 'direct_chollo'), COALESCE(recommended_offer, 0)
            FROM deals ORDER BY created_at DESC LIMIT 5"""
     )
     recent_deals = c.fetchall()
@@ -1233,11 +1264,14 @@ async def slash_estado(interaction: discord.Interaction):
     ]
 
     deal_lines = []
-    for plat, mod, pr, prof, sc, url in recent_deals:
-        deal_lines.append(f"• **[{plat}]** [{mod}]({url}) — `{pr:.0f}€` (**`+{prof:.0f}€`** | ⭐ `{sc}/10`)")
+    for plat, mod, pr, prof, sc, url, dtype, rec_off in recent_deals:
+        if dtype == "offer_opportunity" and rec_off > 0:
+            deal_lines.append(f"• 🤝 **[{plat}]** [{mod}]({url}) — Ofertar `{rec_off:.0f}€` (Anuncio `{pr:.0f}€` | **`+{prof:.0f}€`** | 🎯 `{sc}/10`)")
+        else:
+            deal_lines.append(f"• 🔥 **[{plat}]** [{mod}]({url}) — `{pr:.0f}€` (**`+{prof:.0f}€`** | ⭐ `{sc}/10`)")
 
     embed = discord.Embed(
-        title="📡 Telemetría Global: Boti Sniper Suite v4.0",
+        title="📡 Telemetría Global: Boti Sniper Suite v4.3",
         color=0x2ECC71,
         description=(
             f"🎯 **Radares Activos:** `{active_radars}/{len(cfg.get('targets', []))}` | "
@@ -1247,8 +1281,8 @@ async def slash_estado(interaction: discord.Interaction):
         )
     )
     if deal_lines:
-        embed.add_field(name="🔥 Últimos 5 Chollos Detectados", value="\n".join(deal_lines)[:1020], inline=False)
-    embed.set_footer(text=f"Servidor Linux miky-p6657es • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        embed.add_field(name="🔥 Últimos 5 Chollos y Oportunidades de Oferta", value="\n".join(deal_lines)[:1020], inline=False)
+    embed.set_footer(text=f"Servidor Linux Homelab • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -1272,23 +1306,22 @@ async def slash_guia(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="ayuda", description="Muestra todos los comandos y automatizaciones de Boti v4.0")
+@bot.tree.command(name="ayuda", description="Muestra todos los comandos y automatizaciones de Boti v4.3")
 async def slash_ayuda(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🤖 Centro de Mando Boti Arbitrage & Homelab v4.0",
+        title="🤖 Centro de Mando Boti Arbitrage & Homelab v4.3",
         color=0x3498DB,
         description=(
-            "**Botones Interactivos en `#avisos_chollos`:**\n"
-            "• **⚡ Comprar en {Plataforma}:** Te abre el anuncio directamente en la app o web oficial con el botón 'Comprar' listo para pago en 1 toque.\n"
-            "• **📋 Mensajes / Regateo 1-Clic:** Genera mensajes de compra directa y regateo (-15%) copiables con 1 toque.\n"
-            "• **📊 Grados CeX:** Consulta en tiempo real todos los precios de CeX España (Caja, Sin Caja, Rebajada).\n"
-            "• **✅ ¡Comprado! -> Reventa:** Registra la compra en `/cartera` y abre el creador del anuncio de reventa.\n\n"
+            "**Sistema de Doble Alerta Push & Oportunidades de Oferta:**\n"
+            "• **⚡ Flash Sin IA:** Te avisa en 50ms cuando sale un anuncio dentro del precio de compra directa.\n"
+            "• **📲 2ª Notificación Push (Veredicto IA):** Mientras estás comprando, te llega una segunda notificación indicando `🛑 ¡DETÉN LA COMPRA!` (si tiene fallos/estafa) o `🚨 ¡SIGUE CON LA COMPRA!` (si está confirmado).\n"
+            "• **🤝 Oportunidad de Chollo (6-7/10):** Detecta productos impecables un poco caros y te da el precio exacto a ofertar y el texto en FR/IT/ES listo para copiar.\n\n"
             "**Slash Commands disponibles:**\n"
             "• `/tasar <producto> [precio]`: Tasación instantánea en CeX España + IA de reventa en 48h.\n"
             "• `/radares`: Activa/pausa nichos y edita precios o blacklist de `config.json` en vivo.\n"
             "• `/cartera`: Controla tu stock comprado, registra ventas cerradas y mide tu ROI real.\n"
             "• `/kits`: Genera anuncios de reventa con redacción natural y limpieza EXIF de fotos.\n"
-            "• `/estado`: Estadísticas en vivo de los 6 mercados (Wallapop, Vinted, Milanuncios, CashConverters, TodoColección, eBay).\n"
+            "• `/estado`: Estadísticas en vivo de los 6 mercados.\n"
             "• `/guia`: Masterclass rápida de fotografía para vender al precio más alto."
         )
     )

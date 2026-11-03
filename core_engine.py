@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Motor Central Unificado (Core Engine v4.2 - Multimodal Vision Sweet-Spot, CeX Amortization & Deterministic Rating)
+Motor Central Unificado (Core Engine v4.3 - Multimodal Vision, Offer Sniping, 2nd Push Verdict & Direct Checkout)
 Compartido por todos los snipers (Wallapop, Vinted, Multi-Market) y el bot de Discord.
 """
 
@@ -22,6 +22,7 @@ from PIL import Image, ImageEnhance, ImageOps
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 ALERTS_CHANNEL_ID = os.getenv("ALERTS_CHANNEL_ID", "1564559740434911366").strip()
+ALERT_USER_ID = os.getenv("ALERT_USER_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 AI_MODEL = os.getenv("AI_MODEL", "gemini-2.5-flash").strip()
@@ -45,7 +46,8 @@ PLATFORM_COLORS = {
     "CASHCONVERTERS": 0xE67E22,
     "EBAY": 0x3498DB,
     "TODOCOLECCION": 0x9B59B6,
-    "PERSONAL": 0xF1C40F
+    "PERSONAL": 0xF1C40F,
+    "OFFER_OPPORTUNITY": 0x9B59B6
 }
 
 
@@ -138,6 +140,8 @@ def init_db():
             value_add_tip TEXT,
             image_urls_json TEXT DEFAULT '[]',
             visual_notes TEXT DEFAULT '',
+            deal_type TEXT DEFAULT 'direct_chollo',
+            recommended_offer REAL DEFAULT 0,
             status TEXT DEFAULT 'alerted',
             bought_price REAL DEFAULT 0,
             sold_price REAL DEFAULT 0,
@@ -155,6 +159,10 @@ def init_db():
             c.execute("ALTER TABLE deals ADD COLUMN image_urls_json TEXT DEFAULT '[]';")
         if "visual_notes" not in deal_cols:
             c.execute("ALTER TABLE deals ADD COLUMN visual_notes TEXT DEFAULT '';")
+        if "deal_type" not in deal_cols:
+            c.execute("ALTER TABLE deals ADD COLUMN deal_type TEXT DEFAULT 'direct_chollo';")
+        if "recommended_offer" not in deal_cols:
+            c.execute("ALTER TABLE deals ADD COLUMN recommended_offer REAL DEFAULT 0;")
 
         c.execute("DELETE FROM market_seen_items WHERE seen_at < datetime('now', '-45 days')")
         c.execute("DELETE FROM seen_items WHERE seen_at < datetime('now', '-45 days')")
@@ -199,10 +207,6 @@ def check_item_seen_or_dropped(conn, platform, item_id, current_price, min_drop_
 
 
 def is_duplicate_recent_deal(conn, platform, title, price, hours=24):
-    """
-    Bloquea anuncios resubidos ('repost spam') por el mismo vendedor con el mismo título
-    y precio similar en las últimas `hours` horas dentro de la misma plataforma.
-    """
     if not conn or not title:
         return False
     norm_t = re.sub(r"[^a-z0-9]", "", html.unescape(title).lower())
@@ -266,9 +270,94 @@ def purge_old_kits(max_days=30):
                 pass
 
 
-def load_config():
+def load_config(expand_for_offers=True):
+    """
+    Carga config.json y amplía automáticamente el techo de escaneo un +30% (offer_scan_multiplier)
+    para que los snipers capten también anuncios candidatos a 'Oportunidad de Chollo (Hacer Oferta)'
+    conservando `direct_buy_max_price` como el tope estricto de compra directa y Flash Alerts.
+    """
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+
+    mult = float(cfg.get("offer_scan_multiplier", 1.30))
+    for t in cfg.get("targets", []):
+        base_max = int(t.get("direct_buy_max_price") or t.get("max_price", 100))
+        t["direct_buy_max_price"] = base_max
+        if expand_for_offers and t.get("offer_sniping", True):
+            t["max_price"] = int(round(base_max * mult))
+        else:
+            t["max_price"] = base_max
+    return cfg
+
+
+# ==================== NORMALIZACIÓN DE ENLACES Y CHECKOUT 1-TAP ====================
+
+def normalize_and_build_links(platform, item_id, item_url, checkout_url=None):
+    """
+    Corrige los enlaces de todas las plataformas:
+    - En Vinted convierte dominios extranjeros (.fr, .it, .pt, .be) a vinted.es para abrir la App
+      española directamente y genera el enlace real de Checkout 1-Tap (transaction/buy/new).
+    - En Wallapop, eBay, Milanuncios y CashConverters asegura URLs limpias y directas.
+    """
+    plat = (platform or "").upper()
+    sid = str(item_id or "").strip()
+    clean_item_url = (item_url or "").strip()
+    clean_checkout_url = (checkout_url or "").strip()
+
+    if plat == "VINTED":
+        if not sid and clean_item_url:
+            m_id = re.search(r"/items/(\d+)", clean_item_url)
+            if m_id:
+                sid = m_id.group(1)
+        if clean_item_url:
+            clean_item_url = re.sub(r"https?://(?:www\.)?vinted\.[a-z.]+/", "https://www.vinted.es/", clean_item_url)
+        elif sid:
+            clean_item_url = f"https://www.vinted.es/items/{sid}"
+
+        if sid:
+            clean_checkout_url = f"https://www.vinted.es/transaction/buy/new?source_screen=item&transaction%5Bitem_id%5D={sid}"
+        else:
+            clean_checkout_url = clean_item_url
+
+    elif plat == "WALLAPOP":
+        if not clean_item_url and sid:
+            clean_item_url = f"https://es.wallapop.com/item/{sid}"
+        if not clean_checkout_url:
+            clean_checkout_url = clean_item_url
+
+    else:
+        if not clean_checkout_url:
+            clean_checkout_url = clean_item_url
+
+    return clean_item_url, clean_checkout_url
+
+
+def generate_multilingual_haggle_msg(title, description, country_tag, offer_price, model_name=""):
+    """
+    Detecta el idioma del anuncio (FR / IT / ES) y genera el mensaje de oferta persuasivo
+    exacto por `offer_price`€ listo para copiar y pegar.
+    """
+    text_l = f"{title or ''} {description or ''}".lower()
+    ctag = (country_tag or "ES").upper()
+    offer_int = int(round(offer_price))
+
+    is_fr = ctag in ("FR", "BE") or any(w in text_l for w in ("bonjour", "vend", "vends", "état", "etat", "avec", "boite", "boîte", "manette", "envoi"))
+    is_it = ctag == "IT" or any(w in text_l for w in ("vendo", "ottimo", "stato", "scatola", "perfettamente", "spedizione", "senza", "funzionante"))
+
+    if is_fr:
+        return (
+            f"Bonjour ! Je suis très intéressé. Si vous acceptez une offre à {offer_int}€, "
+            f"je vous l'achète immédiatement via Vinted (paiement instantané). Merci beaucoup !"
+        )
+    if is_it:
+        return (
+            f"Ciao! Sono molto interessato. Se accetti un'offerta di {offer_int}€, "
+            f"procedo subito con l'acquisto immediato tramite l'app. Grazie mille!"
+        )
+    return (
+        f"¡Hola! Me interesa mucho. Si te cuadran {offer_int}€ te hago la oferta y te lo compro "
+        f"ahora mismo con pago inmediato por la aplicación, sin mareos. ¡Gracias!"
+    )
 
 
 # ==================== FILTRADO ALGORÍTMICO PREVIO A LA IA (0 TOKENS) ====================
@@ -286,7 +375,7 @@ ACCESSORY_TITLE_PREFIXES = (
 )
 
 PRE_AI_DEFECT_TOKENS = (
-    # Español
+    # Español + Anti-Estafa Pagos Externos
     "sin probar", "no funciona", "no enciende", "no carga", "no da imagen", "no da video", "no lee",
     "lector roto", "lector no funciona", "bisagra rota", "bisagra partida", "pantalla partida",
     "pantalla quebrada", "pantalla rota", "pantalla dañada", "pantalla en negro", "pantalla blanca",
@@ -297,18 +386,20 @@ PRE_AI_DEFECT_TOKENS = (
     "bloqueado icloud", "cuenta icloud", "para piezas", "para reparar", "a reparar", "averiado",
     "averiada", "defectuoso", "defectuosa", "tactil no funciona", "táctil no funciona",
     "solo la consola no", "busco ", "compro ", "pantalla superior a reemplazar",
-    # Francés
+    # Francés + Anti-Scam Vinted FR
     "hors service", "pour pieces", "pour pièces", "en panne", "ne fonctionne pas", "ne s'allume pas",
     "ne charge pas", "ecran hs", "écran hs", "ecran casse", "écran cassé", "ecran fissure",
     "écran fissuré", "fissure", "charniere cassee", "charnière cassée", "fonctionne partiellement",
     "ne repondent pas", "ne répondent pas", "plusieurs defauts", "plusieurs défauts",
     "changer la coque", "changer la batterie", "a reparer", "à réparer", "sans console",
     "sans joycon", "sans joy-con", "sans manette", "vendu seul sans",
-    # Italiano
+    "virement bancaire", "virement bancaires", "uniquement via virement", "aucune remise en main propre",
+    "ne pas acheter directement", "avant d'acheter", "avant d’acheter",
+    # Italiano + Anti-Scam Vinted IT
     "non funzionante", "non si accende", "non carica", "per pezzi", "per parti", "pezzi di ricambio",
     "da riparare", "schermo rotto", "schermo crepato", "display rotto", "vetro rotto", "crepa",
     "cerniera rotta", "manca joystick", "senza joycon", "senza joy-con", "solo corpo tablet",
-    "difettoso", "difettosa", "guasto", "guasta",
+    "difettoso", "difettosa", "guasto", "guasta", "prima di acquistare", "non procedere", "bonifico bancario",
     # Portugués / Inglés
     "avariado", "avariada", "para pecas", "para peças", "ecra partido", "ecrã partido",
     "for parts", "not working", "broken screen", "cracked screen", "faulty", "spares or repair",
@@ -317,7 +408,7 @@ PRE_AI_DEFECT_TOKENS = (
 
 CONSOLE_RADAR_IDS = {
     "new_3ds_family", "switch_oled", "switch_std_lite",
-    "ps_vita", "retro_handhelds", "steam_deck_handhelds"
+    "ps_vita", "retro_handhelds", "steam_deck_handhelds", "ps5_consoles_gta6"
 }
 
 CONSOLE_HARDWARE_WORDS = (
@@ -325,7 +416,7 @@ CONSOLE_HARDWARE_WORDS = (
     "2ds xl", "2ds ll", "new 2ds", "switch oled", "switch lite",
     "ps vita 1000", "ps vita 2000", "psvita 1000", "psvita 2000", "pch-100", "pch-200",
     "gba sp", "advance sp", "ags-001", "ags-101", "game boy micro", "gameboy micro",
-    "steam deck", "steamdeck", "rog ally", "legion go",
+    "steam deck", "steamdeck", "rog ally", "legion go", "ps5", "playstation 5",
     "con cargador", "avec chargeur", "con caricatore", "con dock", "avec station"
 )
 
@@ -377,7 +468,12 @@ def _token_in_text(token, text):
 def passes_filters(title, description, price, target, global_blacklist, extra_text=""):
     if not target.get("enabled", True):
         return False
-    if price < target["min_price"] or price > target["max_price"]:
+
+    offer_mult = 1.30 if target.get("offer_sniping", True) else 1.0
+    base_max = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))
+    effective_max = max(float(target.get("max_price", 9999)), round(base_max * offer_mult))
+
+    if price < target["min_price"] or price > effective_max:
         return False
 
     clean_title = html.unescape(title or "").strip()
@@ -389,34 +485,32 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
     text = f"{clean_title} {clean_desc} {extra_text}".lower()
     radar_id = target.get("id", "")
 
+    # Detector anti-estafa de números de teléfono camuflados con guiones/espacios en Vinted
+    if re.search(r"\b\d{3}[\s\-\.]\d{2}[\s\-\.]\d{2}[\s\-\.]\d{2,3}\b", text):
+        return False
+
     for defect in PRE_AI_DEFECT_TOKENS:
         if defect in text:
             return False
 
-    # Reglas específicas para radares de consolas (antijuegos, antiauriculares, antipartes sueltas)
     if radar_id in CONSOLE_RADAR_IDS:
-        # Si contiene marcadores inequívocos de videojuego o accesorio para consola ("para nintendo switch", "videojuego", "casque", "blister")
         if any(gm in text for gm in GAME_OR_ACC_STRONG_MARKERS):
             if not any(cw in title_l for cw in ("consola", "console")):
                 return False
 
-        # En el radar de 3DS/2DS, rechazar consolas DSi / DS Lite antiguas que mencionan 'juegos 3ds'
         if radar_id == "new_3ds_family" and any(k in title_l for k in ("dsi", "ds lite", "dslite", "nintendo ds ")):
             if not any(k in title_l for k in ("new 3ds", "3ds xl", "2ds xl", "new 2ds")):
                 return False
 
-        # Si el título o descripción contiene nombres de videojuegos y el título NO especifica hardware de consola
         if any(gt in text for gt in VIDEO_GAME_TITLES_AND_TOKENS):
             has_console_hw = any(cw in title_l for cw in CONSOLE_HARDWARE_WORDS)
             if not has_console_hw:
                 return False
 
-        # Rechazar lotes de juegos o cartuchos R4 en cualquier radar de consolas
         if re.search(r"\b(r4|r4i|jeu|jeux|gioco|giochi|juego|juegos|videojuego|cartucho|cartouche|cartuccia|blister)\b", text):
             if not any(cw in title_l for cw in CONSOLE_HARDWARE_WORDS):
                 return False
 
-    # Reglas deterministas para Apple (evitar Mac Mini Intel antiguos 2010-2018 o iPads viejos sin modelo)
     if radar_id == "apple_high_liquidity":
         if "mac mini" in text:
             intel_mac_tokens = (
@@ -439,10 +533,11 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
     if must_any and not any(_token_in_text(word, text) for word in must_any):
         return False
 
-    # Topes de precio deterministas por submodelo (evaluados sobre título y texto completo)
+    # Topes por submodelo (permitiendo hasta +30% para candidatos a Oferta/Regateo, salvo topes de bloqueo <= 5€)
     for cap_rule in target.get("submodel_price_caps", []):
         max_sub_p = float(cap_rule.get("max_price", 9999))
-        if price > max_sub_p:
+        allowed_sub_max = max_sub_p if max_sub_p <= 5 else round(max_sub_p * offer_mult)
+        if price > allowed_sub_max:
             match_tokens = cap_rule.get("match_any", [])
             unless_tokens = cap_rule.get("unless_any", [])
             if any(_token_in_text(mt, text) for mt in match_tokens):
@@ -452,14 +547,14 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
     return True
 
 
-# ==================== CEX ESPAÑA ALGOLIA EN VIVO (VERIFICACIÓN ESTRICTA DE MODELO Y CATEGORÍA) ====================
+# ==================== CEX ESPAÑA ALGOLIA EN VIVO ====================
 
 ACCESSORY_KEYWORDS_CEX = [
     "funda", "carcasa", "protector", "adaptador", "cable", "cargador",
     "soporte", "estuche", "correa", "bateria", "dock", "caja vacia",
     "carrying case", "pouch", "stand", "grip", "skin", "stylus", "volante",
     "mando", "controller", "joy-con", "joycon", "auriculares", "headset",
-    "shifter", "palanca", "pedales"
+    "shifter", "palanca", "pedales", "lector de discos"
 ]
 
 RADAR_ALLOWED_CEX_CATEGORIES = {
@@ -468,6 +563,7 @@ RADAR_ALLOWED_CEX_CATEGORIES = {
     "switch_std_lite": ("consolas",),
     "ps_vita": ("consolas",),
     "retro_handhelds": ("consolas",),
+    "ps5_consoles_gta6": ("consolas",),
     "steam_deck_handhelds": ("consolas", "pc gaming portatil", "portatiles"),
     "digicams_premium": ("camaras", "fotografia"),
     "mirrorless_cameras": ("camaras", "fotografia"),
@@ -483,7 +579,8 @@ SPECIAL_EDITION_CONSOLE_TOKENS = (
     "animal crossing", "monster hunter", "smash bros", "splatoon", "fire emblem",
     "metroid", "samus", "pikachu", "solgaleo", "lunala", "pokeball", "snes",
     "super nintendo", "dragon quest", "yo-kai", "yokai", "persona", "minecraft",
-    "fortnite", "diablo", "edicion", "edición", "limited", "special edition", "collector"
+    "fortnite", "diablo", "edicion", "edición", "limited", "special edition",
+    "collector", "spider-man", "spiderman", "aniversario", "anniversary", "god of war", "final fantasy"
 )
 
 STRICT_MODEL_TOKENS = (
@@ -511,31 +608,35 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
     ctx_norm = _normalize_cex_text(f"{clean_q} {context_text}")
     radar_id = (target or {}).get("id", "") if isinstance(target, dict) else ""
 
-    # 1. Filtro estricto de categoría de CeX por radar
     if radar_id in RADAR_ALLOWED_CEX_CATEGORIES:
         allowed_cats = RADAR_ALLOWED_CEX_CATEGORIES[radar_id]
         if not any(ac in cat_l for ac in allowed_cats):
             return False
 
-    # 2. En radares de consolas, la ficha de CeX NUNCA puede ser un juego ni un accesorio suelto
     if radar_id in CONSOLE_RADAR_IDS:
         if "juegos" in cat_l or "accesorios" in cat_l:
             return False
-        bname_no_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock)", "", bname_l)
+        bname_no_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock|lector)", "", bname_l)
         bname_no_sin = re.sub(r"\+\s*joy-?con", "", bname_no_sin)
         if any(ak in bname_no_sin for ak in ("bolsa", "funda", "protector", "cargador", "mando", "dock", "volante", "stand", "grip", "cover plate")):
             return False
-        # Si la consulta contiene el título de un videojuego y no es una consola edición especial, rechazar
         for gt in VIDEO_GAME_TITLES_AND_TOKENS:
             gt_s = gt.strip()
             if len(gt_s) >= 4 and gt_s in ctx_norm and gt_s not in bname_norm:
                 return False
-        # Evitar que una consola estándar haga match con una Edición Especial/Limitada cara de CeX
         for spec_tok in SPECIAL_EDITION_CONSOLE_TOKENS:
             if spec_tok in bname_l and spec_tok not in ctx_norm:
                 return False
 
-    # 3. En tarjetas gráficas RTX, descartar ordenadores de sobremesa o portátiles que llevan esa GPU
+    # Reglas específicas para PlayStation 5 (evitar confusión Digital vs Lector vs Pro vs Ediciones Especiales de 600€)
+    if radar_id == "ps5_consoles_gta6" or "playstation 5" in q_norm or "ps5" in q_norm:
+        if "pro" in bname_norm.split() and "pro" not in ctx_norm.split():
+            return False
+        if ("digital" in bname_norm) != ("digital" in q_norm or "sin lector" in ctx_norm):
+            return False
+        if "slim" in bname_norm and "slim" not in ctx_norm and "1tb" not in ctx_norm:
+            return False
+
     if radar_id == "rtx_gpus":
         if any(pc_w in bname_l for pc_w in ("intel", "ryzen", "core i", "ssd", "ram", "ordenador", "portatil", "laptop", "pc ")):
             return False
@@ -548,7 +649,6 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
         if "12gb" in bname_l and ("8gb" in ctx_norm or "8 gb" in ctx_norm):
             return False
 
-    # 4. En volantes SimRacing, exigir que sea el conjunto de volante + pedales (y no el Cambiador/Shifter ni Servo Base suelta)
     if radar_id == "simracing_wheels":
         if any(bad_w in bname_l for bad_w in ("cambiador", "servo base", "auriculares", "raton", "teclado", "mando", "soporte", "flight")):
             return False
@@ -557,11 +657,9 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
         if not any(w in bname_l for w in ("wheel", "volante")):
             return False
 
-    # 5. Verificación de tokens de modelo exactos (A6400 != A6000, SX720 != SX740, G7X Mark II != Mark III)
     for tok in STRICT_MODEL_TOKENS:
         tok_norm = _normalize_cex_text(tok)
         if re.search(rf"\b{re.escape(tok_norm)}\b", q_norm):
-            # Equivalencias de escritura en CeX
             alt_forms = [tok_norm, tok_norm.replace(" ", "")]
             if tok_norm == "zv e10":
                 alt_forms.extend(["zv-e10", "zve10"])
@@ -570,7 +668,6 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
             if not any(re.search(rf"\b{re.escape(af)}\b", bname_norm) or af in bname_l.replace("-", "") for af in alt_forms):
                 return False
 
-    # 6. Guardias de subfamilia (New vs Old 3DS, XL vs Normal, OLED vs Estándar vs Lite)
     if "3ds" in q_norm or "2ds" in q_norm or radar_id == "new_3ds_family":
         has_new_box = bool(re.search(r"\bnew\b", bname_norm))
         has_new_ctx = bool(re.search(r"\bnew\b", ctx_norm))
@@ -600,7 +697,6 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
             if "256gb" in bname_l and "256" not in ctx_norm and "512" not in ctx_norm:
                 return False
 
-    # 7. Cámaras Digicams y Mirrorless (Generaciones Mark I/II/III y Cuerpo vs Objetivo)
     if radar_id in ("digicams_premium", "mirrorless_cameras"):
         gen_markers_ii = ("mk ii", "mark ii", "mark 2", "m2", " ii ")
         gen_markers_iii = ("mk iii", "mark iii", "mark 3", "m3", " iii ")
@@ -614,7 +710,6 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
             if any(lk in bname_l for lk in ("16-50", "18-55", "15-45", "+ obj", "con obj")):
                 return False
 
-    # 8. Apple (Mac Mini M1/M2 e iPads 9/10/Air 5: capacidad base 64GB/256GB WiFi por defecto)
     if radar_id == "apple_high_liquidity":
         if "mac mini" in q_norm:
             if "mac mini" not in bname_norm:
@@ -638,7 +733,6 @@ def _box_matches_query_and_radar(bname, cat, clean_q, target=None, context_text=
             if any(cel in bname_l for cel in ("cellular", "4g", "5g", "lte")) and not any(cel in ctx_norm for cel in ("cellular", "4g", "5g", "lte", "sim")):
                 return False
 
-    # 9. Kindle Paperwhite (10ª Gen vs 11ª Gen)
     if radar_id == "kindle_ereaders":
         if "oasis" in q_norm and "oasis" not in bname_norm:
             return False
@@ -665,7 +759,7 @@ def fetch_cex_live(
         return None
 
     radar_id = (target or {}).get("id", "generic") if isinstance(target, dict) else "generic"
-    cache_lookup_key = f"v42:{radar_id}:{clean_q.lower()}:b{int(bool(includes_box))}:l{int(bool(includes_lens))}"
+    cache_lookup_key = f"v43:{radar_id}:{clean_q.lower()}:b{int(bool(includes_box))}:l{int(bool(includes_lens))}"
 
     if conn and not return_all_variants:
         try:
@@ -728,7 +822,7 @@ def fetch_cex_live(
 
             bname_l = bname.lower()
             if not q_wants_accessory and radar_id != "simracing_wheels":
-                bname_without_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock)", "", bname_l)
+                bname_without_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock|lector)", "", bname_l)
                 if any(ak in bname_without_sin for ak in ACCESSORY_KEYWORDS_CEX) and "accesorio" in cat.lower():
                     continue
                 if reference_price >= 30 and sell < 25:
@@ -755,8 +849,6 @@ def fetch_cex_live(
         if return_all_variants:
             return valid_boxes[:8]
 
-        # Selección conservadora de Grado CeX (Suelo de Liquidez Garantizado):
-        # Priorizamos Sin Caja / Grado B estándar antes que Caja (Grado A) o Rebajada (Grado C).
         top_relevant = valid_boxes[:10]
         sin_caja_or_b = [
             b for b in top_relevant
@@ -1135,14 +1227,9 @@ def fetch_ebay_es(rotator, query_text, min_price, max_price):
         return []
 
 
-# ==================== DESCARGA Y PROCESADO DE IMÁGENES ("EL PUNTO DULCE") ====================
+# ==================== DESCARGA Y PROCESADO DE IMÁGENES ====================
 
 def download_item_images(image_urls, rotator=None, max_images=3, force_safari=False):
-    """
-    Descarga hasta `max_images` fotos del anuncio ÚNICAMENTE después de que el anuncio
-    haya superado todos los filtros deterministas pre-IA.
-    Sirve tanto para la inspección visual multimodal de Gemini 2.5 Flash como para el Kit de Reventa.
-    """
     if not image_urls:
         return []
     raw_photos = []
@@ -1167,11 +1254,6 @@ def download_item_images(image_urls, rotator=None, max_images=3, force_safari=Fa
 
 
 def prepare_image_for_ai(img_bytes, max_dim=640):
-    """
-    Redimensiona la imagen a máx 640x640px JPEG (calidad 78) para que Gemini 2.5 Flash
-    inspeccione detalles visuales reales (etiquetas, Joy-Cons, pantallas, puertos, cajas)
-    consumiendo solo ~258 tokens por imagen.
-    """
     try:
         with Image.open(io.BytesIO(img_bytes)) as img:
             try:
@@ -1211,19 +1293,12 @@ def enhance_and_clean_image(img_bytes):
         return out.getvalue()
 
 
-# ==================== AUDITORÍA MULTIMODAL GEMINI 2.5 FLASH + REGLAS MATEMÁTICAS ====================
+# ==================== AUDITORÍA MULTIMODAL GEMINI 2.5 FLASH ====================
 
 def analyze_and_generate_kit(
     platform, title, description, price, landed_cost, is_foreign, target,
     conn=None, health_monitor=None, extra_meta="", raw_images=None
 ):
-    """
-    Auditoría Multimodal ("El Punto Dulce" v4.2):
-    - Solo se invoca para anuncios que ya han superado el filtro determinista pre-IA.
-    - Envía hasta 3 fotos reales del anuncio (640x640 JPEG) + descripción completa (hasta 1000 chars)
-      a `gemini-2.5-flash` para verificar visualmente el modelo real, estado físico, accesorios y etiquetas.
-    - Clave de caché única por título + precio + descripción + hash de la primera imagen (0 colisiones).
-    """
     if not GEMINI_API_KEY and not OPENROUTER_API_KEY:
         print("[ERROR] Falta GEMINI_API_KEY u OPENROUTER_API_KEY.")
         return None
@@ -1243,7 +1318,7 @@ def analyze_and_generate_kit(
     if raw_images and len(raw_images) > 0 and raw_images[0]:
         img_sig = hashlib.md5(raw_images[0][:4096]).hexdigest()[:10]
 
-    cache_seed = f"v42_{target.get('id', '')}_{clean_title_str.lower()}_{int(price)}_{clean_desc[:180].lower()}_{img_sig}"
+    cache_seed = f"v43_{target.get('id', '')}_{clean_title_str.lower()}_{int(price)}_{clean_desc[:180].lower()}_{img_sig}"
     cache_key = hashlib.md5(cache_seed.encode("utf-8", errors="ignore")).hexdigest()
 
     if conn:
@@ -1277,8 +1352,8 @@ def analyze_and_generate_kit(
             f"Fotos adjuntas: {num_imgs}\n"
             f"Reglas del radar: {valuation_rules}\n\n"
             f"INSTRUCCIONES DE INSPECCIÓN VISUAL Y TÉCNICA:\n"
-            f"1. Mira las fotos adjuntas y lee las etiquetas del disco. Verifica que sea un SSD SATA 2.5\" interno real de >=960GB/1TB.\n"
-            f"2. Si en la foto se ve que es un disco mecánico HDD, un NVMe M.2, una carcasa vacía o de menor capacidad (120GB-512GB), pon is_valid_deal=false.\n"
+            f"1. Mira las fotos adjuntas y lee las etiquetas del disco. Verifica que cumpla las reglas del radar (>1TB si es HDD, salud SMART buena).\n"
+            f"2. IMPORTANTE: Evalúa is_valid_deal=true si el hardware es el modelo correcto y está en buen estado físico/SMART, INCLUSO SI el precio actual es algo elevado (ya que nuestro motor calculará después si merece la pena hacer una oferta a la baja).\n"
             f"Responde SOLO un JSON válido con esta estructura exacta:\n"
             f'{{"is_valid_deal": bool, "is_pro_seller": bool, "has_defect_or_missing_parts": bool, '
             f'"visual_confidence": "alta"|"media"|"baja", "identified_model": "", "cex_search_query": "", '
@@ -1295,18 +1370,13 @@ def analyze_and_generate_kit(
             f"Imágenes adjuntas del producto: {num_imgs}\n"
             f"Reglas específicas del radar: {valuation_rules}\n\n"
             f"REGLAS ESTRICTAS DE INSPECCIÓN VISUAL Y DETECCIÓN DE FALSOS POSITIVOS (OBLIGATORIO):\n"
-            f"1. INSPECCIONA LAS FOTOS ADJUNTAS AL DETALLE: Verifica qué se vende realmente en las fotos.\n"
-            f"   - Si las fotos muestran solo un videojuego/cartucho (ej: FIFA, Zelda, Layton, Overcooked), una funda, auriculares, caja vacía o accesorio suelto en un radar de consolas/cámaras -> pon is_valid_deal=false.\n"
-            f"   - En Nintendo Switch (Estándar u OLED): mira si la consola tiene los dos Joy-Cons acoplados. Si en la foto aparece SOLO la pantalla/tablet sin Joy-Cons -> pon is_valid_deal=false y has_defect_or_missing_parts=true.\n"
-            f"   - En Mac Mini: mira los puertos traseros o la captura de 'Acerca de este Mac' en las fotos. Si tiene muchos puertos antiguos (FireWire, USB-A múltiples, audio óptico) o dice Intel Core i5/i7 / DDR3 / Catalina -> es un Mac Mini Intel antiguo, NO es M1/M2 -> pon is_valid_deal=false.\n"
-            f"   - En Nintendo 3DS / 2DS: distingue visualmente si es 'New 3DS XL' (tiene el pequeño C-Stick gris sobre X/Y), '3DS XL' antigua (sin C-Stick), '3DS' pequeña original (marco brillante, vale mucho menos) o '2DS' plana.\n"
-            f"   - En Volantes SimRacing: verifica que incluya volante y pedales.\n"
-            f"2. DEFECTOS EN CUALQUIER IDIOMA (ES/FR/IT/PT/EN): Si la descripción o las fotos indican cualquier avería, pantalla que responde parcialmente ('fonctionne partiellement', 'ne répondent pas'), bisagra floja/rota, cristal con grieta ('fissure', 'crepa'), drift, carcasa o batería a cambiar ('changer la coque/batterie'), bloqueo iCloud/MDM -> pon is_valid_deal=false y has_defect_or_missing_parts=true.\n"
-            f"3. CONSULTA CEX EXACTA ('cex_search_query'): Escribe el nombre canónico limpio del modelo exacto verificado en las fotos para buscarlo en CeX España (ej: 'Nintendo Switch OLED', 'Nintendo Switch Consola', 'Nintendo Switch Lite', 'New Nintendo 3DS XL', 'Nintendo 3DS XL', 'Nintendo 3DS Consola', 'New Nintendo 2DS XL', 'Playstation Vita', 'Apple Mac Mini M1 8GB 256GB', 'Apple iPad 9 64GB WiFi', 'Apple iPad 10 64GB WiFi', 'Sony Alpha A6000', 'Canon PowerShot G7X Mark II', 'Logitech G29 Volante', 'Valve Steam Deck 64GB', 'Kindle Paperwhite 10'). NUNCA pongas un modelo superior si en las fotos es el modelo básico.\n"
-            f"4. CONFIANZA VISUAL ('visual_confidence'):\n"
-            f"   - 'alta': Fotos reales claras donde se ve el producto completo, en buen estado y el modelo exacto está confirmado sin ninguna duda.\n"
-            f"   - 'media': Fotos reales aceptables pero falta ver algún ángulo secundario.\n"
-            f"   - 'baja': Sin fotos reales (foto de catálogo/stock), foto borrosa, foto contradictoria con el título o descripción sospechosamente vacía de 1-2 palabras ('24/48 spedizione') sin detalles.\n\n"
+            f"1. INSPECCIONA LAS FOTOS ADJUNTAS AL DETALLE: Verifica qué se vende realmente.\n"
+            f"   - Si las fotos muestran solo un videojuego, funda, caja vacía o accesorio suelto -> pon is_valid_deal=false.\n"
+            f"   - En Nintendo Switch: si aparece SOLO la pantalla/tablet sin Joy-Cons -> pon is_valid_deal=false y has_defect_or_missing_parts=true.\n"
+            f"   - En Mac Mini: si es Intel antiguo (2010-2018) -> pon is_valid_deal=false.\n"
+            f"2. DEFECTOS O ESTAFAS EN CUALQUIER IDIOMA (ES/FR/IT/PT/EN): Si pide pago por transferencia ('virement bancaire', 'bonifico'), escribir por WhatsApp antes de comprar ('prima di acquistare', 'avant d\\'acheter'), o tiene averías/grietas/drift/bloqueo iCloud -> pon is_valid_deal=false y has_defect_or_missing_parts=true.\n"
+            f"3. REGLA CLAVE PARA OPORTUNIDADES DE OFERTA: Si el producto es 100% auténtico, completo, sin defectos y no es estafa, pon is_valid_deal=true AUNQUE su precio actual supere ligeramente el tope de compra directa (nuestro motor matemático calculará si es un chollo directo o una Oportunidad para Hacer Oferta).\n"
+            f"4. CONSULTA CEX EXACTA ('cex_search_query'): Escribe el nombre canónico limpio del modelo exacto verificado en fotos.\n\n"
             f"Responde ÚNICAMENTE un objeto JSON válido con estas claves exactas:\n"
             f'{{"is_valid_deal": bool, "is_pro_seller": bool, "has_defect_or_missing_parts": bool, '
             f'"missing_original_charger": bool, "includes_original_box": bool, "includes_kit_lens": bool, '
@@ -1416,22 +1486,12 @@ def evaluate_deal_math_and_score(
     min_profit=35.0, min_personal_savings=25.0, min_score=8, filter_pro_seller=True
 ):
     """
-    Motor Matemático Determinista de Rentabilidad, Amortización CeX y Rating (1-10).
-    Garantiza al 99% que:
-    1. Si la IA detectó defectos, piezas faltantes, modelo erróneo o confianza visual baja -> RECHAZADO.
-    2. Si el modelo identificado visualmente por la IA supera el tope de submodelo (ej. Switch Lite > 42€) -> RECHAZADO.
-    3. En modo reventa, exige Respaldo Real en CeX España:
-       - `cex_net_cash >= -2€` (Si la venta particular falla, CeX te devuelve en efectivo prácticamente el 100% de lo pagado)
-       - `cex_net_voucher >= +8€` (En vale CeX siempre ganas dinero desde el minuto 1)
-       - `best_net_profit >= min_profit` (+35€ limpios mínimos)
-    4. Rating persistente y determinista:
-       - `10/10` (COMPRA A CIEGAS): Fotos claras (`visual_confidence == 'alta'`), completo con cargador,
-         arbitraje directo CeX (`cex_net_cash >= +20€` en el acto o `>= +12€` con beneficio reventa `>= +75€`),
-         beneficio limpio `>= +55€` y ROI `>= 45%`.
-       - `9/10` (CHOLLAZO): Beneficio en efectivo directo en CeX `>= +8€` (ganas dinero incluso vendiéndolo en el acto a CeX),
-         beneficio limpio de reventa `>= +45€` y ROI `>= 32%`.
-       - `8/10` (CHOLLO SEGURO AMORTIZADO): Coste amortizado por el efectivo de CeX (`cex_net_cash >= -2€`),
-         beneficio limpio `>= +35€` y ROI `>= 22%`.
+    Motor Matemático Dual v4.3 (Compra Directa >=8/10 + Oportunidad de Chollo mediante Oferta 6-7/10):
+    1. Si la IA detecta defectos, estafas, faltan piezas o confianza visual baja -> RECHAZADO SIEMPRE.
+    2. Evalúa primero si al precio actual es un CHOLLO DIRECTO (`score >= 8`, amortizado en CeX y con beneficio >= min_profit).
+    3. Si no llega a >=8 al precio actual pero el producto es 100% válido, calcula la OFERTA RECOMENDADA (`recommended_offer`)
+       que garantiza amortización en CeX y beneficio neto >= `min_profit`. Si la rebaja necesaria es <= 35% (realista en Vinted/Wallapop),
+       lo aprueba como `deal_type = 'offer_opportunity'` (nota 6 o 7/10) con su cabecera propia de Oportunidad de Chollo.
     """
     if not ai_data or not isinstance(ai_data, dict):
         return False, 1, 0.0, 0.0, 0.0, "Fallo en respuesta de IA"
@@ -1452,39 +1512,61 @@ def evaluate_deal_math_and_score(
     if vis_conf == "baja":
         return False, 3, 0.0, 0.0, 0.0, (ai_data.get("reject_reason") or "Confianza visual baja en las fotos del anuncio")
 
-    # Re-verificar topes de precio por submodelo sobre el modelo identificado visualmente por la IA
+    est_fees = max(0.0, round(landed_cost - price, 2))
+    direct_max_cap = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))
     id_text = f"{identified} {ai_data.get('cex_search_query', '')}".lower()
+
     for cap_rule in target.get("submodel_price_caps", []):
         max_sub_p = float(cap_rule.get("max_price", 9999))
-        if price > max_sub_p:
-            match_tokens = cap_rule.get("match_any", [])
-            unless_tokens = cap_rule.get("unless_any", [])
-            if any(_token_in_text(mt, id_text) for mt in match_tokens):
-                if not (unless_tokens and any(_token_in_text(ut, id_text) for ut in unless_tokens)):
-                    return False, 3, 0.0, 0.0, 0.0, f"Submodelo '{identified}' supera tope rentable ({price:.0f}€ > {max_sub_p:.0f}€)"
+        match_tokens = cap_rule.get("match_any", [])
+        unless_tokens = cap_rule.get("unless_any", [])
+        if any(_token_in_text(mt, id_text) for mt in match_tokens):
+            if not (unless_tokens and any(_token_in_text(ut, id_text) for ut in unless_tokens)):
+                if max_sub_p <= 5:
+                    return False, 1, 0.0, 0.0, 0.0, f"Submodelo '{identified}' bloqueado por configuración"
+                direct_max_cap = min(direct_max_cap, max_sub_p)
 
     ai_est_price = float(ai_data.get("estimated_resale_price", 0) or 0)
+    allow_offers = bool(target.get("offer_sniping", True))
+    max_haggle_discount_pct = float(target.get("max_haggle_discount_pct", 35.0))
 
-    # Modo Compra Personal (SSDs para el servidor Linux)
+    # ==================== MODO COMPRA PERSONAL (SERVIDOR HOMELAB) ====================
     if mode == "personal":
         optimal_price = ai_est_price if ai_est_price > 0 else (cex_data["sell"] if cex_data else price)
         best_net_profit = round(optimal_price - landed_cost, 2)
         req_margin = float(target.get("min_savings_eur", min_personal_savings))
-        if best_net_profit < req_margin:
-            return False, 5, optimal_price, best_net_profit, 0.0, f"Ahorro insuficiente (+{best_net_profit:.0f}€ < +{req_margin:.0f}€)"
-        roi_pct = (best_net_profit / max(landed_cost, 1.0)) * 100.0
-        if vis_conf == "alta" and best_net_profit >= 45 and roi_pct >= 50:
-            score = 10
-        elif best_net_profit >= 32 and roi_pct >= 35:
-            score = 9
-        else:
-            score = 8
-        ai_data["deal_score"] = score
-        if score < min_score:
-            return False, score, optimal_price, best_net_profit, 0.0, f"Nota {score}/10 inferior al mínimo ({min_score}/10)"
-        return True, score, optimal_price, best_net_profit, 0.0, "OK"
 
-    # Modo Reventa con Respaldo CeX España obligatorio
+        if price <= direct_max_cap and best_net_profit >= req_margin:
+            roi_pct = (best_net_profit / max(landed_cost, 1.0)) * 100.0
+            if vis_conf == "alta" and best_net_profit >= 45 and roi_pct >= 50:
+                score = 10
+            elif best_net_profit >= 32 and roi_pct >= 35:
+                score = 9
+            else:
+                score = 8
+            ai_data["deal_score"] = score
+            ai_data["deal_type"] = "direct_chollo"
+            ai_data["recommended_offer"] = 0
+            return True, score, optimal_price, best_net_profit, 0.0, "OK"
+
+        if allow_offers and optimal_price > (req_margin + est_fees + 10):
+            target_offer = int(min(direct_max_cap, round(optimal_price - req_margin - est_fees)))
+            if 12 <= target_offer < price:
+                disc_pct = ((price - target_offer) / price) * 100.0
+                if disc_pct <= max_haggle_discount_pct:
+                    offer_landed = round(target_offer + est_fees, 2)
+                    offer_profit = round(optimal_price - offer_landed, 2)
+                    score = 7 if disc_pct <= 20.0 else 6
+                    ai_data["deal_score"] = score
+                    ai_data["deal_type"] = "offer_opportunity"
+                    ai_data["recommended_offer"] = target_offer
+                    ai_data["offer_landed_cost"] = offer_landed
+                    ai_data["offer_discount_pct"] = round(disc_pct)
+                    return True, score, optimal_price, offer_profit, 0.0, "OPORTUNIDAD_OFERTA"
+
+        return False, 5, optimal_price, best_net_profit, 0.0, f"Ahorro insuficiente (+{best_net_profit:.0f}€ < +{req_margin:.0f}€)"
+
+    # ==================== MODO REVENTA CON RESPALDO CEX ESPAÑA ====================
     if not cex_data or float(cex_data.get("cash", 0) or 0) <= 0 or float(cex_data.get("sell", 0) or 0) <= 0:
         return False, 4, 0.0, 0.0, 0.0, f"Sin respaldo de compra en CeX España para '{identified or 'este modelo'}'"
 
@@ -1499,16 +1581,6 @@ def evaluate_deal_math_and_score(
     cex_net_cash = round(cex_cash - effective_cost, 2)
     cex_net_voucher = round(cex_voucher - effective_cost, 2)
 
-    # REGLA DE ORO DE AMORTIZACIÓN CEX:
-    # Si la reventa sale mal, llevando el producto a CeX debemos recuperar el coste puesto en casa
-    # (tolerancia máxima de -2€ en efectivo y al menos +8€ de beneficio en vale CeX).
-    if cex_net_cash < -2.0 or cex_net_voucher < 8.0:
-        return (
-            False, 5, cex_cash, cex_net_cash, charger_penalty,
-            f"No amortiza en CeX (Efectivo CeX: {cex_cash:.0f}€ [{cex_net_cash:+.0f}€] | Vale: {cex_voucher:.0f}€ vs Coste: {effective_cost:.0f}€)"
-        )
-
-    # Precio óptimo de reventa rápida en 48h en Wallapop/Vinted (acotado al 84% del PVP con garantía de CeX)
     cex_realistic_cap = round(cex_sell * 0.84)
     if ai_est_price > 0:
         optimal_price = max(cex_cash, min(ai_est_price, cex_realistic_cap))
@@ -1519,40 +1591,79 @@ def evaluate_deal_math_and_score(
     best_net_profit = round(max(net_resale_profit, cex_net_cash), 2)
     req_margin = float(target.get("min_profit_eur", min_profit))
 
-    if best_net_profit < req_margin:
-        return (
-            False, 6, optimal_price, best_net_profit, charger_penalty,
-            f"Margen limpio insuficiente (+{best_net_profit:.0f}€ < +{req_margin:.0f}€ | Reventa: {optimal_price:.0f}€ | CeX Cash: {cex_cash:.0f}€)"
-        )
-
-    roi_pct = (best_net_profit / max(effective_cost, 1.0)) * 100.0
-
-    # Rating determinista y persistente (8, 9, 10)
+    # 1. ¿Es un CHOLLO DIRECTO (>= 8/10) comprando al precio actual del anuncio?
     if (
-        vis_conf == "alta"
-        and not missing_charger
-        and (cex_net_cash >= 20.0 or (cex_net_cash >= 12.0 and best_net_profit >= 75.0))
-        and best_net_profit >= 55.0
-        and roi_pct >= 45.0
+        price <= direct_max_cap
+        and cex_net_cash >= -2.0
+        and cex_net_voucher >= 8.0
+        and best_net_profit >= req_margin
     ):
-        score = 10
-    elif (
-        vis_conf in ("alta", "media")
-        and (cex_net_cash >= 8.0 or (cex_net_cash >= 4.0 and best_net_profit >= 55.0))
-        and best_net_profit >= 45.0
-        and roi_pct >= 32.0
-    ):
-        score = 9
-    elif best_net_profit >= req_margin and roi_pct >= 22.0:
-        score = 8
-    else:
-        score = 7
+        roi_pct = (best_net_profit / max(effective_cost, 1.0)) * 100.0
+        if (
+            vis_conf == "alta"
+            and not missing_charger
+            and (cex_net_cash >= 20.0 or (cex_net_cash >= 12.0 and best_net_profit >= 75.0))
+            and best_net_profit >= 55.0
+            and roi_pct >= 45.0
+        ):
+            score = 10
+        elif (
+            vis_conf in ("alta", "media")
+            and (cex_net_cash >= 8.0 or (cex_net_cash >= 4.0 and best_net_profit >= 55.0))
+            and best_net_profit >= 45.0
+            and roi_pct >= 32.0
+        ):
+            score = 9
+        elif best_net_profit >= req_margin and roi_pct >= 20.0:
+            score = 8
+        else:
+            score = 7
 
-    ai_data["deal_score"] = score
-    if score < min_score:
-        return False, score, optimal_price, best_net_profit, charger_penalty, f"Nota {score}/10 inferior al mínimo ({min_score}/10)"
+        if score >= min_score:
+            ai_data["deal_score"] = score
+            ai_data["deal_type"] = "direct_chollo"
+            ai_data["recommended_offer"] = 0
+            return True, score, optimal_price, best_net_profit, charger_penalty, "OK"
 
-    return True, score, optimal_price, best_net_profit, charger_penalty, "OK"
+    # 2. Evaluación como OPORTUNIDAD DE CHOLLO (HACER OFERTA A LA BAJA)
+    # Calculamos la oferta máxima que cumple a la vez:
+    # a) 100% amortizado en efectivo CeX (cex_cash >= offer_landed + charger_penalty)
+    # b) Beneficio neto de reventa >= req_margin (+35€ limpios)
+    # c) No superar el tope del submodelo (`direct_max_cap`)
+    if allow_offers:
+        max_landed_cex_safe = cex_cash - charger_penalty
+        max_landed_profit_safe = optimal_price - req_margin - 2.0 - charger_penalty
+        ideal_landed = min(max_landed_cex_safe, max_landed_profit_safe)
+        recommended_offer = int(min(direct_max_cap, round(ideal_landed - est_fees)))
+
+        # Si el anuncio está ligeramente por debajo o por encima pero necesita al menos 8€ de rebaja
+        if recommended_offer >= (price - 5):
+            recommended_offer = int(price * 0.85)
+
+        if 18 <= recommended_offer < price:
+            disc_eur = price - recommended_offer
+            disc_pct = (disc_eur / price) * 100.0
+
+            if 6.0 <= disc_pct <= max_haggle_discount_pct:
+                offer_landed = round(recommended_offer + est_fees, 2)
+                offer_eff_cost = round(offer_landed + charger_penalty, 2)
+                offer_resale_profit = round(optimal_price - offer_eff_cost - 2.0, 2)
+                offer_cex_net = round(cex_cash - offer_eff_cost, 2)
+                offer_best_profit = round(max(offer_resale_profit, offer_cex_net), 2)
+
+                if offer_cex_net >= -2.0 and offer_best_profit >= req_margin:
+                    score = 7 if disc_pct <= 20.0 else 6
+                    ai_data["deal_score"] = score
+                    ai_data["deal_type"] = "offer_opportunity"
+                    ai_data["recommended_offer"] = recommended_offer
+                    ai_data["offer_landed_cost"] = offer_landed
+                    ai_data["offer_discount_pct"] = round(disc_pct)
+                    return True, score, optimal_price, offer_best_profit, charger_penalty, "OPORTUNIDAD_OFERTA"
+
+    return (
+        False, 5, optimal_price, best_net_profit, charger_penalty,
+        f"No rentable ni ofertando -35% (Precio: {price:.0f}€ | Efectivo CeX: {cex_cash:.0f}€ | Reventa: {optimal_price:.0f}€)"
+    )
 
 
 # ==================== GUARDADO DE KIT Y REGISTRO EN BD ====================
@@ -1574,7 +1685,7 @@ def save_resale_kit(kit_folder, platform, item_id, title, item_url, ai_data, opt
     visual_notes = re.sub(r"\s+", " ", ((ai_data or {}).get("visual_notes") or "").strip())
 
     txt_content = (
-        f"=== KIT DE REVENTA ({platform.upper()} • BOTI SNIPER v4.2) ===\n"
+        f"=== KIT DE REVENTA ({platform.upper()} • BOTI SNIPER v4.3) ===\n"
         f"Producto original: {clean_title}\n"
         f"Modelo identificado: {identified}\n"
         f"Inspección visual IA: {visual_notes}\n"
@@ -1621,6 +1732,8 @@ def register_deal_in_db(
 ):
     try:
         urls_list = image_urls if isinstance(image_urls, list) and image_urls else ([image_url] if image_url else [])
+        deal_type = (ai_data or {}).get("deal_type", "direct_chollo")
+        rec_offer = float((ai_data or {}).get("recommended_offer", 0) or 0)
         c = conn.cursor()
         c.execute(
             """INSERT OR REPLACE INTO deals (
@@ -1629,8 +1742,8 @@ def register_deal_in_db(
                 identified_model, cex_search_query, cex_box_name, cex_cash, cex_voucher, cex_sell,
                 item_url, checkout_url, image_url, kit_folder, seller_city, is_local,
                 fast_msg, haggle_msg, seo_title, seo_description, value_add_tip,
-                image_urls_json, visual_notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                image_urls_json, visual_notes, deal_type, recommended_offer
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 deal_id,
                 platform.upper(),
@@ -1664,7 +1777,9 @@ def register_deal_in_db(
                 "",
                 ai_data.get("value_add_tip", ""),
                 json.dumps(urls_list[:6], ensure_ascii=False),
-                ai_data.get("visual_notes", "")
+                ai_data.get("visual_notes", ""),
+                deal_type,
+                rec_offer
             )
         )
         conn.commit()
@@ -1672,12 +1787,14 @@ def register_deal_in_db(
         print(f"[WARN] Error guardando deal en BD ({deal_id}): {e}")
 
 
-# ==================== ENVÍO DE ALERTAS A DISCORD (2 FASES: FLASH + EDICIÓN IA) ====================
+# ==================== ALERTAS DISCORD CON 2ª NOTIFICACIÓN PUSH DE VEREDICTO IA ====================
 
 SCORE_BADGES = {
     10: "🚨 10/10 • COMPRA A CIEGAS (ARBITRAJE PURO CEX)",
     9: "🔥 9/10 • CHOLLAZO RESPALDADO EN EFECTIVO CEX",
-    8: "✅ 8/10 • CHOLLO SEGURO (COSTE AMORTIZADO EN CEX)"
+    8: "✅ 8/10 • CHOLLO SEGURO (COSTE AMORTIZADO EN CEX)",
+    7: "🤝 7/10 • OPORTUNIDAD DE CHOLLO (OFERTA FÁCIL -15%)",
+    6: "🎯 6/10 • OPORTUNIDAD DE CHOLLO (OFERTA AGRESIVA)"
 }
 
 
@@ -1687,25 +1804,34 @@ def send_flash_discord_alert(
 ):
     """
     Fase 1 ('Flash Alert' sin IA, ~50ms):
-    Dispara un mensaje instantáneo a Discord en cuanto un anuncio recién subido (<10 min)
-    supera passes_filters(), antes siquiera de descargar las 3 fotos o llamar a Gemini.
-    Devuelve un descriptor {'via': 'bot'|'webhook', 'message_id': str} para editarlo en Fase 2.
+    - Solo se dispara si el anuncio está dentro del rango de COMPRA DIRECTA (`price <= direct_buy_max_price`).
+      (Si el anuncio es más caro y solo se escanea para hacer oferta, espera a que la IA lo verifique).
+    - Incluye el enlace directo y de Checkout en la primera línea para abrirlo con 1 toque desde la notificación.
     """
+    if isinstance(target, dict):
+        direct_cap = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))
+        if price > direct_cap:
+            return None
+
+    clean_item_url, clean_checkout_url = normalize_and_build_links(platform, item_id, item_url)
     clean_t = re.sub(r"\s+", " ", (title or "").strip())
     loc_str = f" 🔥 **EN MANO ({seller_city})**" if is_local else f" ({seller_city})"
+    user_ping = f"<@{ALERT_USER_ID}> " if ALERT_USER_ID else ""
+
     flash_content = (
-        f"⚡ **[FLASH SIN IA] {clean_t} - {price:.0f}€ -> [COMPRAR YA]({item_url})**\n"
-        f"⏳ *Puesto en casa: ~{landed_cost:.0f}€{loc_str} • Descargando 3 fotos y auditando con Gemini 2.5 Flash + CeX...*"
+        f"⚡ **[FLASH SIN IA] {clean_t} — {price:.0f}€** {user_ping}\n"
+        f"👉 **ABRIR ANUNCIO:** {clean_item_url}\n"
+        f"⏳ *Puesto en casa: ~{landed_cost:.0f}€{loc_str} • Auditando con IA (recibirás 2ª notificación en 3s con la decisión)...*"
     )
-    flash_components = [
-        {
-            "type": 1,
-            "components": [
-                {"type": 2, "style": 5, "label": f"⚡ COMPRAR YA ({price:.0f}€)", "url": item_url},
-                {"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:flash_{item_id}"}
-            ]
-        }
+
+    btn_row = [
+        {"type": 2, "style": 5, "label": f"⚡ Abrir Anuncio ({price:.0f}€)", "url": clean_item_url}
     ]
+    if clean_checkout_url and clean_checkout_url != clean_item_url:
+        btn_row.append({"type": 2, "style": 5, "label": "💳 Checkout Directo 1-Tap", "url": clean_checkout_url})
+    btn_row.append({"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:flash_{item_id}"})
+
+    flash_components = [{"type": 1, "components": btn_row}]
 
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
@@ -1748,8 +1874,10 @@ def resolve_flash_discord_alert(
     title="", price=0.0, item_url=""
 ):
     """
-    Si la IA o la regla matemática CeX rechaza el anuncio tras enviar un Flash Alert,
-    borra el mensaje Flash o lo edita in-situ a '❌ DESCARTADO POR IA ({reason})'.
+    Fase 2 en caso de RECHAZO tras un Flash Alert:
+    - Envía un NUEVO mensaje (`POST`) para que a tu móvil le salte una 2ª notificación push en tiempo real
+      ("🛑 ¡CANCELA LA COMPRA! DESCARTADO POR IA") mientras estás en la pantalla de pago de Vinted/Wallapop.
+    - Además elimina o tacha el mensaje Flash original.
     """
     if not flash_message or not isinstance(flash_message, dict):
         return
@@ -1758,49 +1886,53 @@ def resolve_flash_discord_alert(
     if not msg_id:
         return
 
-    should_delete = delete_on_reject or (os.getenv("DELETE_REJECTED_FLASH", "false").lower() == "true")
     clean_t = re.sub(r"\s+", " ", (title or "").strip())[:70]
     clean_reason = re.sub(r"\s+", " ", (reason or "No supera auditoría IA/CeX").strip())[:180]
-    rejected_content = f"❌ **DESCARTADO POR IA ({clean_reason})** — ~~{clean_t} ({price:.0f}€)~~"
+    user_ping = f"<@{ALERT_USER_ID}> " if ALERT_USER_ID else ""
+
+    stop_push_content = (
+        f"🛑 **¡DETÉN LA COMPRA! RECHAZADO POR IA** ❌ {user_ping}\n"
+        f"⚠️ **Motivo:** `{clean_reason}`\n"
+        f"📦 ~~{clean_t} ({price:.0f}€)~~"
+    )
 
     if via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
-        msg_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{msg_id}"
+        base_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
+        old_msg_url = f"{base_url}/{msg_id}"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         try:
-            if should_delete:
-                requests.delete(msg_url, headers=bot_headers, timeout=6)
-            else:
-                dismiss_comp = [
-                    {
-                        "type": 1,
-                        "components": [
-                            {"type": 2, "style": 4, "label": "Borrar aviso", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:rej_{msg_id}"}
-                        ]
-                    }
-                ]
-                requests.patch(
-                    msg_url,
-                    headers=bot_headers,
-                    json={"content": rejected_content, "embeds": [], "components": dismiss_comp},
-                    timeout=6
-                )
+            # 1. Borramos el mensaje Flash antiguo para no duplicar
+            requests.delete(old_msg_url, headers=bot_headers, timeout=5)
+            # 2. Publicamos un POST NUEVO para forzar la notificación push en el móvil
+            dismiss_comp = [
+                {
+                    "type": 1,
+                    "components": [
+                        {"type": 2, "style": 4, "label": "Borrar aviso", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:rej_{msg_id}"}
+                    ]
+                }
+            ]
+            requests.post(
+                base_url,
+                headers=bot_headers,
+                json={"content": stop_push_content, "components": dismiss_comp},
+                timeout=6
+            )
         except Exception as e:
-            print(f"[WARN] Error actualizando Flash Alert descartado (Bot): {e}")
+            print(f"[WARN] Error enviando notificación Push de rechazo (Bot): {e}")
 
     elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
         base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
-        msg_url = f"{base_wh}/messages/{msg_id}"
+        old_msg_url = f"{base_wh}/messages/{msg_id}"
         try:
-            if should_delete:
-                requests.delete(msg_url, timeout=6)
-            else:
-                requests.patch(
-                    msg_url,
-                    json={"content": rejected_content, "embeds": []},
-                    timeout=6
-                )
+            requests.delete(old_msg_url, timeout=5)
+            requests.post(
+                WEBHOOK_URL,
+                json={"content": stop_push_content},
+                timeout=6
+            )
         except Exception as e:
-            print(f"[WARN] Error actualizando Flash Alert descartado (Webhook): {e}")
+            print(f"[WARN] Error enviando notificación Push de rechazo (Webhook): {e}")
 
 
 def send_discord_alert(
@@ -1813,17 +1945,28 @@ def send_discord_alert(
     plat = platform.upper()
     deal_id = f"{plat[:3]}_{item_id}"[:40]
     mode = target.get("mode", "resale")
-    if checkout_url and "transaction/buy" in str(checkout_url):
-        checkout_url = item_url
-    checkout_target_url = checkout_url or item_url
+
+    clean_item_url, clean_checkout_url = normalize_and_build_links(plat, item_id, item_url, checkout_url)
+
+    score = int(ai_data.get("deal_score", 8))
+    deal_type = ai_data.get("deal_type", "direct_chollo")
+    recommended_offer = int(round(float(ai_data.get("recommended_offer", 0) or 0)))
+    offer_landed_cost = float(ai_data.get("offer_landed_cost", landed_cost) or landed_cost)
+    offer_disc_pct = int(ai_data.get("offer_discount_pct", 0) or 0)
+
+    # Generar siempre el mensaje de oferta en el idioma del vendedor
+    haggle_target_price = recommended_offer if recommended_offer > 0 else max(15, int(round(price * 0.84)))
+    haggle_msg = generate_multilingual_haggle_msg(
+        title, description, country_tag, haggle_target_price, ai_data.get("identified_model", title)
+    )
+    ai_data["haggle_message"] = haggle_msg
 
     register_deal_in_db(
         conn, deal_id, plat, item_id, target, title, description, price, landed_cost, fees,
-        optimal_price, net_profit, ai_data, cex_data, item_url, checkout_target_url, image_url,
+        optimal_price, net_profit, ai_data, cex_data, clean_item_url, clean_checkout_url, image_url,
         kit_folder, seller_city=seller_city, is_local=is_local, image_urls=image_urls
     )
 
-    score = int(ai_data.get("deal_score", 8))
     score_badge = SCORE_BADGES.get(score, f"⭐ {score}/10 • CHOLLO VERIFICADO")
     identified_model = ai_data.get("identified_model", title)
     vis_conf = str(ai_data.get("visual_confidence", "alta")).upper()
@@ -1846,16 +1989,18 @@ def send_discord_alert(
     else:
         cex_link = f"https://es.webuy.com/search?stext={urllib.parse.quote(search_term_used)}"
 
+    base_cost_for_cex = (offer_landed_cost if deal_type == "offer_opportunity" else landed_cost) + charger_penalty
+
     if cex_data and cex_data.get("cash", 0) > 0:
-        effective_cost = landed_cost + charger_penalty
-        net_cash = cex_data["cash"] - effective_cost
-        net_voucher = cex_data["voucher"] - effective_cost
+        net_cash = cex_data["cash"] - base_cost_for_cex
+        net_voucher = cex_data["voucher"] - base_cost_for_cex
         sign_c = "+" if net_cash >= 0 else ""
         sign_v = "+" if net_voucher >= 0 else ""
         safety_tag = "🟢 **GANANCIA DIRECTA EN ACTO**" if net_cash >= 5 else "🛡️ **100% AMORTIZADO EN CEX**"
+        cost_ref_label = f"con oferta de {recommended_offer}€" if deal_type == "offer_opportunity" else "al precio actual"
         cex_field_val = (
             f"🏷️ **Ficha CeX:** `{cex_data['box_name']}`\n"
-            f"💵 **Efectivo CeX:** **{cex_data['cash']:.0f}€** (`{sign_c}{net_cash:.0f}€` neto) | "
+            f"💵 **Efectivo CeX:** **{cex_data['cash']:.0f}€** (`{sign_c}{net_cash:.0f}€` neto {cost_ref_label}) | "
             f"🎟️ **Vale CeX:** **{cex_data['voucher']:.0f}€** (`{sign_v}{net_voucher:.0f}€`) *(PVP CeX: {cex_data['sell']:.0f}€)*\n"
             f"{safety_tag} — [Abrir Ficha Oficial CeX]({cex_link})"
         )
@@ -1874,18 +2019,52 @@ def send_discord_alert(
         "Hola! Me interesa, funciona todo bien? Si está disponible te lo compro ahora mismo por la aplicación."
     )
 
-    if mode == "personal":
+    # Si es un 10/10, el enlace principal lleva directo al Checkout 1-Tap; en caso contrario lleva directo al anuncio
+    primary_action_url = clean_checkout_url if (score == 10 and deal_type != "offer_opportunity") else clean_item_url
+    user_ping = f"<@{ALERT_USER_ID}> " if ALERT_USER_ID else ""
+
+    # ==================== CABECERA DISTINTA PARA OPORTUNIDAD DE CHOLLO (HACER OFERTA) ====================
+    if deal_type == "offer_opportunity":
+        header_title = (
+            f"🤝 [OPORTUNIDAD DE CHOLLO • {plat}] ({score}/10): {identified_model[:42]} "
+            f"— Ofertar {recommended_offer}€ (Anuncio: {price:.0f}€) ➔ +{net_profit:.0f}€"
+        )
+        color = PLATFORM_COLORS["OFFER_OPPORTUNITY"]
+        cost_field_name = "🎯 Estrategia de Oferta"
+        cost_field_val = (
+            f"🏷️ **Anuncio:** ~~{price:.0f}€~~ ➔ **Ofertar: `{recommended_offer}€`** (**-{offer_disc_pct}%**)\n"
+            f"💳 **Puesto en casa si acepta:** **{offer_landed_cost:.0f}€**"
+        )
+        profit_block = (
+            f"💰 **Reventa Rápida (<48h):** **{optimal_price:.0f}€** *(Beneficio limpio si acepta: **`+{net_profit:.0f}€`**)*\n"
+            f"🗣️ **Mensaje de Oferta Listo (1 toque para copiar):**\n```text\n{haggle_msg}\n```"
+        )
+        block_title = "🤝 Plan de Regateo y Rentabilidad"
+        push_notification_content = (
+            f"🤝 **[OPORTUNIDAD DE CHOLLO • OFERTAR {recommended_offer}€]** ({score}/10) {user_ping}\n"
+            f"👉 **ABRIR ANUNCIO PARA OFERTAR:** {clean_item_url}\n"
+            f"💡 **{identified_model}** listado a **{price:.0f}€** • Lanza oferta de **{recommended_offer}€** (-{offer_disc_pct}%) ➔ **Ganas +{net_profit:.0f}€ limpios**"
+        )
+    elif mode == "personal":
         header_title = f"💾 [SERVIDOR PERSONAL • {plat}] ({score}/10): {identified_model} — {price:.0f}€ (Ahorras +{net_profit:.0f}€)"
         color = PLATFORM_COLORS["PERSONAL"]
+        cost_field_name = "💳 Coste Puesto en Casa"
+        cost_field_val = f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*"
         profit_block = (
             f"🏷️ **Valor normal de mercado:** **{optimal_price:.0f}€** | **Ahorro neto real:** **`+{net_profit:.0f}€`**\n"
             f"💬 **Mensaje rápido:**\n```text\n{fast_msg}\n```"
         )
         block_title = "🖥️ Análisis de Ahorro para tu Servidor"
+        push_notification_content = (
+            f"💾 **[CHOLLO SERVIDOR • {score}/10] {identified_model} — {price:.0f}€ (Ahorras +{net_profit:.0f}€)** {user_ping}\n"
+            f"👉 **IR AL ANUNCIO:** {primary_action_url}"
+        )
     else:
         emoji_plat = "🚨" if score == 10 else {"WALLAPOP": "🔥", "VINTED": "💎", "MILANUNCIOS": "🟢", "CASHCONVERTERS": "🏪", "EBAY": "🌐", "TODOCOLECCION": "🏺"}.get(plat, "🔥")
         header_title = f"{emoji_plat} [{plat}] ({score}/10): {identified_model[:55]} — {price:.0f}€ (Limpio +{net_profit:.0f}€)"
         color = 0xFFAA00 if score == 10 else (0x2ECC71 if is_local else PLATFORM_COLORS.get(plat, 0x3498DB))
+        cost_field_name = "💳 Coste Puesto en Casa"
+        cost_field_val = f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*"
         profit_block = (
             f"💰 **Reventa Rápida (<48h):** **{optimal_price:.0f}€** *(Beneficio limpio: **`+{net_profit:.0f}€`**)*\n"
             f"📁 **Kit bajo demanda:** Pulsa **✅ ¡Comprado!** para limpiar fotos y generar anuncio\n"
@@ -1893,17 +2072,30 @@ def send_discord_alert(
         )
         block_title = "📦 Rentabilidad y Acción Rápida"
 
+        if score == 10:
+            push_notification_content = (
+                f"🚨 **¡SIGUE CON LA COMPRA! 10/10 COMPRA A CIEGAS (+{net_profit:.0f}€ LIMPIOS)** 🚨 {user_ping}\n"
+                f"⚡ **CHECKOUT DIRECTO 1-TAP:** {clean_checkout_url}\n"
+                f"🔗 **Ver Anuncio:** {clean_item_url} • **Modelo:** `{identified_model}` ({price:.0f}€)"
+            )
+        else:
+            push_notification_content = (
+                f"✅ **¡APROBADO POR IA ({score}/10)! SIGUE CON LA COMPRA (+{net_profit:.0f}€ LIMPIOS)** {user_ping}\n"
+                f"👉 **ABRIR ANUNCIO:** {clean_item_url}\n"
+                f"💳 **Checkout Rápido:** {clean_checkout_url} • **Modelo:** `{identified_model}` ({price:.0f}€)"
+            )
+
     clean_embed_desc = re.sub(r"\s+", " ", html.unescape(description or "Sin descripción.")).strip()
-    footer_text = f"Boti Sniper v4.2 (Visión Multimodal + Respaldo CeX) • ID: {deal_id} • {datetime.now().strftime('%H:%M:%S')}".replace("\n", " ").strip()
+    footer_text = f"Boti Sniper v4.3 (Visión Multimodal + Offer Sniper) • ID: {deal_id} • {datetime.now().strftime('%H:%M:%S')}".replace("\n", " ").strip()
 
     embed = {
         "title": header_title[:250],
-        "url": item_url,
+        "url": primary_action_url,
         "color": color,
         "description": (f"{clean_embed_desc[:220]}..." if len(clean_embed_desc) > 220 else clean_embed_desc),
         "fields": [
             {"name": "🎯 Radar", "value": target["name"], "inline": True},
-            {"name": "💳 Coste Puesto en Casa", "value": f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*", "inline": True},
+            {"name": cost_field_name, "value": cost_field_val, "inline": True},
             {"name": "🚚 Entrega / Origen", "value": f"{loc_badge}\n{ship_badge}", "inline": True},
             {"name": "🧠 Auditoría Visual & Técnica IA", "value": ai_text[:1020], "inline": False},
             {"name": "🏪 Suelo de Amortización CeX España", "value": cex_field_val[:1020], "inline": False},
@@ -1915,19 +2107,23 @@ def send_discord_alert(
     if not enhanced_cover_bytes and image_url:
         embed["image"] = {"url": image_url}
 
-    has_valid_checkout = bool(checkout_url and checkout_url != item_url and "transaction/buy" not in str(checkout_url))
-    buy_label = "⚡ Pago Directo (1-Tap)" if has_valid_checkout else f"⚡ Comprar en {plat.capitalize()}"
-    final_buy_url = checkout_url if has_valid_checkout else item_url
+    has_distinct_checkout = bool(clean_checkout_url and clean_checkout_url != clean_item_url)
+    row1_buttons = []
+    if deal_type == "offer_opportunity":
+        row1_buttons.append({"type": 2, "style": 5, "label": f"🤝 Abrir y Ofertar {recommended_offer}€", "url": clean_item_url})
+        if has_distinct_checkout:
+            row1_buttons.append({"type": 2, "style": 5, "label": f"⚡ Checkout Directo ({price:.0f}€)", "url": clean_checkout_url})
+    else:
+        if has_distinct_checkout:
+            row1_buttons.append({"type": 2, "style": 5, "label": f"⚡ Pago Directo 1-Tap ({price:.0f}€)", "url": clean_checkout_url})
+            row1_buttons.append({"type": 2, "style": 5, "label": "💬 Abrir Anuncio / Chat", "url": clean_item_url})
+        else:
+            row1_buttons.append({"type": 2, "style": 5, "label": f"⚡ Comprar en {plat.capitalize()} ({price:.0f}€)", "url": clean_item_url})
+
+    row1_buttons.append({"type": 2, "style": 5, "label": "🏪 Ficha CeX", "url": cex_link})
 
     components = [
-        {
-            "type": 1,
-            "components": [
-                {"type": 2, "style": 5, "label": buy_label[:80], "url": final_buy_url},
-                {"type": 2, "style": 5, "label": "💬 Ver Anuncio / Chat", "url": item_url},
-                {"type": 2, "style": 5, "label": "🏪 Ficha CeX", "url": cex_link}
-            ]
-        },
+        {"type": 1, "components": row1_buttons},
         {
             "type": 1,
             "components": [
@@ -1939,42 +2135,24 @@ def send_discord_alert(
         }
     ]
 
-    # Si existe un mensaje Flash previo (Fase 1), editarlo in-situ con el embed completo y la nota IA
+    # Si había un mensaje Flash previo (Fase 1), lo borramos y enviamos un POST NUEVO
+    # para que salte la 2ª notificación push en el móvil con el veredicto de la IA.
     if flash_message and isinstance(flash_message, dict) and flash_message.get("message_id"):
         f_id = flash_message["message_id"]
         f_via = flash_message.get("via")
-        verified_header = (
-            f"✅ **[APROBADO POR IA • {score}/10]** **{identified_model}** — **{price:.0f}€** "
-            f"*(Limpio: **+{net_profit:.0f}€**)* ➔ [**[COMPRAR YA]**]({final_buy_url})"
-        )
         if f_via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
-            patch_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
-            bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
+            del_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
             try:
-                r = requests.patch(
-                    patch_url,
-                    headers=bot_headers,
-                    json={"content": verified_header, "embeds": [embed], "components": components},
-                    timeout=10
-                )
-                if r.status_code in (200, 201):
-                    return
-            except Exception as e:
-                print(f"[WARN] Fallo editando Flash Alert en Bot API, enviando nuevo: {e}")
-
+                requests.delete(del_url, headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5)
+            except Exception:
+                pass
         elif f_via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
             base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
-            patch_url = f"{base_wh}/messages/{f_id}"
+            del_url = f"{base_wh}/messages/{f_id}"
             try:
-                r = requests.patch(
-                    patch_url,
-                    json={"content": verified_header, "embeds": [embed]},
-                    timeout=10
-                )
-                if r.status_code in (200, 201):
-                    return
-            except Exception as e:
-                print(f"[WARN] Fallo editando Flash Alert en Webhook, enviando nuevo: {e}")
+                requests.delete(del_url, timeout=5)
+            except Exception:
+                pass
 
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
@@ -1982,7 +2160,7 @@ def send_discord_alert(
         try:
             if enhanced_cover_bytes:
                 embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"embeds": [embed], "components": components})
+                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], "components": components})
                 mp = CurlMime()
                 mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
                 mp.addpart(name="files[0]", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
@@ -1991,24 +2169,24 @@ def send_discord_alert(
                 r = requests.post(
                     bot_api_url,
                     headers={**bot_headers, "Content-Type": "application/json"},
-                    json={"embeds": [embed], "components": components},
+                    json={"content": push_notification_content, "embeds": [embed], "components": components},
                     timeout=10
                 )
             if r.status_code in (200, 201):
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Error enviando alerta por Bot API: {e}")
 
     if WEBHOOK_URL and "http" in WEBHOOK_URL:
         try:
             if enhanced_cover_bytes:
                 embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"embeds": [embed]})
+                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed]})
                 mp = CurlMime()
                 mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
                 mp.addpart(name="file", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
                 requests.post(WEBHOOK_URL, multipart=mp, timeout=15)
             else:
-                requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
+                requests.post(WEBHOOK_URL, json={"content": push_notification_content, "embeds": [embed]}, timeout=10)
         except Exception:
             pass

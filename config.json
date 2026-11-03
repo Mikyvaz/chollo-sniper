@@ -76,87 +76,223 @@
     "for parts",
     "not working",
     "faulty",
-    "for repair"
+    "for repair",
+    "virement",
+    "bancaire",
+    "bancaires",
+    "bonifico",
+    "whatsapp",
+    "scrivetemi",
+    "prima di acquistare",
+    "avant d'acheter",
+    "avant d’acheter",
+    "ne pas acheter",
+    "non procedere",
+    "non proced",
+    "aucune remise",
+    "paypal",
+    "bizum",
+    "bancaria",
+    "transferencia"
   ],
   "targets": [
     {
-      "id": "ssd_sata_server",
-      "name": "💾 [PERSONAL SERVIDOR] SSD SATA 2.5\" (1TB / 2TB / 4TB)",
+      "id": "hdd_server_storage",
+      "name": "🗄️ [PERSONAL SERVIDOR] HDD 3.5\" SATA / NAS (>1TB: 2TB a 16TB)",
       "enabled": true,
       "mode": "personal",
       "tier": "hot",
       "min_savings_eur": 25,
-      "platforms": ["wallapop", "ebay", "milanuncios"],
-      "keywords": "ssd sata 1tb 2tb 4tb",
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "ebay",
+        "milanuncios",
+        "cashconverters"
+      ],
+      "keywords": "disco duro hdd 2tb 4tb 6tb 8tb nas",
       "wallapop_keywords": [
-        "ssd"
+        "disco duro 2tb",
+        "disco duro 4tb",
+        "disco duro 8tb",
+        "wd red",
+        "seagate ironwolf"
       ],
       "vinted_keywords": [
-        "ssd sata"
+        "hdd 2tb",
+        "hdd 4tb",
+        "wd red",
+        "seagate ironwolf"
       ],
       "multi_keywords": [
-        "ssd sata 1tb",
-        "ssd sata 2tb",
-        "samsung 870 evo 1tb",
-        "crucial mx500 1tb"
+        "disco duro 2tb",
+        "disco duro 4tb",
+        "disco duro 6tb",
+        "disco duro 8tb",
+        "wd red",
+        "seagate ironwolf"
       ],
-      "min_price": 18,
-      "max_price": 135,
+      "min_price": 15,
+      "max_price": 145,
       "submodel_price_caps": [
         {
-          "match_any": ["1tb", "1 tb", "960gb", "960 gb", "1000gb"],
-          "unless_any": ["2tb", "2 tb", "4tb", "4 tb", "1.92tb", "3.84tb", "lote", "pack", "x2", "2x"],
-          "max_price": 50
+          "match_any": [
+            "1tb",
+            "1 tb",
+            "1000gb",
+            "1000 gb"
+          ],
+          "unless_any": [
+            "2tb",
+            "2 tb",
+            "3tb",
+            "3 tb",
+            "4tb",
+            "4 tb",
+            "6tb",
+            "6 tb",
+            "8tb",
+            "8 tb",
+            "10tb",
+            "12tb",
+            "14tb",
+            "16tb"
+          ],
+          "max_price": 1
+        },
+        {
+          "match_any": [
+            "2tb",
+            "2 tb",
+            "2000gb"
+          ],
+          "unless_any": [
+            "3tb",
+            "4tb",
+            "6tb",
+            "8tb",
+            "10tb",
+            "12tb",
+            "14tb",
+            "16tb",
+            "lote",
+            "pack",
+            "x2",
+            "2x"
+          ],
+          "max_price": 35
+        },
+        {
+          "match_any": [
+            "3tb",
+            "3 tb",
+            "3000gb"
+          ],
+          "unless_any": [
+            "4tb",
+            "6tb",
+            "8tb",
+            "10tb",
+            "12tb",
+            "14tb",
+            "16tb",
+            "lote",
+            "pack",
+            "x2",
+            "2x"
+          ],
+          "max_price": 45
+        },
+        {
+          "match_any": [
+            "4tb",
+            "4 tb",
+            "4000gb"
+          ],
+          "unless_any": [
+            "6tb",
+            "8tb",
+            "10tb",
+            "12tb",
+            "14tb",
+            "16tb",
+            "lote",
+            "pack",
+            "x2",
+            "2x"
+          ],
+          "max_price": 65
+        },
+        {
+          "match_any": [
+            "6tb",
+            "6 tb",
+            "6000gb"
+          ],
+          "unless_any": [
+            "8tb",
+            "10tb",
+            "12tb",
+            "14tb",
+            "16tb",
+            "lote",
+            "pack",
+            "x2",
+            "2x"
+          ],
+          "max_price": 90
         }
       ],
-      "cex_cash_ref": "Uso Personal Homelab • Ref mercado usado: 1TB (~65-75€) | 2TB (~125-140€) | 4TB (~230-260€)",
+      "cex_cash_ref": "Uso Personal Homelab • Ref mercado usado: 2TB (~45-55€) | 4TB (~75-95€) | 6TB (~115-135€) | 8TB+ (~150-195€)",
       "est_resale": "Ahorro Directo Servidor",
-      "ai_valuation_guide": "MODO COMPRA PERSONAL PARA SERVIDOR LINUX: El usuario busca discos SSD de formato 2.5 pulgadas SATA III de 1TB en adelante (1TB, 960GB, 1.92TB, 2TB, 3.84TB, 4TB) en buen estado de salud para su servidor. 1) RECHAZA SIEMPRE discos NVMe M.2 (formato chicle PCIe), discos duros mecánicos HDD (7200rpm/5400rpm) y capacidades menores de 960GB (rechaza 120GB, 240GB, 250GB, 480GB, 500GB, 512GB). 2) Modelos TOP buscados: Samsung 860/870 EVO/PRO/QVO, Crucial MX500/BX500, Kingston KC600, WD Blue 3D / Red SA500, SanDisk Ultra 3D, o Enterprise SATA (Intel D3-S4510/S4610, Micron 5200/5300/5400, Samsung PM883/SM883, Seagate IronWolf 125). 3) En 'estimated_resale_price' pon el valor real de mercado de segunda mano en buen estado para calcular el ahorro del usuario: 960GB/1TB = 70€ (78€ si es PRO/Enterprise o precintado), 1.92TB/2TB = 135€ (150€ si es PRO/Enterprise/Nuevo), 3.84TB/4TB = 250€. 4) Es CHOLLO VÁLIDO (is_valid_deal: true) si: 1TB cuesta <= 48€ puesto en casa, 2TB cuesta <= 95€ puesto en casa, o 4TB cuesta <= 175€ puesto en casa, y no presenta sectores defectuosos ni fallos SMART.",
+      "ai_valuation_guide": "MODO COMPRA PERSONAL PARA SERVIDOR LINUX: El usuario busca discos duros mecánicos HDD de MÁS DE 1TB (estrictamente 2TB, 3TB, 4TB, 6TB, 8TB, 10TB, 12TB, 14TB o 16TB) con interfaz SATA III (preferiblemente 3.5 pulgadas internos o externos de escritorio fácilmente extraíbles) en buen estado de salud SMART. 1) RECHAZA SIEMPRE discos de 1TB o menos (rechaza 500GB, 1TB, etc.), discos con interfaz empresarial SAS (12Gb/s SAS no funciona en placa SATA normal sin controladora HBA), discos con sectores reasignados/pendientes (CrystalDiskInfo en 'Riesgo' o 'Malo') y carcasas vacías. 2) Modelos TOP priorizados (CMR/NAS/Enterprise SATA): WD Red Plus / Red Pro, WD Ultrastar / Gold / Purple, Seagate IronWolf / IronWolf Pro / Exos 7E8 / Exos X16 SATA, Toshiba N300 / MG Series, HGST Ultrastar SATA. 3) En 'estimated_resale_price' pon el valor real de mercado de segunda mano en buen estado para calcular el ahorro: 2TB = 50€ (60€ si es NAS/Red/IronWolf), 3TB = 65€, 4TB = 90€ (105€ si es NAS/Enterprise), 6TB = 130€, 8TB = 165€, 10TB+ = 200€. 4) Es CHOLLO VÁLIDO (is_valid_deal: true) si: 2TB cuesta <= 35€, 3TB <= 45€, 4TB <= 65€, 6TB <= 90€, u 8TB+ <= 135€, con salud 'Bueno' o pocas horas de uso.",
       "must_contain_any": [
-        "1tb",
-        "1 tb",
-        "960gb",
-        "960 gb",
-        "1.92tb",
         "2tb",
         "2 tb",
-        "3.84tb",
+        "3tb",
+        "3 tb",
         "4tb",
         "4 tb",
-        "1000gb"
+        "6tb",
+        "6 tb",
+        "8tb",
+        "8 tb",
+        "10tb",
+        "10 tb",
+        "12tb",
+        "12 tb",
+        "14tb",
+        "14 tb",
+        "16tb",
+        "16 tb",
+        "2000gb",
+        "4000gb"
       ],
       "blacklist": [
-        "nvme",
-        "m.2",
-        "m2",
-        "pcie",
-        "externo",
-        "externe",
-        "external",
-        "portable",
-        "portatil",
-        "portátil",
-        "portatile",
-        "samsung t7",
-        "samsung t5",
-        "sandisk extreme",
-        "sshd",
-        "ibrido",
-        "hibrido",
         "120gb",
-        "128gb",
         "240gb",
         "250gb",
-        "256gb",
+        "320gb",
         "480gb",
         "500gb",
         "512gb",
-        "hdd",
-        "7200rpm",
-        "5400rpm",
-        "carcasa",
+        "750gb",
+        "st1000",
+        "wd10ezex",
+        "wd10efrx",
+        "interfaz sas",
+        "disco sas",
+        "12gb/s sas",
+        "10k rpm",
+        "15k rpm",
+        "riesgo",
+        "sectores defectuosos",
+        "sectores reasignados",
+        "crystaldisk riesgo",
+        "solo carcasa",
         "caja externa",
-        "adaptador"
+        "docking station",
+        "funda disco"
       ]
     },
     {
@@ -165,7 +301,13 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "todocoleccion"
+      ],
       "keywords": "nintendo 3ds consola",
       "wallapop_keywords": [
         "nintendo 3ds",
@@ -184,18 +326,36 @@
       "max_price": 105,
       "submodel_price_caps": [
         {
-          "match_any": ["2ds"],
-          "unless_any": ["xl", "ll", "new"],
+          "match_any": [
+            "2ds"
+          ],
+          "unless_any": [
+            "xl",
+            "ll",
+            "new"
+          ],
           "max_price": 25
         },
         {
-          "match_any": ["3ds"],
-          "unless_any": ["xl", "ll", "new", "2ds"],
+          "match_any": [
+            "3ds"
+          ],
+          "unless_any": [
+            "xl",
+            "ll",
+            "new",
+            "2ds"
+          ],
           "max_price": 40
         },
         {
-          "match_any": ["3ds xl", "3ds ll"],
-          "unless_any": ["new"],
+          "match_any": [
+            "3ds xl",
+            "3ds ll"
+          ],
+          "unless_any": [
+            "new"
+          ],
           "max_price": 76
         }
       ],
@@ -236,7 +396,12 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "nintendo switch oled",
       "wallapop_keywords": [
         "nintendo switch oled"
@@ -284,7 +449,13 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "ebay"
+      ],
       "keywords": "steam deck rog ally legion go",
       "wallapop_keywords": [
         "steam deck",
@@ -302,13 +473,33 @@
       "max_price": 255,
       "submodel_price_caps": [
         {
-          "match_any": ["64gb", "64 gb", "64 go"],
-          "unless_any": ["oled", "512gb", "1tb", "rog ally", "legion go"],
+          "match_any": [
+            "64gb",
+            "64 gb",
+            "64 go"
+          ],
+          "unless_any": [
+            "oled",
+            "512gb",
+            "1tb",
+            "rog ally",
+            "legion go"
+          ],
           "max_price": 175
         },
         {
-          "match_any": ["256gb", "256 gb", "256 go"],
-          "unless_any": ["oled", "512gb", "1tb", "rog ally", "legion go"],
+          "match_any": [
+            "256gb",
+            "256 gb",
+            "256 go"
+          ],
+          "unless_any": [
+            "oled",
+            "512gb",
+            "1tb",
+            "rog ally",
+            "legion go"
+          ],
           "max_price": 188
         }
       ],
@@ -339,7 +530,14 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay", "todocoleccion"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "ebay",
+        "todocoleccion"
+      ],
       "keywords": "canon g7x sx740 sx730 rx100",
       "wallapop_keywords": [
         "canon g7x",
@@ -360,13 +558,42 @@
       "max_price": 180,
       "submodel_price_caps": [
         {
-          "match_any": ["sx720", "sx 720", "sx730", "sx 730"],
-          "unless_any": ["sx740", "g7x", "g7 x"],
+          "match_any": [
+            "sx720",
+            "sx 720",
+            "sx730",
+            "sx 730"
+          ],
+          "unless_any": [
+            "sx740",
+            "g7x",
+            "g7 x"
+          ],
           "max_price": 98
         },
         {
-          "match_any": ["rx100", "rx 100", "dsc-rx100"],
-          "unless_any": ["m2", "m3", "m4", "m5", "m6", "m7", "mark ii", "mark iii", "mark iv", "mark v", "mk ii", "mk iii", " ii", " iii", " iv"],
+          "match_any": [
+            "rx100",
+            "rx 100",
+            "dsc-rx100"
+          ],
+          "unless_any": [
+            "m2",
+            "m3",
+            "m4",
+            "m5",
+            "m6",
+            "m7",
+            "mark ii",
+            "mark iii",
+            "mark iv",
+            "mark v",
+            "mk ii",
+            "mk iii",
+            " ii",
+            " iii",
+            " iv"
+          ],
           "max_price": 82
         }
       ],
@@ -422,7 +649,13 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "ebay"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "ebay"
+      ],
       "keywords": "sony a6000 zv-e10 fujifilm x-t20 x-t30",
       "wallapop_keywords": [
         "sony a6000",
@@ -443,13 +676,29 @@
       "max_price": 260,
       "submodel_price_caps": [
         {
-          "match_any": ["x-t10", "xt10"],
-          "unless_any": ["x-t20", "xt20", "x-t30", "xt30"],
+          "match_any": [
+            "x-t10",
+            "xt10"
+          ],
+          "unless_any": [
+            "x-t20",
+            "xt20",
+            "x-t30",
+            "xt30"
+          ],
           "max_price": 112
         },
         {
-          "match_any": ["a6000", "alpha 6000", "ilce-6000"],
-          "unless_any": ["zv-e10", "x-t20", "x-t30"],
+          "match_any": [
+            "a6000",
+            "alpha 6000",
+            "ilce-6000"
+          ],
+          "unless_any": [
+            "zv-e10",
+            "x-t20",
+            "x-t30"
+          ],
           "max_price": 195
         }
       ],
@@ -488,7 +737,11 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "todocoleccion", "milanuncios"],
+      "platforms": [
+        "wallapop",
+        "todocoleccion",
+        "milanuncios"
+      ],
       "keywords": "pokemon nintendo ds",
       "wallapop_keywords": [
         "pokemon"
@@ -549,7 +802,12 @@
       "enabled": true,
       "mode": "resale",
       "tier": "hot",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "mac mini m1 m2 ipad 9 ipad 10 ipad air m1",
       "wallapop_keywords": [
         "mac mini",
@@ -570,23 +828,86 @@
       "max_price": 245,
       "submodel_price_caps": [
         {
-          "match_any": ["ipad 9", "ipad 9a", "ipad 9ª", "9 generacion", "9ª generacion", "9ª generación", "9eme", "9ème", "9 eme", "9 ème", "ipad 10.2", "a2602", "a2603"],
-          "unless_any": ["pro", "air", "m1", "m2", "ipad 10 ", "10 generacion", "10ª", "256gb", "256 gb"],
+          "match_any": [
+            "ipad 9",
+            "ipad 9a",
+            "ipad 9ª",
+            "9 generacion",
+            "9ª generacion",
+            "9ª generación",
+            "9eme",
+            "9ème",
+            "9 eme",
+            "9 ème",
+            "ipad 10.2",
+            "a2602",
+            "a2603"
+          ],
+          "unless_any": [
+            "pro",
+            "air",
+            "m1",
+            "m2",
+            "ipad 10 ",
+            "10 generacion",
+            "10ª",
+            "256gb",
+            "256 gb"
+          ],
           "max_price": 118
         },
         {
-          "match_any": ["ipad 10", "ipad 10a", "ipad 10ª", "10 generacion", "10ª generacion", "10ª generación", "10eme", "10ème", "10 eme", "a2696", "a2757"],
-          "unless_any": ["pro", "air", "m1", "m2", "256gb", "256 gb"],
+          "match_any": [
+            "ipad 10",
+            "ipad 10a",
+            "ipad 10ª",
+            "10 generacion",
+            "10ª generacion",
+            "10ª generación",
+            "10eme",
+            "10ème",
+            "10 eme",
+            "a2696",
+            "a2757"
+          ],
+          "unless_any": [
+            "pro",
+            "air",
+            "m1",
+            "m2",
+            "256gb",
+            "256 gb"
+          ],
           "max_price": 175
         },
         {
-          "match_any": ["mac mini m1", "a2348"],
-          "unless_any": ["m2", "16gb", "16 gb", "512gb", "512 gb", "1tb", "1 tb"],
+          "match_any": [
+            "mac mini m1",
+            "a2348"
+          ],
+          "unless_any": [
+            "m2",
+            "16gb",
+            "16 gb",
+            "512gb",
+            "512 gb",
+            "1tb",
+            "1 tb"
+          ],
           "max_price": 188
         },
         {
-          "match_any": ["ipad air 5", "ipad air m1", "a2588", "a2589"],
-          "unless_any": ["m2", "256gb", "256 gb"],
+          "match_any": [
+            "ipad air 5",
+            "ipad air m1",
+            "a2588",
+            "a2589"
+          ],
+          "unless_any": [
+            "m2",
+            "256gb",
+            "256 gb"
+          ],
           "max_price": 198
         }
       ],
@@ -670,7 +991,12 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "consola nintendo switch",
       "wallapop_keywords": [
         "nintendo switch"
@@ -687,8 +1013,13 @@
       "max_price": 62,
       "submodel_price_caps": [
         {
-          "match_any": ["lite"],
-          "unless_any": ["lote", "pack"],
+          "match_any": [
+            "lite"
+          ],
+          "unless_any": [
+            "lote",
+            "pack"
+          ],
           "max_price": 42
         }
       ],
@@ -732,7 +1063,12 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "milanuncios", "cashconverters", "ebay"],
+      "platforms": [
+        "wallapop",
+        "milanuncios",
+        "cashconverters",
+        "ebay"
+      ],
       "keywords": "rtx 3060 3070 3080 4060",
       "wallapop_keywords": [
         "rtx"
@@ -751,18 +1087,45 @@
       "max_price": 175,
       "submodel_price_caps": [
         {
-          "match_any": ["8gb", "8 gb"],
-          "unless_any": ["3060 ti", "3060ti", "3070", "3080", "4060", "4070", "12gb"],
+          "match_any": [
+            "8gb",
+            "8 gb"
+          ],
+          "unless_any": [
+            "3060 ti",
+            "3060ti",
+            "3070",
+            "3080",
+            "4060",
+            "4070",
+            "12gb"
+          ],
           "max_price": 100
         },
         {
-          "match_any": ["3060"],
-          "unless_any": ["ti", "3070", "3080", "4060", "4070"],
+          "match_any": [
+            "3060"
+          ],
+          "unless_any": [
+            "ti",
+            "3070",
+            "3080",
+            "4060",
+            "4070"
+          ],
           "max_price": 115
         },
         {
-          "match_any": ["3060 ti", "3060ti", "3070"],
-          "unless_any": ["3080", "4060", "4070"],
+          "match_any": [
+            "3060 ti",
+            "3060ti",
+            "3070"
+          ],
+          "unless_any": [
+            "3080",
+            "4060",
+            "4070"
+          ],
           "max_price": 152
         }
       ],
@@ -796,7 +1159,13 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "todocoleccion"
+      ],
       "keywords": "ps vita",
       "wallapop_keywords": [
         "ps vita"
@@ -841,7 +1210,13 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters", "todocoleccion"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "todocoleccion"
+      ],
       "keywords": "game boy advance sp gameboy micro nintendo dsi xl",
       "wallapop_keywords": [
         "game boy advance sp",
@@ -861,8 +1236,15 @@
       "max_price": 55,
       "submodel_price_caps": [
         {
-          "match_any": ["dsi xl", "dsi ll"],
-          "unless_any": ["advance sp", "gba sp", "micro"],
+          "match_any": [
+            "dsi xl",
+            "dsi ll"
+          ],
+          "unless_any": [
+            "advance sp",
+            "gba sp",
+            "micro"
+          ],
           "max_price": 42
         }
       ],
@@ -894,7 +1276,11 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "volante logitech g29 t300",
       "wallapop_keywords": [
         "logitech g29",
@@ -913,13 +1299,26 @@
       "max_price": 82,
       "submodel_price_caps": [
         {
-          "match_any": ["g920"],
-          "unless_any": ["g29", "g923", "t300"],
+          "match_any": [
+            "g920"
+          ],
+          "unless_any": [
+            "g29",
+            "g923",
+            "t300"
+          ],
           "max_price": 48
         },
         {
-          "match_any": ["g29"],
-          "unless_any": ["g923", "t300", "shifter", "palanca"],
+          "match_any": [
+            "g29"
+          ],
+          "unless_any": [
+            "g923",
+            "t300",
+            "shifter",
+            "palanca"
+          ],
           "max_price": 65
         }
       ],
@@ -949,7 +1348,12 @@
       "enabled": true,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "kindle paperwhite",
       "wallapop_keywords": [
         "kindle paperwhite"
@@ -966,8 +1370,26 @@
       "max_price": 46,
       "submodel_price_caps": [
         {
-          "match_any": ["10", "10a", "10ª", "10eme", "10ème", "pq94wif", "8gb", "8 gb"],
-          "unless_any": ["11", "11a", "11ª", "12", "6.8", "m2l3ek", "16gb", "oasis"],
+          "match_any": [
+            "10",
+            "10a",
+            "10ª",
+            "10eme",
+            "10ème",
+            "pq94wif",
+            "8gb",
+            "8 gb"
+          ],
+          "unless_any": [
+            "11",
+            "11a",
+            "11ª",
+            "12",
+            "6.8",
+            "m2l3ek",
+            "16gb",
+            "oasis"
+          ],
           "max_price": 30
         }
       ],
@@ -998,7 +1420,12 @@
       "enabled": false,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["ebay", "wallapop", "milanuncios", "cashconverters"],
+      "platforms": [
+        "ebay",
+        "wallapop",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "thinkcentre tiny elitedesk mini optiplex micro",
       "wallapop_keywords": [
         "thinkcentre m720q",
@@ -1033,7 +1460,12 @@
       "enabled": false,
       "mode": "resale",
       "tier": "standard",
-      "platforms": ["wallapop", "vinted", "milanuncios", "cashconverters"],
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
       "keywords": "hp prime ti-nspire cx ti-84 plus ce",
       "wallapop_keywords": [
         "hp prime",
@@ -1058,6 +1490,94 @@
       "blacklist": [
         "fx-82",
         "fx-991"
+      ]
+    },
+    {
+      "id": "ps5_consoles_gta6",
+      "name": "🎮 PlayStation 5 (Fat / Slim / Digital) - Alta Demanda GTA 6",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
+      "keywords": "consola playstation 5 ps5",
+      "wallapop_keywords": [
+        "playstation 5",
+        "ps5 slim",
+        "consola ps5"
+      ],
+      "vinted_keywords": [
+        "playstation 5",
+        "ps5 slim"
+      ],
+      "multi_keywords": [
+        "playstation 5 consola",
+        "ps5 slim"
+      ],
+      "min_price": 150,
+      "max_price": 265,
+      "submodel_price_caps": [
+        {
+          "match_any": [
+            "digital",
+            "sin lector",
+            "edicion digital",
+            "edición digital",
+            "digitale"
+          ],
+          "unless_any": [
+            "lector",
+            "disco",
+            "disc",
+            "standard",
+            "pro",
+            "2tb"
+          ],
+          "max_price": 220
+        }
+      ],
+      "cex_cash_ref": "238€ (PS5 Digital) | 266€ (PS5 Lector 825GB) | 285€ (PS5 Slim 1TB Lector) en efectivo CeX",
+      "est_resale": "330€ - 395€",
+      "ai_valuation_guide": "CRÍTICO ANTI-ESTAFA VINTED/WALLAPOP: 1) RECHAZA SIEMPRE (pon is_valid_deal: false y deal_score: 1) si la descripción pide pago por transferencia bancaria ('virement bancaire', 'bonifico', 'bizum', 'paypal'), si pide no comprar por la app sin escribir antes ('prima di acquistare', 'avant d\\'acheter', 'ne pas acheter directement') o si incluye un número de teléfono camuflado con guiones o espacios (ej. '392-67-38...'). 2) SOLO CONSOLAS PS5 COMPLETAS Y FUNCIONALES CON MANDO DUALSENSE. 3) Precios reales CeX España (NO uses precios de ediciones coleccionista de 600€): PS5 Digital 825GB = 238€ cash (acepta <= 220€), PS5 Estándar con Lector 825GB = 266€ cash (acepta <= 250€), PS5 Slim 1TB con Lector = 285€ cash (acepta <= 265€). En estimated_resale_price pon máximo 350€ (Fat Lector) o 380€ (Slim Lector).",
+      "must_contain_any": [
+        "ps5",
+        "playstation 5",
+        "play station 5"
+      ],
+      "blacklist": [
+        "virement",
+        "bancaire",
+        "bancaires",
+        "bonifico",
+        "whatsapp",
+        "scrivetemi",
+        "prima di acquistare",
+        "avant d'acheter",
+        "avant d’acheter",
+        "ne pas acheter",
+        "non procedere",
+        "non proced",
+        "aucune remise",
+        "paypal",
+        "bizum",
+        "solo mando",
+        "mando ps5",
+        "dualsense suelto",
+        "solo lector",
+        "lector de discos para",
+        "tapas ps5",
+        "carcasa ps5",
+        "placas laterales",
+        "soporte vertical",
+        "juego ps5",
+        "juegos ps5",
+        "hdmi roto",
+        "baneada",
+        "ps4"
       ]
     }
   ]
