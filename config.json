@@ -245,7 +245,7 @@
       ],
       "cex_cash_ref": "Uso Personal Homelab • Ref mercado usado: 2TB (~45-55€) | 4TB (~75-95€) | 6TB (~115-135€) | 8TB+ (~150-195€)",
       "est_resale": "Ahorro Directo Servidor",
-      "ai_valuation_guide": "MODO COMPRA PERSONAL PARA SERVIDOR LINUX: El usuario busca discos duros mecánicos HDD de MÁS DE 1TB (estrictamente 2TB, 3TB, 4TB, 6TB, 8TB, 10TB, 12TB, 14TB o 16TB) con interfaz SATA III (preferiblemente 3.5 pulgadas internos o externos de escritorio fácilmente extraíbles) en buen estado de salud SMART. 1) RECHAZA SIEMPRE discos de 1TB o menos (rechaza 500GB, 1TB, etc.), discos con interfaz empresarial SAS (12Gb/s SAS no funciona en placa SATA normal sin controladora HBA), discos con sectores reasignados/pendientes (CrystalDiskInfo en 'Riesgo' o 'Malo') y carcasas vacías. 2) Modelos TOP priorizados (CMR/NAS/Enterprise SATA): WD Red Plus / Red Pro, WD Ultrastar / Gold / Purple, Seagate IronWolf / IronWolf Pro / Exos 7E8 / Exos X16 SATA, Toshiba N300 / MG Series, HGST Ultrastar SATA. 3) En 'estimated_resale_price' pon el valor real de mercado de segunda mano en buen estado para calcular el ahorro: 2TB = 50€ (60€ si es NAS/Red/IronWolf), 3TB = 65€, 4TB = 90€ (105€ si es NAS/Enterprise), 6TB = 130€, 8TB = 165€, 10TB+ = 200€. 4) Es CHOLLO VÁLIDO (is_valid_deal: true) si: 2TB cuesta <= 35€, 3TB <= 45€, 4TB <= 65€, 6TB <= 90€, u 8TB+ <= 135€, con salud 'Bueno' o pocas horas de uso.",
+      "ai_valuation_guide": "MODO COMPRA PERSONAL PARA SERVIDOR LINUX: El usuario busca discos duros mecánicos HDD de capacidad 2TB, 3TB, 4TB, 6TB, 8TB, 10TB, 12TB, 14TB o 16TB con interfaz SATA III (preferiblemente 3.5 pulgadas internos o externos de escritorio fácilmente extraíbles) en buen estado de salud SMART. 1) RECHAZA SIEMPRE discos de 1TB o menos (rechaza 500GB, 1TB, etc.), discos con interfaz empresarial SAS (12Gb/s SAS no funciona en placa SATA normal sin controladora HBA), discos con sectores reasignados/pendientes (CrystalDiskInfo en 'Riesgo' o 'Malo') y carcasas vacías. 2) Modelos TOP priorizados (CMR/NAS/Enterprise SATA): WD Red Plus / Red Pro, WD Ultrastar / Gold / Purple, Seagate IronWolf / IronWolf Pro / Exos 7E8 / Exos X16 SATA, Toshiba N300 / MG Series, HGST Ultrastar SATA. 3) Distingue en identified_model la capacidad exacta ('HDD 2TB', 'HDD 4TB', 'HDD 8TB', etc.) y el modelo/marca para aplicar la valoración automática. 4) Es chollo válido si el disco está funcional con salud 'Bueno' en CrystalDiskInfo o pocas horas de uso sin sectores defectuosos.",
       "must_contain_any": [
         "2tb",
         "2 tb",
@@ -293,7 +293,8 @@
         "caja externa",
         "docking station",
         "funda disco"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "new_3ds_family",
@@ -361,7 +362,7 @@
       ],
       "cex_cash_ref": "58€ (3DS) | 102€ (3DS XL) | 129€ (New 2DS XL) | 148€-170€ (New 3DS XL) efectivo CeX",
       "est_resale": "135€ - 210€",
-      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Pokémon, Mario o Layton, cajas vacías, cartuchos R4 o consolas DSi/DS Lite antiguas). Mira las fotos para distinguir el modelo exacto: 1) 'Nintendo 2DS' plana sin bisagra (forma de cuña): CeX paga solo 32€, recházala si cuesta más de 25€. 2) 'Nintendo 3DS' pequeña antigua (2011, sin C-Stick): CeX paga 58€, recházala si cuesta más de 40€. 3) 'Nintendo 3DS XL' (antigua grande sin el pequeño C-Stick gris sobre X/Y): CeX paga 102€ cash, es chollo hasta 76€. 4) 'New Nintendo 3DS' / 'New Nintendo 3DS XL' (tienen el pequeño C-Stick gris encima de X/Y) y 'New Nintendo 2DS XL' (plegable tipo concha): CeX paga entre 129€ y 170€ en efectivo, son CHOLLAZO hasta 105€. En cex_search_query pon exactamente 'New Nintendo 3DS XL', 'Nintendo 3DS XL', 'New Nintendo 2DS XL' o 'Nintendo 3DS Consola' según lo que veas en las fotos.",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Pokémon, Mario o Layton, cajas vacías, cartuchos R4 o consolas DSi/DS Lite antiguas). Identifica con precisión en identified_model si es 'Nintendo 3DS' original (2011), 'Nintendo 2DS' plana (forma de cuña), 'Nintendo 3DS XL', 'New Nintendo 3DS', 'New Nintendo 3DS XL' o 'New Nintendo 2DS XL' para aplicar su tope exacto. En cex_search_query pon exactamente 'New Nintendo 3DS XL', 'Nintendo 3DS XL', 'New Nintendo 2DS XL' o 'Nintendo 3DS Consola' según lo que veas en las fotos.",
       "must_contain_any": [
         "3ds",
         "2ds"
@@ -388,7 +389,8 @@
         "lot de jeux",
         "lotto giochi",
         "protector pantalla"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "switch_oled",
@@ -416,7 +418,7 @@
       "max_price": 98,
       "cex_cash_ref": "94€ (Sin Caja) | 101€ (Con Caja) efectivo CeX | 165€-175€ PVP CeX",
       "est_resale": "145€ - 175€",
-      "ai_valuation_guide": "CRÍTICO: Debe ser la consola Nintendo Switch OLED funcional (marco fino y soporte trasero ancho) CON SUS DOS JOY-CONS acoplados. CeX España paga 94€ en efectivo Sin Caja (y 101€ Con Caja), y se revende rápido en Wallapop por 150-165€. RECHAZA SIEMPRE si en las fotos aparece solo la pantalla/tablet sin Joy-Cons, si tiene drift o pantalla rayada/rota, o si es solo la caja o el dock suelto. En cex_search_query usa 'Nintendo Switch OLED'.",
+      "ai_valuation_guide": "CRÍTICO: Debe ser la consola Nintendo Switch OLED funcional (marco fino y soporte trasero ancho) CON SUS DOS JOY-CONS acoplados. Distingue obligatoriamente en identified_model entre 'Nintendo Switch OLED' y ediciones especiales. RECHAZA SIEMPRE si en las fotos aparece solo la pantalla/tablet sin Joy-Cons, si tiene drift o pantalla rayada/rota, o si es solo la caja o el dock suelto. En cex_search_query usa 'Nintendo Switch OLED'.",
       "must_contain_any": [
         "oled"
       ],
@@ -441,7 +443,8 @@
         "divine edition",
         "deluxe edition",
         "limited edition"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "steam_deck_handhelds",
@@ -505,7 +508,7 @@
       ],
       "cex_cash_ref": "182€ (Deck 64GB) | 195€ (256GB) | 227€ (512GB) | 336€ (Deck OLED / Legion Go) | 272€ (ROG Ally Z1E) en CeX",
       "est_resale": "255€ - 420€",
-      "ai_valuation_guide": "CRÍTICO: Evalúa consolas PC portátiles completas y funcionales: 1) Valve Steam Deck LCD: 64GB (CeX paga 182€ cash, revende a 250€ -> acepta solo <= 175€), 256GB (CeX paga 195€ cash, revende a 270€ -> acepta <= 188€), 512GB (CeX paga 227€ cash, revende a 300€ -> acepta <= 215€). 2) Steam Deck OLED (512GB/1TB): CeX paga 336€-384€ cash, revende a 420€ -> chollazo hasta 255€. 3) ASUS ROG Ally Z1 Extreme (CeX paga 272€ cash, revende a 345€; ojo: la versión Z1 normal básica solo da 192€ en CeX, acéptala solo <= 175€). 4) Lenovo Legion Go (CeX paga 336€ cash). En cex_search_query pon 'Valve Steam Deck 64GB', 'Valve Steam Deck 256GB', 'Valve Steam Deck 512GB', 'Valve Steam Deck OLED 512GB', 'Asus ROG Ally Z1 Extreme' o 'Lenovo Legion Go'.",
+      "ai_valuation_guide": "CRÍTICO: Evalúa consolas PC portátiles completas y funcionales. Distingue obligatoriamente en identified_model entre 'Steam Deck 64GB LCD', 'Steam Deck 256GB LCD', 'Steam Deck 512GB LCD', 'Steam Deck OLED 512GB', 'Steam Deck OLED 1TB', 'ASUS ROG Ally Z1 Extreme' (rechaza Z1 normal), o 'Lenovo Legion Go'. En cex_search_query pon 'Valve Steam Deck 64GB', 'Valve Steam Deck 256GB', 'Valve Steam Deck 512GB', 'Valve Steam Deck OLED 512GB', 'Asus ROG Ally Z1 Extreme' o 'Lenovo Legion Go'.",
       "must_contain_any": [
         "steam deck",
         "steamdeck",
@@ -522,7 +525,8 @@
         "skin",
         "vinilo",
         "soporte"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "digicams_premium",
@@ -599,7 +603,7 @@
       ],
       "cex_cash_ref": "88€ (RX100 M1) | 108€ (SX720/730) | 172€ (SX740) | 187€-279€ (G7X M1/M2) en CeX",
       "est_resale": "140€ - 420€",
-      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos el modelo exacto y generación (Mark I, II, III, IV): 1) Sony DSC-RX100 Mark I (primera generación sin visor EVF): CeX paga 88€ cash y se revende a 135€, acéptala solo si cuesta <= 82€. RX100 Mark III/IV/V (M3/M4/M5): CeX paga 159€-234€ cash, son chollazo hasta 180€. 2) Canon PowerShot SX720 HS / SX730 HS: CeX paga 101€-108€ cash, acepta solo <= 98€. 3) Canon PowerShot SX740 HS: CeX paga 172€ cash, chollazo hasta 165€. 4) Canon PowerShot G7X Mark I (187€ cash CeX) y G7X Mark II/III (279€-315€ cash CeX): chollazo hasta 180€. En cex_search_query especifica siempre el modelo exacto (ej: 'Sony Cyber-shot DSC-RX100', 'Sony DSC-RX100M3', 'Canon PowerShot SX720 HS', 'Canon PowerShot SX740 HS', 'Canon PowerShot G7 X Mark II').",
+      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos el modelo exacto y generación. Distingue con exactitud en identified_model la generación exacta ('Sony RX100 M1', 'Sony RX100 M2', 'Sony RX100 M3', 'Sony RX100 M4', 'Sony RX100 M5', 'Canon G7X Mark II', 'Canon G7X Mark III', 'Ricoh GR III', 'Canon SX720 HS', 'Canon SX730 HS', 'Canon SX740 HS') leyendo las inscripciones del anillo del objetivo y cuerpo. En cex_search_query pon el nombre canónico exacto.",
       "must_contain_any": [
         "g7x",
         "g7 x",
@@ -641,7 +645,8 @@
         "cargador para",
         "solo cargador",
         "tripode"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "mirrorless_cameras",
@@ -704,7 +709,7 @@
       ],
       "cex_cash_ref": "140€ (A6000 Cuerpo) | 206€ (A6000 + 16-50mm) | 241€-270€ (ZV-E10) | 243€ (Fuji X-T20) | 312€ (Fuji X-T30) en CeX",
       "est_resale": "230€ - 450€",
-      "ai_valuation_guide": "CRÍTICO: Mira las fotos para comprobar si la cámara incluye objetivo (ej. 16-50mm / 18-55mm -> pon includes_kit_lens=true) o si es SOLO CUERPO (includes_kit_lens=false): 1) Sony Alpha A6000: con objetivo 16-50mm CeX paga 206€ cash (acepta hasta 195€); si es SOLO CUERPO sin objetivo CeX paga 140€ cash (recházala si cuesta más de 132€). 2) Sony ZV-E10: CeX paga 241€ (cuerpo) a 270€ (con 16-50mm) cash, es chollazo hasta 255€. 3) Fujifilm X-T10 (CeX paga 117€ cuerpo, acepta <= 112€), Fujifilm X-T20 (CeX paga 243€ cash, chollazo hasta 235€), Fujifilm X-T30 (CeX paga 312€ cash, chollazo hasta 260€). En cex_search_query escribe 'Sony Alpha ILCE-6000 16-50mm' (o 'Sony Alpha ILCE-6000 Cuerpo' si no lleva lente), 'Sony ZV-E10', 'Fujifilm X-T20' o 'Fujifilm X-T30'.",
+      "ai_valuation_guide": "CRÍTICO: Mira las fotos para comprobar si la cámara incluye objetivo (ej. 16-50mm / 18-55mm) o es solo el cuerpo suelto. Distingue en identified_model si es 'Sony A6000', 'Sony ZV-E10', 'Fujifilm X-T10', 'Fujifilm X-T20' o 'Fujifilm X-T30' y especifica si incluye lente kit en includes_kit_lens. En cex_search_query pon el modelo exacto con o sin objetivo según las fotos.",
       "must_contain_any": [
         "a6000",
         "zv-e10",
@@ -729,7 +734,8 @@
         "instax",
         "solo objetivo",
         "solo lente"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "pokemon_ds_gba",
@@ -760,7 +766,7 @@
       "max_price": 60,
       "cex_cash_ref": "68€ a 99€ efectivo CeX (HeartGold/SoulSilver/Blanco 2/Platino/Esmeralda)",
       "est_resale": "90€ - 150€",
-      "ai_valuation_guide": "CRÍTICO: Acepta SOLO ediciones originales PAL España (ESP): Pokémon Oro HeartGold (CeX paga 78€ cash), Plata SoulSilver (87€ cash), Platino (78€ cash), Blanco 2 (84€ cash), Negro 2 (73€ cash), Esmeralda (99€ cash), Cristal (68€ cash), Rojo Fuego (65€ cash) y Verde Hoja (65€ cash). Verifica en las fotos que NO sea reproducción de AliExpress ni versión extranjera (FRA/ITA/NOE/USA) ni caja vacía sin cartucho. En cex_search_query pon 'Pokemon Oro HeartGold', 'Pokemon Plata SoulSilver', 'Pokemon Edicion Platino', 'Pokemon Edicion Blanca 2', 'Pokemon Edicion Negra 2' o 'Pokemon Edicion Esmeralda'.",
+      "ai_valuation_guide": "CRÍTICO: Acepta SOLO ediciones originales PAL España (ESP). Identifica el título exacto en identified_model y especifica siempre en cex_search_query el nombre oficial del juego en España. Si incluye su caja original pon includes_original_box: true; si es solo cartucho pon includes_original_box: false. Rechaza repros chinas (tornillo incorrecto, logo Nintendo sin brillo o grabado defectuoso).",
       "must_contain_any": [
         "heartgold",
         "heart gold",
@@ -794,7 +800,8 @@
         "tcg",
         "peluche",
         "guia"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "apple_high_liquidity",
@@ -913,7 +920,7 @@
       ],
       "cex_cash_ref": "123€ (iPad 9) | 182€ (iPad 10) | 195€ (Mac Mini M1) | 208€ (iPad Air M1) | 261€ (Mac Mini M2) en CeX",
       "est_resale": "175€ - 355€",
-      "ai_valuation_guide": "CRÍTICO: Rechaza cualquier equipo con bloqueo iCloud, MDM, cristal con grietas ('fissure') o Mac Mini Intel antiguo (2010-2018 con puertos FireWire/USB-A antiguos o Core i5/i7). Precios reales CeX España y topes de compra: 1) Apple iPad 9 64GB WiFi (CeX paga 123€ cash, PVP 205€ -> acepta solo <= 118€). 2) Apple iPad 10 64GB WiFi (CeX paga 182€ cash, PVP 305€ -> acepta <= 175€). 3) Apple iPad Air 5 M1 64GB WiFi (CeX paga 208€ cash, PVP 345€ -> acepta <= 198€). 4) Apple Mac Mini M1 8GB/256GB (CeX paga 195€ cash, PVP 325€ -> acepta <= 188€). 5) Apple Mac Mini M2 8GB/256GB (CeX paga 261€ cash, PVP 420€ -> chollazo hasta 245€). En cex_search_query usa exactamente 'Apple iPad 9 64GB WiFi', 'Apple iPad 10 64GB WiFi', 'Apple iPad Air 5 64GB WiFi', 'Apple Mac Mini M1 8GB 256GB' o 'Apple Mac Mini M2 8GB 256GB'.",
+      "ai_valuation_guide": "CRÍTICO: Rechaza cualquier equipo con bloqueo iCloud, MDM, cristal con grietas o pantalla rota. Distingue en identified_model entre 'iPad 9', 'iPad 10', 'iPad Air 4', 'iPad Air 5 M1', 'iPad Pro 11 M1', 'iPad Pro 11 M2', 'iPad Mini 6' o 'Mac Mini M1', 'Mac Mini M2', 'Mac Mini M4' y su RAM/SSD. Rechaza cualquier Mac Mini Intel (2018 o anterior). En cex_search_query pon el modelo exacto con su capacidad de almacenamiento.",
       "must_contain_any": [
         "mac mini",
         "ipad 9",
@@ -983,7 +990,8 @@
         "solo funda",
         "teclado para",
         "cristal roto"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "switch_std_lite",
@@ -1025,7 +1033,7 @@
       ],
       "cex_cash_ref": "50€ (Lite Sin Caja) | 70€ (Estándar Sin Caja) en efectivo CeX",
       "est_resale": "80€ (Lite) - 108€ (Estándar)",
-      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS NINTENDO SWITCH COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como FIFA/Overcooked/Mario, auriculares, mochilas, mandos, docks o consolas sin Joy-Cons). Mira las fotos: 1) 'Nintendo Switch Lite' (botones integrados, una sola pieza): CeX paga 50€ cash (PVP 95€), RECHAZA SIEMPRE cualquier Switch Lite que cueste más de 42€. En cex_search_query pon 'Nintendo Switch Lite'. 2) 'Nintendo Switch Estándar' (DEBE verse en las fotos con sus dos Joy-Cons acoplados; si es solo la pantalla/tablet sin Joy-Cons, pon is_valid_deal=false y has_defect_or_missing_parts=true): CeX paga 70€ cash Sin Caja (PVP 125€), acéptala hasta 62€. En cex_search_query pon 'Nintendo Switch Consola'.",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS NINTENDO SWITCH COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Mario, Pokémon o Animal Crossing, cajas vacías, fundas, mandos sueltos o pantallas rotas/con drift). Distingue obligatoriamente en identified_model entre 'Nintendo Switch Lite' (una sola pieza sin Joy-Con extraíbles), 'Nintendo Switch V1/V2' (marco negro ancho) y 'Nintendo Switch OLED' (pantalla grande con marco fino y soporte ancho trasero). Si es OLED o V1/V2 sin dock ni cargador original, marca has_defect_or_missing_parts: true. En cex_search_query pon exactamente 'Nintendo Switch Lite' o 'Nintendo Switch Consola'.",
       "must_contain_any": [
         "switch"
       ],
@@ -1055,7 +1063,8 @@
         "joy-con",
         "solo dock",
         "dock suelto"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "rtx_gpus",
@@ -1131,7 +1140,7 @@
       ],
       "cex_cash_ref": "122€ (3060 12GB) | 156€ (3060 Ti) | 162€ (3070) | 188€ (4060) | 237€ (3080) en CeX",
       "est_resale": "165€ - 295€",
-      "ai_valuation_guide": "Verifica en las fotos que sea la tarjeta gráfica de escritorio completa y funcional (no caja vacía ni disipador suelto). Precios reales CeX España: RTX 3060 12GB (CeX paga 122€ cash, acepta <= 115€), RTX 3060 Ti 8GB (CeX paga 156€ cash, acepta <= 148€), RTX 3070 8GB (CeX paga 162€ cash, acepta <= 152€), RTX 4060 8GB (CeX paga 188€ cash, acepta <= 175€), RTX 3080 10GB (CeX paga 237€ cash, chollazo <= 175€). En cex_search_query usa 'GeForce RTX 3060 12GB', 'GeForce RTX 3060 Ti 8GB', 'GeForce RTX 3070 8GB', 'GeForce RTX 4060 8GB' o 'GeForce RTX 3080 10GB'.",
+      "ai_valuation_guide": "Verifica en las fotos que sea la tarjeta gráfica de escritorio completa y funcional (no caja vacía ni disipador suelto). Distingue en identified_model si es 'RTX 3060 8GB', 'RTX 3060 12GB', 'RTX 3060 Ti', 'RTX 3070', 'RTX 4060' o 'RTX 4060 Ti'. En cex_search_query usa 'GeForce RTX 3060 12GB', 'GeForce RTX 3060 Ti 8GB', 'GeForce RTX 3070 8GB' o 'GeForce RTX 4060 8GB'.",
       "must_contain_any": [
         "3060",
         "3070",
@@ -1151,7 +1160,8 @@
         "1660",
         "2060",
         "artefactos"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "ps_vita",
@@ -1182,7 +1192,7 @@
       "max_price": 68,
       "cex_cash_ref": "75€ (Vita 1000 Sin Caja) | 81€ (Vita 2000 Slim Sin Caja) efectivo CeX",
       "est_resale": "115€ - 140€",
-      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS PS VITA COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos de PS Vita, tarjetas de memoria sueltas, fundas o consolas PSP antiguas). CeX España paga 75€ cash por la PS Vita 1000 Sin Caja (PVP 135€) y 81€ cash por la PS Vita 2000 Slim Sin Caja (PVP 145€). En cex_search_query pon 'Playstation Vita Wifi' o 'Playstation Vita 2000'.",
+      "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS PS VITA COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos de PS Vita, tarjetas de memoria sueltas, fundas o consolas PSP antiguas). Pon is_valid_deal: true SOLO si es la consola PS Vita completa, estéticamente bien conservada, sin arañazos profundos en pantalla ni drift. En cex_search_query pon 'Playstation Vita Wifi' o 'Playstation Vita 2000'.",
       "must_contain_any": [
         "vita",
         "psvita"
@@ -1202,7 +1212,8 @@
         "lote juegos",
         "lotto giochi",
         "lot de jeux"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "retro_handhelds",
@@ -1250,7 +1261,7 @@
       ],
       "cex_cash_ref": "58€ (DSi XL) | 71€ (GBA SP) | 102€ (Game Boy Micro) en efectivo CeX",
       "est_resale": "80€ - 165€",
-      "ai_valuation_guide": "CRÍTICO: Busca consolas portátiles retro originales de Nintendo en buen estado: 1) Game Boy Advance SP (plegable): CeX paga 71€ cash Sin Caja (PVP 115€), es chollo hasta 55€. 2) Game Boy Micro (metálica diminuta): CeX paga 102€ cash Sin Caja (PVP 165€), es chollazo hasta 55€. 3) Nintendo DSi XL: CeX paga 58€ cash Sin Caja (PVP 95€), es chollo si cuesta <= 42€. Rechaza consolas clónicas chinas (Anbernic, Miyoo, R36S) o DS Lite/DSi pequeñas normales. En cex_search_query usa 'Game Boy Advance SP', 'GameBoy Micro' o 'Nintendo DSi XL'.",
+      "ai_valuation_guide": "CRÍTICO: Busca consolas portátiles retro originales de Nintendo en buen estado: 1) Game Boy Advance SP (plegable), 2) Game Boy Micro (metálica diminuta), 3) Nintendo DSi XL. Rechaza consolas clónicas chinas (Anbernic, Miyoo, R36S) o DS Lite/DSi pequeñas normales. En cex_search_query usa 'Game Boy Advance SP', 'GameBoy Micro' o 'Nintendo DSi XL'.",
       "must_contain_any": [
         "advance sp",
         "gba sp",
@@ -1268,7 +1279,8 @@
         "carcasa para",
         "solo funda",
         "solo cargador"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "simracing_wheels",
@@ -1324,7 +1336,7 @@
       ],
       "cex_cash_ref": "55€ (G920) | 72€ (G29 + Pedales) | 91€ (T300 RS) | 98€ (G923) en efectivo CeX",
       "est_resale": "115€ - 165€",
-      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos que incluya VOLANTE Y PEDALES. Precios reales CeX España: Logitech G29 Volante + Pedales (CeX paga 72€ cash y 101€ vale, PVP 145€ -> acepta hasta 65€), Logitech G920 (CeX paga 55€ cash -> acepta <= 48€), Logitech G923 (CeX paga 98€ cash, PVP 165€ -> chollo hasta 82€), Thrustmaster T300 RS (CeX paga 91€ cash, PVP 175€ -> chollo hasta 82€). En cex_search_query pon 'Logitech G29 Volante + Pedales', 'Logitech G920 Volante + Pedales', 'Logitech G923 Volante + Pedales' o 'Thrustmaster T300 RS Volante + Pedales'.",
+      "ai_valuation_guide": "CRÍTICO: Verifica en las fotos que incluya VOLANTE Y PEDALES. Distingue en identified_model entre 'Logitech G29', 'Logitech G920', 'Logitech G923', 'Thrustmaster T300 RS GT', 'Moza R5' o 'Fanatec CSL DD'. Rechaza siempre si venden solo los pedales sueltos, solo el aro suelto o un soporte de metal sin electrónica. En cex_search_query pon 'Logitech G29 Volante + Pedales', 'Logitech G920 Volante + Pedales', 'Logitech G923 Volante + Pedales' o 'Thrustmaster T300 RS Volante + Pedales'.",
       "must_contain_any": [
         "g29",
         "g920",
@@ -1340,7 +1352,8 @@
         "adaptador",
         "g25",
         "g27"
-      ]
+      ],
+      "shipping_tier": "heavy"
     },
     {
       "id": "kindle_ereaders",
@@ -1395,7 +1408,7 @@
       ],
       "cex_cash_ref": "35€ (PW 10ª Gen) | 50€-67€ (PW 11ª Gen) | 85€ (Oasis) en efectivo CeX",
       "est_resale": "65€ - 125€",
-      "ai_valuation_guide": "CRÍTICO: Rechaza los Kindle básicos antiguos o Paperwhite viejos (1ª a 7ª gen con pantalla hundida y marco grueso). Precios reales CeX España: 1) Kindle Paperwhite 10ª Gen (frontal plano, micro-USB, PQ94WIF): CeX paga solo 35€ cash (PVP 65€), acéptalo SOLO si cuesta <= 30€. 2) Kindle Paperwhite 11ª Gen (pantalla 6.8\" marcos finos y USB-C, M2L3EK): CeX paga 50€ (8GB) a 67€ (16GB) cash, chollo hasta 46€. 3) Kindle Oasis (cuadrado con 2 botones laterales): CeX paga 85€+ cash, chollazo hasta 46€. En cex_search_query pon 'Amazon Kindle Paperwhite 10 8GB', 'Amazon Kindle Paperwhite 11 8GB', 'Amazon Kindle Paperwhite 11 16GB' o 'Amazon Kindle Oasis'.",
+      "ai_valuation_guide": "CRÍTICO: Rechaza los Kindle básicos antiguos o Paperwhite viejos (1ª a 7ª gen con pantalla hundida y marco grueso). Distingue en identified_model entre Kindle Paperwhite 10ª Gen (micro-USB), Kindle Paperwhite 11ª Gen (pantalla 6.8 marcos finos y USB-C) o Kindle Oasis (cuadrado con 2 botones laterales). En cex_search_query pon el modelo exacto con su capacidad.",
       "must_contain_any": [
         "kindle",
         "paperwhite",
@@ -1412,7 +1425,8 @@
         "etui kindle",
         "étui kindle",
         "housse kindle"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "minipc_homelab",
@@ -1452,7 +1466,8 @@
         "celeron",
         "pentium",
         "core 2"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "graphing_calculators",
@@ -1490,7 +1505,8 @@
       "blacklist": [
         "fx-82",
         "fx-991"
-      ]
+      ],
+      "shipping_tier": "standard"
     },
     {
       "id": "ps5_consoles_gta6",
@@ -1518,8 +1534,8 @@
         "playstation 5 consola",
         "ps5 slim"
       ],
-      "min_price": 150,
-      "max_price": 265,
+      "min_price": 200,
+      "max_price": 300,
       "submodel_price_caps": [
         {
           "match_any": [
@@ -1542,7 +1558,7 @@
       ],
       "cex_cash_ref": "238€ (PS5 Digital) | 266€ (PS5 Lector 825GB) | 285€ (PS5 Slim 1TB Lector) en efectivo CeX",
       "est_resale": "330€ - 395€",
-      "ai_valuation_guide": "CRÍTICO ANTI-ESTAFA VINTED/WALLAPOP: 1) RECHAZA SIEMPRE (pon is_valid_deal: false y deal_score: 1) si la descripción pide pago por transferencia bancaria ('virement bancaire', 'bonifico', 'bizum', 'paypal'), si pide no comprar por la app sin escribir antes ('prima di acquistare', 'avant d\\'acheter', 'ne pas acheter directement') o si incluye un número de teléfono camuflado con guiones o espacios (ej. '392-67-38...'). 2) SOLO CONSOLAS PS5 COMPLETAS Y FUNCIONALES CON MANDO DUALSENSE. 3) Precios reales CeX España (NO uses precios de ediciones coleccionista de 600€): PS5 Digital 825GB = 238€ cash (acepta <= 220€), PS5 Estándar con Lector 825GB = 266€ cash (acepta <= 250€), PS5 Slim 1TB con Lector = 285€ cash (acepta <= 265€). En estimated_resale_price pon máximo 350€ (Fat Lector) o 380€ (Slim Lector).",
+      "ai_valuation_guide": "CRÍTICO ANTI-ESTAFA VINTED/WALLAPOP: 1) RECHAZA SIEMPRE (pon is_valid_deal: false y deal_score: 1) si la descripción pide pago por transferencia bancaria ('virement bancaire', 'bonifico', 'bizum', 'paypal'), si pide no comprar por la app sin escribir antes ('prima di acquistare', 'avant d\\'acheter', 'ne pas acheter directamente') o si incluye un número de teléfono camuflado con guiones o espacios. 2) SOLO CONSOLAS PS5 COMPLETAS Y FUNCIONALES CON MANDO DUALSENSE. 3) Distingue en identified_model entre 'PS5 Digital' (sin lector de discos), 'PS5 Lector' (Estándar) y 'PS5 Slim Lector'. Si no incluye mando DualSense original o tiene fallo de HDMI, marca has_defect_or_missing_parts: true.",
       "must_contain_any": [
         "ps5",
         "playstation 5",
@@ -1578,7 +1594,9 @@
         "hdmi roto",
         "baneada",
         "ps4"
-      ]
+      ],
+      "shipping_tier": "heavy"
     }
-  ]
+  ],
+  "_iter": 49
 }

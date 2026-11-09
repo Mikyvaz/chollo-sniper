@@ -17,7 +17,19 @@ services:
       - ./config.json:/app/config.json:ro
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
+      - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./logger.py:/app/logger.py:ro
       - ./sniper.py:/app/sniper.py:ro
+      - ./bot.py:/app/bot.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./tools:/app/tools:ro
+      - ./tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   vinted-sniper:
     image: boti-sniper:v4.1
@@ -27,7 +39,7 @@ services:
     env_file:
       - .env
     environment:
-      - SCAN_INTERVAL_SECONDS=45
+      - VINTED_SCAN_INTERVAL_SECONDS=45
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
     volumes:
@@ -36,7 +48,18 @@ services:
       - ./config.json:/app/config.json:ro
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
+      - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./logger.py:/app/logger.py:ro
       - ./vinted_sniper.py:/app/vinted_sniper.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./tools:/app/tools:ro
+      - ./tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   multi-sniper:
     image: boti-sniper:v4.1
@@ -55,7 +78,18 @@ services:
       - ./config.json:/app/config.json:ro
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
+      - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./logger.py:/app/logger.py:ro
       - ./multi_sniper.py:/app/multi_sniper.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./tools:/app/tools:ro
+      - ./tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   relister-bot:
     image: boti-sniper:v4.1
@@ -75,4 +109,15 @@ services:
       - ./config.json:/app/config.json
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
+      - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./logger.py:/app/logger.py:ro
       - ./bot.py:/app/bot.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
+      - ./tools:/app/tools:ro
+      - ./tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

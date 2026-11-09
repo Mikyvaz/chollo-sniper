@@ -19,28 +19,36 @@ import json
 import glob
 import time
 import asyncio
+import threading
 import urllib.parse
 from datetime import datetime
 from PIL import Image, ImageOps, ImageEnhance
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from curl_cffi import requests as cffi_requests
 
+from logger import setup_logger, log_metric
 from core_engine import (
     DB_PATH, CONFIG_PATH, KITS_DIR,
-    init_db, load_config, fetch_cex_live,
+    init_db, get_db, load_config, load_raw_config, save_config as engine_save_config, fetch_cex_live,
     download_item_images, enhance_and_clean_image,
     build_kit_folder_name, save_resale_kit,
-    normalize_and_build_links, generate_multilingual_haggle_msg
+    normalize_and_build_links, generate_multilingual_haggle_msg,
+    touch_heartbeat, ai_gateway_call, BudgetExceededError,
+    DEAL_STATUS_LABELS, get_deal, mark_deal_bought, create_manual_deal, cancel_deal_purchase,
+    mark_deal_sold, update_deal_fields, delete_deal, undo_last_deal_change, get_portfolio_summary,
+    search_deals, count_stale_alerts, purge_stale_alerts, export_deals_csv
 )
 
 # ==================== CONFIGURACIÓN Y VARIABLES ====================
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-AI_MODEL = os.environ.get("AI_MODEL", "gemini-flash-latest").strip()
+if GEMINI_API_KEY and len(GEMINI_API_KEY) < 8:
+    print("[WARN] GEMINI_API_KEY sospechosamente corta en bot.py. Verifique el archivo .env.")
+AI_MODEL = os.environ.get("AI_MODEL", "gemini-3.5-flash-lite").strip()
 GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "1564559739960959036"))
 RELISTER_CHANNEL_ID = int(os.environ.get("RELISTER_CHANNEL_ID", "1565139139949764708"))
 SELLER_CITY = os.environ.get("SELLER_CITY", "Sevilla").strip()
@@ -48,21 +56,13 @@ SELLER_CITY = os.environ.get("SELLER_CITY", "Sevilla").strip()
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+logger = setup_logger("RELISTER-BOT")
 
 active_sessions = {}
 
 
 def save_config(cfg):
-    clean_cfg = dict(cfg)
-    clean_targets = []
-    for t in cfg.get("targets", []):
-        tc = dict(t)
-        if "direct_buy_max_price" in tc:
-            tc["max_price"] = int(tc.pop("direct_buy_max_price"))
-        clean_targets.append(tc)
-    clean_cfg["targets"] = clean_targets
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(clean_cfg, f, ensure_ascii=False, indent=2)
+    engine_save_config(cfg, CONFIG_PATH)
 
 
 # ==================== UTILIDADES DE KITS Y FOTOS ====================
@@ -77,6 +77,7 @@ def get_kit_info_by_folder(folder_path):
     est_price = ""
     tip_text = ""
     base_content = ""
+    photo_urls = []
     clean_photos = sorted(glob.glob(os.path.join(folder_path, "foto_*_limpia.jpg")))
 
     if os.path.exists(meta_path):
@@ -87,6 +88,7 @@ def get_kit_info_by_folder(folder_path):
                 if meta.get("optimal_price"):
                     est_price = f"{float(meta['optimal_price']):.0f}€"
                 tip_text = meta.get("value_add_tip", "")
+                photo_urls = meta.get("image_urls") or []
         except Exception:
             pass
 
@@ -114,7 +116,8 @@ def get_kit_info_by_folder(folder_path):
         "est_price": est_price,
         "tip_text": tip_text,
         "base_content": base_content,
-        "clean_photos_count": len(clean_photos)
+        "clean_photos_count": len(clean_photos),
+        "photo_urls": photo_urls
     }
 
 
@@ -150,21 +153,28 @@ def enhance_photo_organic(img_bytes):
 # ==================== IA COPYWRITER Y TASADOR ====================
 
 def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, desired_price="", seller_city=SELLER_CITY):
+    p_name = str(product_name or "").strip()[:80]
+    b_text = str(base_text or "").strip()[:300]
+    e_text = str(extras_text or "").strip()[:180]
+    c_notes = str(condition_notes or "").strip()[:180]
+    d_price = str(desired_price or "").strip()[:40]
+    s_city = str(seller_city or "Sevilla").strip()[:30]
+
     prompt = f"""
     Eres un particular meticuloso, ordenado y transparente vendiendo un artículo de segunda mano en Wallapop o Vinted en España.
     Tu objetivo es redactar un anuncio 100% NATURAL, creíble y profesional para particulares. Debe justificar el precio más alto del mercado inspirando total confianza, sin sonar JAMÁS como un robot, una tienda o un redactor publicitario.
 
     DATOS DEL PRODUCTO:
-    - Producto / Modelo: {product_name}
+    - Producto / Modelo: {p_name}
     - Información base del kit / sniper:
-    {base_text.strip()[:600]}
+    {b_text}
     - EXTRAS Y ACCESORIOS QUE INCLUYES:
-    {extras_text if extras_text else "Sin extras adicionales especificados."}
+    {e_text if e_text else "Sin extras adicionales especificados."}
     - ESTADO REAL Y DETALLES ESPECÍFICOS:
-    {condition_notes if condition_notes else "En muy buen estado, totalmente probado y funcional."}
+    {c_notes if c_notes else "En muy buen estado, totalmente probado y funcional."}
     - PRECIO / OBJETIVO DE VENTA:
-    {desired_price if desired_price else "Optimizar para máxima rentabilidad rápida y justificada."}
-    - CIUDAD PARA TRATO EN MANO: {seller_city}
+    {d_price if d_price else "Optimizar para máxima rentabilidad rápida y justificada."}
+    - CIUDAD PARA TRATO EN MANO: {s_city}
 
     REGLAS DE ORO DE REDACCIÓN NATURAL (OBLIGATORIAS):
     1. TONO: Particular cuidadoso y honesto que cuida al máximo sus cosas. Cero lenguaje de marketing ni palabras grandilocuentes.
@@ -172,7 +182,7 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
        "Vendo [Producto exacto] en un estado [excelente / impoluto / muy bueno], ideal para [uso o público]. Funciona a la perfección, muy cuidado/a."
     3. MÁXIMO 1 SIGNO DE EXCLAMACIÓN EN TODO EL TEXTO: La única exclamación permitida va en la frase final: "¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!".
     4. UBICACIÓN REAL (SIN PLACEHOLDERS):
-       "Hago trato en mano en {seller_city} (puedes probarlo/a tranquilamente antes de llevártelo/a)."
+       "Hago trato en mano en {s_city} (puedes probarlo/a tranquilamente antes de llevártelo/a)."
     5. ESTRUCTURA EXACTA DEL TEXTO:
        Vendo [Producto exacto] en un estado [excelente / muy bueno], ideal para [uso]. Funciona a la perfección, muy cuidado/a.
 
@@ -187,14 +197,14 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
        • Estética y cuidado: [Limpio y muy bien conservado]
 
        🤝 Entrega y envío:
-       • Hago trato en mano en {seller_city} (puedes probarlo/a tranquilamente antes de llevártelo/a).
+       • Hago trato en mano en {s_city} (puedes probarlo/a tranquilamente antes de llevártelo/a).
        • Hago envíos por la plataforma. Empaqueto muy bien con plástico de burbujas y caja rígida, y suelo depositarlo en Correos/InPost en menos de 24h.
 
        Cualquier duda o si necesitas alguna foto o vídeo extra encendido/a, escríbeme sin compromiso. ¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!
 
     6. TÍTULO SEO (MÁXIMO 48 CARACTERES estrictos): Nombre del modelo exacto y extras principales.
 
-    Devuelve ÚNICAMENTE un objeto JSON válido con estas claves exactas:
+    IMPORTANTE: Cero texto conversacional ni saludos. Devuelve ÚNICAMENTE un objeto JSON válido con estas claves exactas:
     {{
       "seo_title": "Título máx 48 caracteres",
       "description": "Texto completo estructurado según las reglas anteriores",
@@ -204,111 +214,101 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
     }}
     """
 
-    if GEMINI_API_KEY:
-        model = AI_MODEL if ("gemini" in AI_MODEL.lower() and "/" not in AI_MODEL) else "gemini-flash-latest"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.2,
-                "maxOutputTokens": 2500,
-                "thinkingConfig": {"thinkingBudget": 0}
+    conn = None
+    try:
+        conn = get_db()
+        result = ai_gateway_call(
+            prompt=prompt,
+            candidate_models=["gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
+            openrouter_models=["google/gemini-2.5-flash-lite", "openai/gpt-4o-mini"],
+            max_tokens=350,
+            temperature=0.2,
+            conn=conn,
+            platform="DISCORD_BOT",
+            radar_id="relister",
+            call_type="bot_description",
+            timeout=15,
+            enforce_budget=True,
+            schema_defaults={
+                "seo_title": "",
+                "description": "",
+                "listing_price": 0,
+                "minimum_price": 0,
+                "pricing_rationale": ""
             }
-        }
-        try:
-            resp = cffi_requests.post(url, json=payload, timeout=25)
-            if resp.status_code == 200:
-                res_data = resp.json()
-                candidates = res_data.get("candidates", [])
-                if candidates:
-                    for p in candidates[0].get("content", {}).get("parts", []):
-                        if "text" in p:
-                            clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", p["text"].strip(), flags=re.MULTILINE)
-                            result = json.loads(clean)
-                            desc = result.get("description", "")
-                            desc = re.sub(r"\[(?:Tu )?Ciudad(?:/Zona)?\]", seller_city, desc, flags=re.IGNORECASE)
-                            result["description"] = desc.strip()
-                            return result
-            else:
-                print(f"[ERROR IA DIRECT GEMINI] HTTP {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            print(f"[ERROR IA DIRECT GEMINI] Excepción: {e}")
-
-    if OPENROUTER_KEY:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://homelab.local",
-            "X-Title": "Boti Relister"
-        }
-        fallback_model = AI_MODEL if "/" in AI_MODEL else "google/gemini-2.5-flash"
-        payload = {
-            "model": fallback_model,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-            "response_format": {"type": "json_object"},
-            "max_tokens": 1800,
-            "temperature": 0.2
-        }
-        try:
-            resp = cffi_requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=25)
-            if resp.status_code == 200:
-                data = resp.json()
-                raw_text = data["choices"][0]["message"].get("content", "")
-                clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
-                result = json.loads(clean)
-                desc = result.get("description", "")
-                desc = re.sub(r"\[(?:Tu )?Ciudad(?:/Zona)?\]", seller_city, desc, flags=re.IGNORECASE)
-                result["description"] = desc.strip()
-                return result
-        except Exception as e:
-            print(f"[ERROR IA OPENROUTER] Excepción: {e}")
+        )
+        if result and isinstance(result, dict):
+            desc = result.get("description", "")
+            desc = re.sub(r"\[(?:Tu )?Ciudad(?:/Zona)?\]", seller_city, desc, flags=re.IGNORECASE)
+            result["description"] = desc.strip()
+            return result
+    except BudgetExceededError as e:
+        print(f"[BOT RELISTER] Cortafuegos IA diario activo: {e}")
+        return None
+    except Exception as e:
+        print(f"[BOT RELISTER] Error en llamada IA: {e}")
+    finally:
+        if conn:
+            conn.close()
     return None
 
 
 def call_ai_appraiser(product_query, buy_price, cex_variants):
+    p_query = str(product_query or "").strip()[:80]
     cex_summary = "\n".join(
-        [f"- {v['box_name']}: Efectivo {v['cash']:.0f}€ | Vale {v['voucher']:.0f}€ | PVP {v['sell']:.0f}€" for v in (cex_variants or [])[:5]]
+        [f"- {v.get('box_name', '')[:40]}: Efectivo {float(v.get('cash', 0)):.0f}€ | PVP {float(v.get('sell', 0)):.0f}€" for v in (cex_variants or [])[:3]]
     ) or "Sin coincidencias exactas en CeX."
 
     prompt = f"""
-    Eres el tasador jefe de arbitraje en España. El usuario consulta por: "{product_query}" (Precio de compra planteado: {buy_price if buy_price > 0 else 'No indicado'}€).
-    Datos actuales en vivo de CeX España:
+    Tasador de arbitraje segunda mano España.
+    Consulta: "{p_query}" (Compra planteada: {buy_price if buy_price > 0 else 'No indicado'}€).
+    CeX España:
     {cex_summary}
 
-    Devuelve ÚNICAMENTE un JSON válido con:
+    IMPORTANTE: Cero texto conversacional. Devuelve ÚNICAMENTE un JSON válido:
     {{
-      "clean_model_name": "Nombre exacto estandarizado del producto",
-      "fast_resale_48h_eur": número entero en euros al que se vende en menos de 48h en Wallapop España,
-      "patient_resale_eur": número entero en euros si se espera 1-2 semanas,
-      "max_recommended_buy_eur": precio máximo al que deberías comprarlo (incluyendo envío) para ganar al menos 35€ limpios,
-      "verdict": "Veredicto directo de 1-2 frases (¿Es rentable? ¿Qué tal la liquidez?)",
-      "checklist_before_buying": "3 puntos clave o fallos típicos que debes revisar o preguntar al vendedor antes de pagar"
+      "clean_model_name": "Nombre exacto del producto",
+      "fast_resale_48h_eur": int,
+      "patient_resale_eur": int,
+      "max_recommended_buy_eur": int,
+      "verdict": "Veredicto directo 1-2 frases",
+      "checklist_before_buying": "3 puntos clave a revisar antes de pagar"
     }}
     """
-    if GEMINI_API_KEY:
-        model = AI_MODEL if ("gemini" in AI_MODEL.lower() and "/" not in AI_MODEL) else "gemini-flash-latest"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.1,
-                "maxOutputTokens": 1200,
-                "thinkingConfig": {"thinkingBudget": 0}
+    conn = None
+    try:
+        conn = get_db()
+        result = ai_gateway_call(
+            prompt=prompt,
+            candidate_models=["gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
+            openrouter_models=["google/gemini-2.5-flash-lite", "openai/gpt-4o-mini"],
+            max_tokens=300,
+            temperature=0.1,
+            conn=conn,
+            platform="DISCORD_BOT",
+            radar_id="appraiser",
+            call_type="bot_appraiser",
+            timeout=15,
+            enforce_budget=True,
+            schema_defaults={
+                "clean_model_name": "",
+                "fast_resale_48h_eur": 0,
+                "patient_resale_eur": 0,
+                "max_recommended_buy_eur": 0,
+                "verdict": "",
+                "checklist_before_buying": ""
             }
-        }
-        try:
-            resp = cffi_requests.post(url, json=payload, timeout=20)
-            if resp.status_code == 200:
-                candidates = resp.json().get("candidates", [])
-                if candidates:
-                    for p in candidates[0].get("content", {}).get("parts", []):
-                        if "text" in p:
-                            clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", p["text"].strip(), flags=re.MULTILINE)
-                            return json.loads(clean)
-        except Exception as e:
-            print(f"[WARN] Error en call_ai_appraiser: {e}")
+        )
+        if result and isinstance(result, dict):
+            return result
+    except BudgetExceededError as e:
+        print(f"[BOT APPRAISER] Cortafuegos IA diario activo: {e}")
+        return None
+    except Exception as e:
+        print(f"[BOT APPRAISER] Error en llamada IA: {e}")
+    finally:
+        if conn:
+            conn.close()
     return None
 
 
@@ -536,26 +536,20 @@ class KitActionsView(discord.ui.View):
         await interaction.response.send_message(f"```text\n{txt[:1950]}\n```", ephemeral=True)
 
 
-async def finalize_listing(interaction_or_channel, user_id, use_original_photos=False):
-    session = active_sessions.get(user_id)
-    if not session:
-        return
-
-    kit_dir = session["kit_folder"]
+def _prepare_photos_sync(use_original_photos: bool, kit_dir: str, uploaded_photos: list) -> list:
+    """Procesado intensivo de fotos con Pillow y lectura/escritura en disco fuera del event loop."""
     output_photos = []
-    channel = interaction_or_channel.channel if isinstance(interaction_or_channel, discord.Interaction) else interaction_or_channel
-    status_notify = await channel.send("⏳ **Redactando anuncio natural de alta conversión y preparando fotos...**")
-
     if use_original_photos:
-        existing = sorted(glob.glob(os.path.join(kit_dir, "foto_*_limpia.jpg")))
-        for p in existing[:6]:
-            try:
-                with open(p, "rb") as f:
-                    output_photos.append(f.read())
-            except Exception:
-                pass
+        if kit_dir and os.path.exists(kit_dir):
+            existing = sorted(glob.glob(os.path.join(kit_dir, "foto_*_limpia.jpg")))
+            for p in existing[:6]:
+                try:
+                    with open(p, "rb") as f:
+                        output_photos.append(f.read())
+                except Exception:
+                    pass
     else:
-        for raw_bytes in session.get("uploaded_photos", []):
+        for raw_bytes in (uploaded_photos or []):
             try:
                 output_photos.append(enhance_photo_organic(raw_bytes))
             except Exception:
@@ -577,9 +571,7 @@ async def finalize_listing(interaction_or_channel, user_id, use_original_photos=
                         mdata = json.load(mf)
                     urls = mdata.get("image_urls") or []
                     plat_m = str(mdata.get("platform", "")).upper()
-                    raw_imgs = await asyncio.to_thread(
-                        download_item_images, urls, None, 3, plat_m in ("EBAY", "TODOCOLECCION")
-                    )
+                    raw_imgs = download_item_images(urls, None, 3, plat_m in ("EBAY", "TODOCOLECCION"))
                     for idx_p, rb in enumerate(raw_imgs, start=1):
                         try:
                             clean_b = enhance_and_clean_image(rb)
@@ -590,8 +582,42 @@ async def finalize_listing(interaction_or_channel, user_id, use_original_photos=
                             pf.write(clean_b)
                 except Exception:
                     pass
+    return output_photos
 
-    ai_result = call_ai_copywriter(
+
+def _save_published_listing_sync(kit_dir: str, seo_title: str, p_listing, p_min, description: str, output_photos: list):
+    """Escritura en disco del kit publicado fuera del event loop."""
+    if kit_dir and os.path.exists(kit_dir):
+        out_dir = os.path.join(kit_dir, "anuncio_publicado")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "ANUNCIO_FINAL.txt"), "w", encoding="utf-8") as f:
+                f.write(f"TÍTULO:\n{seo_title}\n\nPRECIO SALIDA: {p_listing}€ (Mínimo: {p_min}€)\n\nDESCRIPCIÓN:\n{description}\n")
+            for i, p_bytes in enumerate(output_photos, start=1):
+                with open(os.path.join(out_dir, f"foto_final_{i}.jpg"), "wb") as f:
+                    f.write(p_bytes)
+        except Exception:
+            pass
+
+
+async def finalize_listing(interaction_or_channel, user_id, use_original_photos=False):
+    session = active_sessions.get(user_id)
+    if not session:
+        return
+
+    kit_dir = session["kit_folder"]
+    channel = interaction_or_channel.channel if isinstance(interaction_or_channel, discord.Interaction) else interaction_or_channel
+    status_notify = await channel.send("⏳ **Redactando anuncio natural de alta conversión y preparando fotos...**")
+
+    output_photos = await asyncio.to_thread(
+        _prepare_photos_sync,
+        use_original_photos,
+        kit_dir,
+        session.get("uploaded_photos", [])
+    )
+
+    ai_result = await asyncio.to_thread(
+        call_ai_copywriter,
         product_name=session["kit_title"],
         base_text=session["base_txt"],
         extras_text=session["extras"],
@@ -610,17 +636,10 @@ async def finalize_listing(interaction_or_channel, user_id, use_original_photos=
     p_min = ai_result.get("minimum_price", 0)
     rationale = ai_result.get("pricing_rationale", "")
 
-    if kit_dir and os.path.exists(kit_dir):
-        out_dir = os.path.join(kit_dir, "anuncio_publicado")
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            with open(os.path.join(out_dir, "ANUNCIO_FINAL.txt"), "w", encoding="utf-8") as f:
-                f.write(f"TÍTULO:\n{seo_title}\n\nPRECIO SALIDA: {p_listing}€ (Mínimo: {p_min}€)\n\nDESCRIPCIÓN:\n{description}\n")
-            for i, p_bytes in enumerate(output_photos, start=1):
-                with open(os.path.join(out_dir, f"foto_final_{i}.jpg"), "wb") as f:
-                    f.write(p_bytes)
-        except Exception:
-            pass
+    await asyncio.to_thread(
+        _save_published_listing_sync,
+        kit_dir, seo_title, p_listing, p_min, description, output_photos
+    )
 
     await status_notify.delete()
 
@@ -784,67 +803,304 @@ class RadarSelectView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=RadarActionView(idx), ephemeral=True)
 
 
-# ==================== GESTIÓN DE CARTERA / PORTFOLIO (/cartera) ====================
+# ==================== CARTERA: FICHAS, BOTONES Y MODALES ====================
+# Toda la lógica de datos vive en core_engine (mark_deal_bought, cancel_deal_purchase, ...).
+# Aquí solo hay presentación. Los botones de una ficha usan custom_id "deal:<acción>:<deal_id>"
+# y los resuelve on_interaction, así que siguen funcionando después de reiniciar el bot.
 
-class MarkSoldModal(discord.ui.Modal, title="Registrar Venta Cerrada"):
-    sold_price_in = discord.ui.TextInput(
-        label="Precio final de venta cobrado (€)",
-        placeholder="Ej: 195",
-        required=True,
-        max_length=12
+def _run_db(fn, *args, **kwargs):
+    conn = get_db()
+    try:
+        return fn(conn, *args, **kwargs)
+    finally:
+        conn.close()
+
+
+async def db_call(fn, *args, **kwargs):
+    """Ejecuta una función de BD (conn, ...) en un hilo para no bloquear el bucle de Discord."""
+    return await asyncio.to_thread(_run_db, fn, *args, **kwargs)
+
+
+def _parse_eur(raw, field="importe", allow_empty=False):
+    txt = (raw or "").replace("€", "").replace(",", ".").strip()
+    if not txt:
+        if allow_empty:
+            return None
+        raise ValueError(f"Falta el {field}.")
+    try:
+        val = float(txt)
+    except ValueError:
+        raise ValueError(f"El {field} `{raw}` no es un número válido.")
+    if val < 0:
+        raise ValueError(f"El {field} no puede ser negativo.")
+    return val
+
+
+def _deal_name(deal):
+    return str(deal.get("identified_model") or deal.get("title") or deal.get("deal_id") or "Artículo").strip()
+
+
+def _fmt_date(val):
+    if not val:
+        return "—"
+    try:
+        return datetime.fromisoformat(str(val)[:19]).strftime("%d/%m/%Y")
+    except Exception:
+        return str(val)[:10]
+
+
+def _default_paid_price(deal):
+    """Precio sugerido al registrar la compra: la oferta recomendada si era una oportunidad, si no el coste puesto en casa."""
+    rec = float(deal.get("recommended_offer") or 0)
+    fees = float(deal.get("fees") or 0)
+    if deal.get("deal_type") == "offer_opportunity" and rec > 0:
+        return round(rec + fees, 2)
+    return round(
+        float(deal.get("bought_price") or 0) or float(deal.get("landed_cost") or 0) or float(deal.get("price") or 0), 2
     )
 
-    def __init__(self, deal_id, title, bought_price):
+
+def build_deal_embed(deal, title=None, color=None):
+    status = deal.get("status") or "alerted"
+    url = deal.get("item_url") or ""
+    bought = float(deal.get("bought_price") or 0)
+    target = float(deal.get("optimal_price") or 0)
+    lines = [f"**{DEAL_STATUS_LABELS.get(status, status)}** • `{deal.get('platform') or 'MANUAL'}` • ID `{deal['deal_id']}`"]
+    if url:
+        lines.append(f"🔗 [Abrir anuncio]({url})")
+    lines.append("")
+    if float(deal.get("price") or 0) > 0:
+        lines.append(f"• **Precio del anuncio:** `{float(deal.get('price') or 0):.2f}€`")
+    if status in ("bought", "sold", "cancelled") and bought > 0:
+        lines.append(f"• **Pagado:** **`{bought:.2f}€`** (el {_fmt_date(deal.get('bought_at'))})")
+    if target > 0 and status != "sold":
+        base_cost = bought if bought > 0 else float(deal.get("landed_cost") or deal.get("price") or 0)
+        lat = target - base_cost
+        lines.append(f"• **Objetivo de venta:** `{target:.2f}€` ({'+' if lat >= 0 else ''}{lat:.0f}€ estimado)")
+    if status == "sold":
+        sold = float(deal.get("sold_price") or 0)
+        fees = float(deal.get("sale_fees") or 0)
+        net = sold - bought - fees
+        roi = (net / bought * 100) if bought > 0 else 0.0
+        sign = "+" if net >= 0 else ""
+        fee_txt = f" (comisiones `{fees:.2f}€`)" if fees else ""
+        lines.append(f"• **Vendido por:** **`{sold:.2f}€`** el {_fmt_date(deal.get('sold_at'))}{fee_txt}")
+        lines.append(f"• **Beneficio neto:** **`{sign}{net:.2f}€`** (ROI `{sign}{roi:.1f}%`)")
+    if deal.get("notes"):
+        lines.append(f"📝 {str(deal['notes'])[:300]}")
+
+    colors = {"bought": 0x2ECC71, "sold": 0xF1C40F, "cancelled": 0x95A5A6, "discarded": 0x7F8C8D, "alerted": 0x3498DB}
+    embed = discord.Embed(
+        title=(title or f"🧾 {_deal_name(deal)}")[:250],
+        description="\n".join(lines)[:4000],
+        color=color or colors.get(status, 0x3498DB)
+    )
+    if deal.get("image_url"):
+        try:
+            embed.set_thumbnail(url=deal["image_url"])
+        except Exception:
+            pass
+    embed.set_footer(text="Cualquier acción se puede deshacer con ⏪ o /deshacer")
+    return embed
+
+
+class DealActionsView(discord.ui.View):
+    """Botones de la ficha según su estado. Sin callbacks: los atiende on_interaction por custom_id."""
+    def __init__(self, deal):
+        super().__init__(timeout=None)
+        did = deal["deal_id"]
+        status = deal.get("status")
+        buttons = []
+        if status == "bought":
+            if deal.get("mode") != "personal":
+                buttons.append(("Crear anuncio de reventa", "📝", discord.ButtonStyle.success, "relist"))
+            buttons += [
+                ("Vendido", "💰", discord.ButtonStyle.primary, "sold"),
+                ("Editar", "✏️", discord.ButtonStyle.secondary, "edit"),
+                ("La compra no se hizo", "↩️", discord.ButtonStyle.secondary, "cancel"),
+            ]
+        elif status == "sold":
+            buttons.append(("Editar venta", "✏️", discord.ButtonStyle.secondary, "edit"))
+        else:
+            buttons.append(("Registrar compra", "✅", discord.ButtonStyle.success, "buy"))
+        buttons += [
+            ("Deshacer último cambio", "⏪", discord.ButtonStyle.secondary, "undo"),
+            ("Eliminar", "🗑️", discord.ButtonStyle.danger, "delete"),
+        ]
+        for label, emoji, style, action in buttons:
+            self.add_item(discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=f"deal:{action}:{did}"))
+
+
+class UndoOnlyView(discord.ui.View):
+    def __init__(self, deal_id, label="Deshacer"):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label=label, emoji="⏪", style=discord.ButtonStyle.secondary, custom_id=f"deal:undo:{deal_id}"))
+
+
+class ConfirmDeleteView(discord.ui.View):
+    def __init__(self, deal_id):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="Sí, eliminar", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id=f"deal:delete_ok:{deal_id}"))
+
+
+class BuyModal(discord.ui.Modal, title="Registrar compra"):
+    def __init__(self, deal):
         super().__init__()
-        self.deal_id = deal_id
-        self.item_title = title
-        self.bought_price = float(bought_price or 0)
+        self.deal_id = deal["deal_id"]
+        self.price_in = discord.ui.TextInput(
+            label="Precio final pagado, con envío (€)", default=f"{_default_paid_price(deal):.2f}", max_length=12
+        )
+        self.notes_in = discord.ui.TextInput(
+            label="Notas (opcional)", style=discord.TextStyle.paragraph, required=False, max_length=300,
+            placeholder="Ej: quedamos en mano el sábado, incluye funda", default=(deal.get("notes") or "")[:300] or None
+        )
+        self.add_item(self.price_in)
+        self.add_item(self.notes_in)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            sold_p = float(self.sold_price_in.value.replace(",", ".").strip())
-            conn = init_db()
-            c = conn.cursor()
-            c.execute("UPDATE deals SET status = 'sold', sold_price = ? WHERE deal_id = ?", (sold_p, self.deal_id))
-            conn.commit()
-            conn.close()
-            real_profit = sold_p - self.bought_price
-            roi = (real_profit / self.bought_price * 100) if self.bought_price > 0 else 0
-            await interaction.response.send_message(
-                f"🎉 **¡Venta registrada con éxito!**\n"
-                f"• **Producto:** `{self.item_title}`\n"
-                f"• **Coste Total:** `{self.bought_price:.1f}€` ➔ **Vendido por:** `{sold_p:.1f}€`\n"
-                f"• **Beneficio Neto Real:** **`+{real_profit:.1f}€`** *(ROI: `{roi:.1f}%`)*",
-                ephemeral=False
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Error registrando venta: {e}", ephemeral=True)
-
-
-class PortfolioView(discord.ui.View):
-    def __init__(self, active_items):
-        super().__init__(timeout=180)
-        self.active_items = active_items
-        if active_items:
-            options = []
-            for d in active_items[:25]:
-                options.append(discord.SelectOption(
-                    label=f"{d['model'][:75]} ({d['bought_price']:.0f}€)",
-                    value=d["deal_id"],
-                    description=f"Est. venta: {d['optimal_price']:.0f}€ (+{d['optimal_price'] - d['bought_price']:.0f}€) • {d['platform']}",
-                    emoji="💰"
-                ))
-            self.sel = discord.ui.Select(placeholder="Selecciona un artículo en stock para marcar como VENDIDO...", options=options)
-            self.sel.callback = self.on_select_sold
-            self.add_item(self.sel)
-
-    async def on_select_sold(self, interaction: discord.Interaction):
-        deal_id = self.sel.values[0]
-        item = next((x for x in self.active_items if x["deal_id"] == deal_id), None)
-        if not item:
-            await interaction.response.send_message("No encontrado.", ephemeral=True)
+            price = _parse_eur(self.price_in.value, "precio de compra")
+            deal = await db_call(mark_deal_bought, self.deal_id, price, self.notes_in.value)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
             return
-        await interaction.response.send_modal(MarkSoldModal(deal_id, item["model"], item["bought_price"]))
+        await interaction.response.send_message(
+            embed=build_deal_embed(deal, title=f"🛒 Compra registrada: {_deal_name(deal)}"), view=DealActionsView(deal)
+        )
+        schedule_kit_preparation(deal)
+
+
+class SoldModal(discord.ui.Modal, title="Registrar venta"):
+    def __init__(self, deal):
+        super().__init__()
+        self.deal_id = deal["deal_id"]
+        default_sold = float(deal.get("sold_price") or 0) or float(deal.get("optimal_price") or 0)
+        self.sold_in = discord.ui.TextInput(
+            label="Precio final de venta cobrado (€)", default=f"{default_sold:.2f}" if default_sold > 0 else None,
+            placeholder="Ej: 195", max_length=12
+        )
+        self.fees_in = discord.ui.TextInput(
+            label="Comisiones y envío que pagaste (€, opcional)", required=False, max_length=12,
+            default=f"{float(deal.get('sale_fees') or 0):.2f}" if float(deal.get("sale_fees") or 0) > 0 else None,
+            placeholder="Ej: 4.50"
+        )
+        self.add_item(self.sold_in)
+        self.add_item(self.fees_in)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            sold = _parse_eur(self.sold_in.value, "precio de venta")
+            fees = _parse_eur(self.fees_in.value, "importe de comisiones", allow_empty=True) or 0.0
+            deal = await db_call(mark_deal_sold, self.deal_id, sold, fees)
+            summary = await db_call(get_portfolio_summary)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=build_sale_embed(deal, summary), view=DealActionsView(deal))
+
+
+class EditDealModal(discord.ui.Modal, title="Editar datos"):
+    def __init__(self, deal):
+        super().__init__()
+        self.deal_id = deal["deal_id"]
+        self.is_sold = deal.get("status") == "sold"
+        self.bought_in = discord.ui.TextInput(
+            label="Precio de compra (€)", required=False, max_length=12,
+            default=f"{float(deal.get('bought_price') or 0):.2f}" if float(deal.get("bought_price") or 0) > 0 else None
+        )
+        self.target_in = discord.ui.TextInput(
+            label="Objetivo de venta (€)", required=False, max_length=12,
+            default=f"{float(deal.get('optimal_price') or 0):.2f}" if float(deal.get("optimal_price") or 0) > 0 else None
+        )
+        self.add_item(self.bought_in)
+        self.add_item(self.target_in)
+        if self.is_sold:
+            self.sold_in = discord.ui.TextInput(
+                label="Precio de venta (€)", required=False, max_length=12,
+                default=f"{float(deal.get('sold_price') or 0):.2f}"
+            )
+            self.fees_in = discord.ui.TextInput(
+                label="Comisiones de venta (€)", required=False, max_length=12,
+                default=f"{float(deal.get('sale_fees') or 0):.2f}"
+            )
+            self.add_item(self.sold_in)
+            self.add_item(self.fees_in)
+        self.notes_in = discord.ui.TextInput(
+            label="Notas", style=discord.TextStyle.paragraph, required=False, max_length=500,
+            default=(deal.get("notes") or "")[:500] or None
+        )
+        self.add_item(self.notes_in)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            kwargs = {
+                "bought_price": _parse_eur(self.bought_in.value, "precio de compra", allow_empty=True),
+                "target_price": _parse_eur(self.target_in.value, "objetivo de venta", allow_empty=True),
+                "notes": self.notes_in.value.strip(),
+            }
+            if self.is_sold:
+                kwargs["sold_price"] = _parse_eur(self.sold_in.value, "precio de venta", allow_empty=True)
+                kwargs["sale_fees"] = _parse_eur(self.fees_in.value, "importe de comisiones", allow_empty=True)
+            deal = await db_call(update_deal_fields, self.deal_id, **kwargs)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=build_deal_embed(deal, title=f"✏️ Datos actualizados: {_deal_name(deal)}"), view=DealActionsView(deal), ephemeral=True
+        )
+
+
+class CancelPurchaseModal(discord.ui.Modal, title="La compra no se hizo"):
+    reason_in = discord.ui.TextInput(
+        label="Motivo (opcional)", required=False, max_length=200,
+        placeholder="Ej: el vendedor no contestó / ya estaba vendido"
+    )
+
+    def __init__(self, deal_id):
+        super().__init__()
+        self.deal_id = deal_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            deal = await db_call(cancel_deal_purchase, self.deal_id, self.reason_in.value)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=build_deal_embed(deal, title=f"↩️ Compra cancelada: {_deal_name(deal)}"),
+            view=DealActionsView(deal)
+        )
+
+
+def build_sale_embed(deal, summary):
+    bought = float(deal.get("bought_price") or 0)
+    sold = float(deal.get("sold_price") or 0)
+    fees = float(deal.get("sale_fees") or 0)
+    net = sold - bought - fees
+    roi = (net / bought * 100) if bought > 0 else 0.0
+    sign = "+" if net >= 0 else ""
+    if net > 0:
+        title, color = ("🎉🚀 ¡Venta muy rentable!" if roi >= 35 else "🎉 ¡Venta cerrada!"), (0xF1C40F if roi >= 35 else 0x2ECC71)
+    elif net == 0:
+        title, color = "⚖️ Venta al coste", 0x95A5A6
+    else:
+        title, color = "📉 Venta con pérdida", 0xE74C3C
+    tot = summary["sold"]
+    month = summary["month"]
+    url = deal.get("item_url") or ""
+    name = f"[{_deal_name(deal)}]({url})" if url else f"**{_deal_name(deal)}**"
+    fee_line = f"• **Comisiones/envío:** `{fees:.2f}€`\n" if fees else ""
+    desc = (
+        f"• **Producto:** {name}\n"
+        f"• **Compra:** `{bought:.2f}€` ➔ **Venta:** **`{sold:.2f}€`**\n{fee_line}"
+        f"• **Beneficio neto:** **`{sign}{net:.2f}€`** (ROI **`{sign}{roi:.1f}%`**)\n\n"
+        f"📅 **Este mes:** `{month['count']}` ventas • **`{month['profit']:+.2f}€`**\n"
+        f"💼 **Total:** `{tot['count']}` ventas • **`{tot['profit']:+.2f}€`** (ROI medio `{tot['roi']:.1f}%`)\n"
+        f"📦 **Stock restante:** `{len(summary['stock'])}` artículos"
+    )
+    embed = discord.Embed(title=title, description=desc, color=color)
+    embed.set_footer(text="Boti Portfolio • /cartera para ver todo • ⏪ para deshacer")
+    return embed
 
 
 def _generate_kit_photos_sync(kit_folder, plat, item_id, title, item_url, ai_data_kit, optimal_price, landed_cost, img_urls):
@@ -866,73 +1122,236 @@ def _generate_kit_photos_sync(kit_folder, plat, item_id, title, item_url, ai_dat
         print(f"[WARN] Error generando fotos del kit al comprar ({kit_folder}): {e}")
 
 
-# ==================== INTERACCIONES PERSISTENTES EN ALERTAS (#avisos_chollos) ====================
+def _ensure_kit_sync(deal_id, download_photos=False):
+    """Crea (si falta) la carpeta del kit de reventa de un deal y devuelve kit_info para ExtrasModal.
+    Con download_photos=True también descarga y limpia las fotos del anuncio (lento: solo en segundo plano)."""
+    conn = get_db()
+    try:
+        deal = get_deal(conn, deal_id)
+        if not deal:
+            return None
+        plat = deal.get("platform") or "MANUAL"
+        item_id = deal.get("item_id") or deal_id
+        model_name = _deal_name(deal)
+        ai_data_kit = {
+            "identified_model": model_name,
+            "value_add_tip": deal.get("value_add_tip") or "Venta rápida en 48h",
+            "visual_notes": deal.get("visual_notes") or ""
+        }
+        kit_folder = deal.get("kit_folder") or build_kit_folder_name(plat, item_id, ai_data_kit)
+        if not deal.get("kit_folder"):
+            conn.execute("UPDATE deals SET kit_folder = ? WHERE deal_id = ?", (kit_folder, deal_id))
+            conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        img_urls = json.loads(deal.get("image_urls_json") or "[]")
+        if not isinstance(img_urls, list):
+            img_urls = []
+    except Exception:
+        img_urls = []
+    if not img_urls and deal.get("image_url"):
+        img_urls = [deal["image_url"]]
+
+    item_url = deal.get("item_url") or ""
+    if plat != "MANUAL" and deal.get("item_id"):
+        try:
+            item_url, _ = normalize_and_build_links(plat, deal["item_id"], item_url)
+        except Exception:
+            pass
+
+    optimal = float(deal.get("optimal_price") or 0)
+    paid = float(deal.get("bought_price") or 0) or float(deal.get("landed_cost") or 0)
+    raw_title = deal.get("title") or model_name
+    full_kit_path = os.path.join(KITS_DIR, kit_folder)
+
+    if deal.get("mode") != "personal":
+        existing_clean = glob.glob(os.path.join(full_kit_path, "foto_*_limpia.jpg")) if os.path.exists(full_kit_path) else []
+        if not os.path.exists(full_kit_path):
+            save_resale_kit(kit_folder, plat, item_id, raw_title, item_url, ai_data_kit, optimal, paid, [], image_urls=img_urls)
+        if download_photos and not existing_clean and img_urls:
+            _generate_kit_photos_sync(kit_folder, plat, item_id, raw_title, item_url, ai_data_kit, optimal, paid, img_urls)
+
+    kit_info = get_kit_info_by_folder(full_kit_path)
+    if not kit_info:
+        kit_info = {
+            "folder": full_kit_path,
+            "bname": kit_folder or deal_id,
+            "title": deal.get("seo_title") or model_name,
+            "est_price": f"{optimal:.0f}€",
+            "tip_text": deal.get("value_add_tip") or "",
+            "base_content": f"--- TÍTULO SEO ---\n{deal.get('seo_title') or model_name}\n\n--- DESCRIPCIÓN SEO ---\n{deal.get('seo_description') or ''}",
+            "clean_photos_count": 0,
+            "photo_urls": img_urls
+        }
+    elif not kit_info.get("photo_urls") and img_urls:
+        kit_info["photo_urls"] = img_urls
+    if kit_info.get("clean_photos_count", 0) == 0 and kit_info.get("photo_urls"):
+        kit_info["clean_photos_count"] = len(kit_info["photo_urls"])
+    return kit_info
+
+
+def schedule_kit_preparation(deal):
+    """Tras una compra de reventa, prepara el kit y sus fotos en segundo plano."""
+    if not deal or deal.get("mode") == "personal":
+        return
+
+    async def _run():
+        try:
+            await asyncio.to_thread(_ensure_kit_sync, deal["deal_id"], True)
+        except Exception as e:
+            print(f"[WARN] No se pudo preparar el kit de {deal.get('deal_id')}: {e}")
+
+    asyncio.create_task(_run())
+
+
+async def _reply_error(interaction: discord.Interaction, text):
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(f"❌ {text}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ {text}", ephemeral=True)
+    except Exception:
+        pass
+
+
+# ==================== INTERACCIONES PERSISTENTES (alertas y fichas de cartera) ====================
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     if interaction.type != discord.InteractionType.component:
         return
-
     custom_id = interaction.data.get("custom_id", "")
     if not custom_id.startswith("deal:"):
         return
-
     parts = custom_id.split(":", 2)
     if len(parts) < 3:
         return
     action, deal_id = parts[1], parts[2]
+    try:
+        await _handle_deal_action(interaction, action, deal_id)
+    except ValueError as e:
+        await _reply_error(interaction, str(e))
+    except Exception as e:
+        print(f"[BOT ERROR] Acción {action} sobre {deal_id}: {e}")
+        await _reply_error(interaction, f"Error inesperado: {e}")
 
-    conn = init_db()
-    c = conn.cursor()
 
+def _discard_alert_sync(conn, deal_id):
+    # Solo descarta alertas pendientes: nunca saca de la cartera algo comprado o vendido
+    conn.execute(
+        "UPDATE deals SET status = 'discarded', status_changed_at = CURRENT_TIMESTAMP WHERE deal_id = ? AND status = 'alerted'",
+        (deal_id,)
+    )
+    conn.commit()
+
+
+async def _handle_deal_action(interaction: discord.Interaction, action, deal_id):
     if action == "hide":
-        try:
-            c.execute("UPDATE deals SET status = 'discarded' WHERE deal_id = ?", (deal_id,))
-            conn.commit()
-        except Exception:
-            pass
-        conn.close()
+        await db_call(_discard_alert_sync, deal_id)
         try:
             await interaction.message.delete()
         except Exception:
             await interaction.response.send_message("🚫 Aviso descartado.", ephemeral=True)
         return
 
-    c.execute(
-        """SELECT deal_id, platform, item_id, title, description, price, landed_cost, fees, optimal_price, net_profit,
-                  identified_model, cex_search_query, item_url, kit_folder, fast_msg, haggle_msg,
-                  seo_title, seo_description, value_add_tip, mode, radar_id,
-                  image_url, COALESCE(image_urls_json, '[]'), COALESCE(visual_notes, ''),
-                  COALESCE(deal_type, 'direct_chollo'), COALESCE(recommended_offer, 0)
-           FROM deals WHERE deal_id = ?""",
-        (deal_id,)
-    )
-    row = c.fetchone()
-
-    if not row:
-        conn.close()
-        await interaction.response.send_message("⚠️ Este anuncio es anterior a la base de datos actual o ya no existe.", ephemeral=True)
+    if action == "purge_ok":
+        days = int(deal_id)
+        deleted = await db_call(purge_stale_alerts, days)
+        await interaction.response.send_message(
+            f"🧹 Eliminadas **{deleted}** alertas de hace más de {days} días que nunca compraste. "
+            f"Compras, ventas y cancelaciones se conservan."
+        )
         return
 
-    (
-        _, plat, item_id, title, desc_text, price, landed_cost, fees, optimal_price, net_profit,
-        model_name, cex_q, item_url, kit_folder, fast_msg, haggle_msg,
-        seo_title, seo_desc, tip, mode, radar_id,
-        image_url, image_urls_json, visual_notes,
-        deal_type, recommended_offer
-    ) = row
+    if action == "undo":
+        undone, deal = await db_call(undo_last_deal_change, deal_id)
+        labels = {"buy": "la compra", "sell": "la venta", "cancel_purchase": "la cancelación", "edit": "la edición",
+                  "delete": "el borrado", "create_manual": "la compra manual"}
+        what = labels.get(undone, undone)
+        if not deal:
+            await interaction.response.send_message(f"⏪ Deshecho {what}: el registro ya no existe.")
+            return
+        await interaction.response.send_message(
+            embed=build_deal_embed(deal, title=f"⏪ Deshecho {what}: {_deal_name(deal)}"), view=DealActionsView(deal)
+        )
+        return
 
-    clean_item_url, clean_checkout_url = normalize_and_build_links(plat, item_id, item_url)
+    if action == "delete_ok":
+        deal = await db_call(delete_deal, deal_id)
+        await interaction.response.send_message(
+            f"🗑️ Eliminado **{_deal_name(deal)}** (`{deal_id}`). Si fue un error, pulsa deshacer.",
+            view=UndoOnlyView(deal_id, label="Deshacer borrado")
+        )
+        return
 
-    # 1. BOTÓN: 📋 Mensajes / Regateo 1-Clic (con soporte multilingüe ES/FR/IT y oferta calculada)
+    deal = await db_call(get_deal, deal_id)
+    if not deal:
+        await interaction.response.send_message("⚠️ Este anuncio ya no está en la base de datos.", ephemeral=True)
+        return
+    status = deal.get("status")
+
+    if action == "view":
+        await interaction.response.send_message(embed=build_deal_embed(deal), view=DealActionsView(deal), ephemeral=True)
+        return
+
+    if action == "buy":
+        if status == "sold":
+            raise ValueError("Este artículo ya está vendido. Usa ⏪ si quieres deshacer la venta.")
+        await interaction.response.send_modal(BuyModal(deal))
+        return
+
+    if action == "sold":
+        if status not in ("bought", "sold"):
+            raise ValueError("Primero registra la compra con ✅.")
+        await interaction.response.send_modal(SoldModal(deal))
+        return
+
+    if action == "edit":
+        await interaction.response.send_modal(EditDealModal(deal))
+        return
+
+    if action == "cancel":
+        if status != "bought":
+            raise ValueError("Solo se puede cancelar una compra que está en stock.")
+        await interaction.response.send_modal(CancelPurchaseModal(deal_id))
+        return
+
+    if action == "delete":
+        await interaction.response.send_message(
+            f"¿Eliminar **{_deal_name(deal)}** ({DEAL_STATUS_LABELS.get(status, status)})? Se guarda una copia y podrás deshacerlo con `/deshacer`.",
+            view=ConfirmDeleteView(deal_id), ephemeral=True
+        )
+        return
+
+    if action == "relist":
+        if status not in ("bought", "sold"):
+            raise ValueError("Registra primero la compra para crear el anuncio de reventa.")
+        kit_info = await asyncio.to_thread(_ensure_kit_sync, deal_id, False)
+        if not kit_info:
+            raise ValueError("No se pudo preparar el kit de reventa.")
+        await interaction.response.send_modal(ExtrasModal(kit_info))
+        return
+
+    plat = deal.get("platform") or ""
+    price = float(deal.get("price") or 0)
+    title = deal.get("title") or ""
+    model_name = _deal_name(deal)
+    recommended_offer = float(deal.get("recommended_offer") or 0)
+    try:
+        clean_item_url, _ = normalize_and_build_links(plat, deal.get("item_id"), deal.get("item_url") or "")
+    except Exception:
+        clean_item_url = deal.get("item_url") or ""
+
+    # 📋 Mensajes / Regateo 1-Clic (ES/FR/IT con la oferta calculada)
     if action == "msg":
-        conn.close()
-        offer_val = int(round(recommended_offer)) if recommended_offer and recommended_offer > 0 else max(15, int(round(price * 0.82)))
-        f_msg = fast_msg or f"¡Hola! Me interesa el {model_name}, ¿funciona todo correctamente? Si está disponible te lo compro ahora mismo por la aplicación."
+        desc_text = deal.get("description") or ""
+        offer_val = int(round(recommended_offer)) if recommended_offer > 0 else max(15, int(round(price * 0.82)))
+        f_msg = deal.get("fast_msg") or f"¡Hola! Me interesa el {model_name}, ¿funciona todo correctamente? Si está disponible te lo compro ahora mismo por la aplicación."
         msg_es = generate_multilingual_haggle_msg(title, desc_text, "ES", offer_val, model_name)
         msg_fr = generate_multilingual_haggle_msg(title, desc_text, "FR", offer_val, model_name)
         msg_it = generate_multilingual_haggle_msg(title, desc_text, "IT", offer_val, model_name)
-
         await interaction.response.send_message(
             f"🎯 **Oferta Recomendada para Rentabilidad Segura: `{offer_val}€`** *(Anuncio: `{price:.0f}€`)*\n"
             f"👉 [Abrir Anuncio para Lanzar Oferta]({clean_item_url})\n\n"
@@ -944,20 +1363,20 @@ async def on_interaction(interaction: discord.Interaction):
         )
         return
 
-    # 2. BOTÓN: 📊 Grados CeX en Vivo
-    elif action == "cex":
+    # 📊 Grados CeX en vivo
+    if action == "cex":
         await interaction.response.defer(ephemeral=True)
-        q_use = cex_q or model_name or title[:35]
-        variants = fetch_cex_live(
-            conn, q_use, reference_price=price, return_all_variants=True,
-            target={"id": radar_id or ""}, title_context=title
+        q_use = deal.get("cex_search_query") or model_name or title[:35]
+        variants = await asyncio.to_thread(
+            fetch_cex_live,
+            None, q_use, reference_price=price, return_all_variants=True,
+            target={"id": deal.get("radar_id") or ""}, title_context=title
         )
-        conn.close()
         if not variants:
             await interaction.followup.send(f"🔍 No se encontraron variantes activas en CeX España para `{q_use}`.", ephemeral=True)
             return
-
-        effective_landed = (recommended_offer + fees) if (deal_type == "offer_opportunity" and recommended_offer > 0) else landed_cost
+        fees = float(deal.get("fees") or 0)
+        effective_landed = (recommended_offer + fees) if (deal.get("deal_type") == "offer_opportunity" and recommended_offer > 0) else float(deal.get("landed_cost") or price)
         lines = []
         for v in variants[:6]:
             diff_cash = v["cash"] - effective_landed
@@ -967,7 +1386,6 @@ async def on_interaction(interaction: discord.Interaction):
                 f"{stock_icon} **{v['box_name']}**\n"
                 f"   💵 Efectivo: **`{v['cash']:.0f}€`** (`{sign}{diff_cash:.0f}€` neto) | 🎟️ Vale: `{v['voucher']:.0f}€` | 🏷️ PVP: `{v['sell']:.0f}€`"
             )
-
         embed = discord.Embed(
             title=f"🏪 Desglose CeX España en Vivo: {q_use}",
             description=f"💳 **Coste de referencia en casa:** **`{effective_landed:.0f}€`**\n\n" + "\n\n".join(lines),
@@ -977,82 +1395,18 @@ async def on_interaction(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
         return
 
-    # 3. BOTÓN: ✅ ¡Comprado! -> Cartera + Generar Kit Bajo Demanda
-    elif action == "buy":
-        real_paid_landed = (recommended_offer + fees) if (deal_type == "offer_opportunity" and recommended_offer > 0) else landed_cost
-        ai_data_kit = {
-            "identified_model": model_name or title,
-            "value_add_tip": tip or "Venta rápida en 48h",
-            "visual_notes": visual_notes or ""
-        }
-        if not kit_folder:
-            kit_folder = build_kit_folder_name(plat, item_id, ai_data_kit)
-
-        c.execute(
-            "UPDATE deals SET status = 'bought', bought_price = ?, kit_folder = ? WHERE deal_id = ?",
-            (real_paid_landed, kit_folder, deal_id)
-        )
-        conn.commit()
-        conn.close()
-
-        try:
-            img_urls = json.loads(image_urls_json or "[]")
-            if not isinstance(img_urls, list):
-                img_urls = []
-        except Exception:
-            img_urls = []
-        if not img_urls and image_url:
-            img_urls = [image_url]
-
-        full_kit_path = os.path.join(KITS_DIR, kit_folder)
-        need_photo_download = False
-
-        if mode != "personal":
-            existing_clean = glob.glob(os.path.join(full_kit_path, "foto_*_limpia.jpg")) if os.path.exists(full_kit_path) else []
-            if not os.path.exists(full_kit_path):
-                save_resale_kit(
-                    kit_folder, plat, item_id, title, clean_item_url,
-                    ai_data_kit, optimal_price, real_paid_landed, [], image_urls=img_urls
-                )
-            if not existing_clean and img_urls:
-                need_photo_download = True
-
-        kit_info = get_kit_info_by_folder(full_kit_path)
-        if not kit_info:
-            kit_info = {
-                "folder": full_kit_path,
-                "bname": kit_folder or deal_id,
-                "title": seo_title or model_name or title,
-                "est_price": f"{optimal_price:.0f}€",
-                "tip_text": tip or "",
-                "base_content": f"--- TÍTULO SEO ---\n{seo_title}\n\n--- DESCRIPCIÓN SEO ---\n{seo_desc}",
-                "clean_photos_count": 0
-            }
-
-        if mode == "personal":
-            await interaction.response.send_message(
-                f"🎉 **¡Compra Personal Registrada para tu Servidor!**\n"
-                f"• **Disco / Hardware:** `{model_name}`\n"
-                f"• **Coste Puesto en Casa:** **`{real_paid_landed:.0f}€`** *(Ahorro estimado: **`+{net_profit:.0f}€`**)*\n"
-                f"• Guardado en `/cartera`.",
-                ephemeral=False
-            )
-        else:
-            await interaction.response.send_modal(ExtrasModal(kit_info))
-            if need_photo_download:
-                await asyncio.to_thread(
-                    _generate_kit_photos_sync,
-                    kit_folder, plat, item_id, title, clean_item_url,
-                    ai_data_kit, optimal_price, real_paid_landed, img_urls
-                )
-        return
-
 
 # ==================== EVENTOS Y SLASH COMMANDS ====================
+
+@tasks.loop(seconds=30)
+async def bot_heartbeat():
+    touch_heartbeat()
 
 @bot.event
 async def on_ready():
     init_db()
+    if not bot_heartbeat.is_running():
+        bot_heartbeat.start()
     print(f"[BOT ONLINE] Conectado como {bot.user} (ID: {bot.user.id})")
     try:
         guild = discord.Object(id=GUILD_ID)
@@ -1086,11 +1440,8 @@ async def slash_kits(interaction: discord.Interaction):
 )
 async def slash_tasar(interaction: discord.Interaction, producto: str, precio_compra: float = 0.0):
     await interaction.response.defer()
-    conn = init_db()
-    variants = fetch_cex_live(conn, producto, reference_price=precio_compra, return_all_variants=True)
-    conn.close()
-
-    ai_val = call_ai_appraiser(producto, precio_compra, variants)
+    variants = await asyncio.to_thread(fetch_cex_live, None, producto, reference_price=precio_compra, return_all_variants=True)
+    ai_val = await asyncio.to_thread(call_ai_appraiser, producto, precio_compra, variants)
 
     cex_lines = []
     if variants:
@@ -1170,85 +1521,437 @@ async def slash_radares(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=RadarSelectView(targets))
 
 
-@bot.tree.command(name="cartera", description="Ver tu stock comprado, registrar ventas y consultar tu beneficio neto real")
-async def slash_cartera(interaction: discord.Interaction):
-    conn = init_db()
+def find_deal_in_db(conn, query_str, preferred_status=None, exact_only=False):
+    """
+    Busca un deal de forma flexible:
+    1. Por deal_id exacto (lo que devuelve el autocompletado).
+    2. Por item_id exacto o coincidencia en item_url.
+    3. Si no es exact_only: por palabras clave en título/modelo, priorizando preferred_status.
+    """
     c = conn.cursor()
+    q = (query_str or "").strip()
+    if not q:
+        return None
 
-    c.execute(
-        """SELECT deal_id, platform, identified_model, bought_price, optimal_price, mode, created_at
-           FROM deals WHERE status = 'bought' ORDER BY created_at DESC"""
-    )
-    bought_rows = c.fetchall()
+    def _one(sql, params):
+        c.execute(sql, params)
+        row = c.fetchone()
+        return dict(zip([d[0] for d in c.description], row)) if row else None
 
-    c.execute(
-        """SELECT COUNT(*), COALESCE(SUM(bought_price), 0), COALESCE(SUM(sold_price), 0)
-           FROM deals WHERE status = 'sold'"""
-    )
-    sold_cnt, total_cost_sold, total_rev_sold = c.fetchone()
-    conn.close()
+    found = _one("SELECT * FROM deals WHERE deal_id = ?", (q,))
+    if found:
+        return found
+    found = _one("SELECT * FROM deals WHERE item_id = ? OR item_url = ? OR (length(?) > 8 AND item_url LIKE ?) ORDER BY created_at DESC LIMIT 1",
+                 (q, q, q, f"%{q}%"))
+    if found or exact_only:
+        return found
 
-    realized_profit = float(total_rev_sold) - float(total_cost_sold)
-    roi_pct = (realized_profit / float(total_cost_sold) * 100) if float(total_cost_sold) > 0 else 0.0
+    words = [w for w in re.split(r"\s+", q) if len(w) > 1] or [q]
+    clauses, params = [], []
+    for w in words[:4]:
+        clauses.append("(title LIKE ? OR identified_model LIKE ?)")
+        params.extend([f"%{w}%", f"%{w}%"])
+    where_sql = " AND ".join(clauses)
+    if preferred_status:
+        found = _one(f"SELECT * FROM deals WHERE status = ? AND ({where_sql}) ORDER BY created_at DESC LIMIT 1",
+                     [preferred_status] + params)
+        if found:
+            return found
+    return _one(f"SELECT * FROM deals WHERE {where_sql} ORDER BY created_at DESC LIMIT 1", params)
 
-    active_items = []
-    stock_lines = []
-    active_invested = 0.0
-    est_potential_profit = 0.0
 
-    for r in bought_rows:
-        did, plat, model_n, b_price, opt_price, mode, c_at = r
-        b_p = float(b_price or 0)
-        o_p = float(opt_price or 0)
-        active_invested += b_p
-        if mode != "personal":
-            est_potential_profit += max(0.0, o_p - b_p)
-            active_items.append({
-                "deal_id": did,
-                "platform": plat,
-                "model": model_n,
-                "bought_price": b_p,
-                "optimal_price": o_p
-            })
-            stock_lines.append(f"• 📦 **{model_n}** ({plat}) — Coste: `{b_p:.0f}€` ➔ Obj. Venta: **`{o_p:.0f}€`** *(+{o_p - b_p:.0f}€)*")
-        else:
-            stock_lines.append(f"• 💾 **[SERVIDOR] {model_n}** ({plat}) — Coste: `{b_p:.0f}€` *(Valor: `{o_p:.0f}€`)*")
+def _deal_choices_sync(current, statuses=None):
+    choices = []
+    try:
+        rows, _ = _run_db(search_deals, current or "", statuses=statuses, limit=25)
+        for r in rows:
+            icon = DEAL_STATUS_LABELS.get(r["status"], "•").split(" ", 1)[0]
+            shown_price = r["bought_price"] if r["status"] in ("bought", "sold", "cancelled") and r["bought_price"] else r["price"]
+            label = f"{icon} {str(r['model'])[:62]} ({float(shown_price or 0):.0f}€ • {r['platform'] or 'MANUAL'})"
+            choices.append(app_commands.Choice(name=label[:100], value=str(r["deal_id"])[:100]))
+    except Exception as e:
+        print(f"[AUTOCOMPLETE ERROR] {e}")
+    return choices[:25]
 
-    embed = discord.Embed(
-        title="💼 Cartera de Arbitraje & Inversiones",
-        color=0xF1C40F,
-        description=(
-            f"🏆 **Balances Cerrados (Ventas Completadas: `{sold_cnt}`):**\n"
-            f"• **Beneficio Neto Real Cobrado:** **`+{realized_profit:.1f}€`** *(ROI medio: `{roi_pct:.1f}%`)*\n\n"
-            f"📦 **Inventario Activo (`{len(bought_rows)}` artículos):**\n"
-            f"• **Capital Invertido en Curso:** `{active_invested:.0f}€`\n"
-            f"• **Beneficio Latente Estimado:** **`+{est_potential_profit:.0f}€`**\n\n"
-            + ("\n".join(stock_lines[:15]) if stock_lines else "*(No tienes artículos marcados como comprados actualmente. Pulsa **✅ ¡Comprado!** en cualquier alerta de `#avisos_chollos` para añadirlo a tu cartera).*")
+
+async def _ac_any(interaction: discord.Interaction, current: str):
+    return await asyncio.to_thread(_deal_choices_sync, current, None)
+
+
+async def _ac_buyable(interaction: discord.Interaction, current: str):
+    return await asyncio.to_thread(_deal_choices_sync, current, ["alerted", "discarded", "cancelled", "bought"])
+
+
+async def _ac_stock(interaction: discord.Interaction, current: str):
+    return await asyncio.to_thread(_deal_choices_sync, current, ["bought"])
+
+
+async def _ac_stock_or_sold(interaction: discord.Interaction, current: str):
+    return await asyncio.to_thread(_deal_choices_sync, current, ["bought", "sold"])
+
+
+async def _resolve_deal(interaction: discord.Interaction, anuncio, preferred_status=None, exact_only=False):
+    deal = await db_call(find_deal_in_db, anuncio, preferred_status, exact_only)
+    if not deal:
+        await interaction.response.send_message(
+            f"❌ No encuentro ningún anuncio que coincida con `{anuncio}`. Elige uno del autocompletado o mira `/historial`.",
+            ephemeral=True
         )
+    return deal
+
+
+@bot.tree.command(name="comprado", description="Registra una compra (de una alerta o manual) con el precio realmente pagado")
+@app_commands.describe(
+    anuncio="Elige la alerta en el autocompletado, o escribe el nombre de una compra hecha fuera de los radares",
+    precio_compra="Precio final pagado con envío (€). Si lo omites, se usa el coste de la alerta",
+    notas="Notas opcionales: punto de entrega, extras incluidos...",
+    objetivo_venta="Solo para compras manuales: precio al que esperas venderlo (€)"
+)
+@app_commands.autocomplete(anuncio=_ac_buyable)
+async def slash_comprado(interaction: discord.Interaction, anuncio: str, precio_compra: float = None,
+                         notas: str = None, objetivo_venta: float = None):
+    deal = await db_call(find_deal_in_db, anuncio, None, True)
+    try:
+        if deal:
+            price = float(precio_compra) if precio_compra and precio_compra > 0 else _default_paid_price(deal)
+            deal = await db_call(mark_deal_bought, deal["deal_id"], price, notas)
+            title = f"🛒 Compra registrada: {_deal_name(deal)}"
+        else:
+            if not precio_compra or precio_compra <= 0:
+                await interaction.response.send_message(
+                    f"❌ `{anuncio}` no es ninguna alerta guardada. Para registrar una compra hecha fuera de los radares, "
+                    f"indica el precio: `/comprado anuncio:\"{anuncio}\" precio_compra:50`",
+                    ephemeral=True
+                )
+                return
+            deal = await db_call(create_manual_deal, anuncio, precio_compra, objetivo_venta, "MANUAL", notas or "")
+            title = f"🛒 Compra manual registrada: {_deal_name(deal)}"
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_deal_embed(deal, title=title), view=DealActionsView(deal))
+    schedule_kit_preparation(deal)
+
+
+@bot.tree.command(name="vendido", description="Registra una venta y calcula el beneficio neto real (descontando comisiones)")
+@app_commands.describe(
+    anuncio="Artículo de tu stock (autocompletado)",
+    precio_venta="Precio final cobrado (€)",
+    comisiones="Comisiones de la plataforma y envío que pagaste tú (€, opcional)"
+)
+@app_commands.autocomplete(anuncio=_ac_stock_or_sold)
+async def slash_vendido(interaction: discord.Interaction, anuncio: str, precio_venta: float, comisiones: float = 0.0):
+    deal = await _resolve_deal(interaction, anuncio, preferred_status="bought")
+    if not deal:
+        return
+    try:
+        deal = await db_call(mark_deal_sold, deal["deal_id"], precio_venta, comisiones or 0.0)
+        summary = await db_call(get_portfolio_summary)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(embed=build_sale_embed(deal, summary), view=DealActionsView(deal))
+
+
+@bot.tree.command(name="cancelar_compra", description="La compra no se llegó a hacer: la saca del stock sin borrar el historial")
+@app_commands.describe(anuncio="Artículo en stock (autocompletado)", motivo="Por qué no se hizo (opcional)")
+@app_commands.autocomplete(anuncio=_ac_stock)
+async def slash_cancelar_compra(interaction: discord.Interaction, anuncio: str, motivo: str = ""):
+    deal = await _resolve_deal(interaction, anuncio, preferred_status="bought")
+    if not deal:
+        return
+    try:
+        deal = await db_call(cancel_deal_purchase, deal["deal_id"], motivo)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        embed=build_deal_embed(deal, title=f"↩️ Compra cancelada: {_deal_name(deal)}"), view=DealActionsView(deal)
     )
-    embed.set_footer(text="Boti Portfolio Manager v4.3 • Selecciona un artículo abajo cuando lo vendas")
-    await interaction.response.send_message(embed=embed, view=PortfolioView(active_items))
 
 
-@bot.tree.command(name="estado", description="Estado en tiempo real de los 6 motores de escaneo y base de datos")
+@bot.tree.command(name="editar", description="Corrige el precio de compra, de venta, el objetivo o las notas de un artículo")
+@app_commands.describe(
+    anuncio="Artículo (autocompletado)",
+    precio_compra="Nuevo precio de compra (€)",
+    precio_venta="Nuevo precio de venta (€), si ya está vendido",
+    comisiones="Comisiones de venta (€)",
+    objetivo_venta="Nuevo objetivo de venta (€)",
+    notas="Sustituye las notas"
+)
+@app_commands.autocomplete(anuncio=_ac_any)
+async def slash_editar(interaction: discord.Interaction, anuncio: str, precio_compra: float = None, precio_venta: float = None,
+                       comisiones: float = None, objetivo_venta: float = None, notas: str = None):
+    deal = await _resolve_deal(interaction, anuncio)
+    if not deal:
+        return
+    if all(v is None for v in (precio_compra, precio_venta, comisiones, objetivo_venta, notas)):
+        # Sin parámetros: abrir el formulario con los valores actuales
+        await interaction.response.send_modal(EditDealModal(deal))
+        return
+    try:
+        deal = await db_call(update_deal_fields, deal["deal_id"], precio_compra, precio_venta, objetivo_venta, notas, comisiones)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        embed=build_deal_embed(deal, title=f"✏️ Datos actualizados: {_deal_name(deal)}"), view=DealActionsView(deal)
+    )
+
+
+@bot.tree.command(name="eliminar", description="Elimina un anuncio o compra de la base de datos (se puede deshacer)")
+@app_commands.describe(anuncio="Anuncio o compra (autocompletado)")
+@app_commands.autocomplete(anuncio=_ac_any)
+async def slash_eliminar(interaction: discord.Interaction, anuncio: str):
+    deal = await _resolve_deal(interaction, anuncio, exact_only=True)
+    if not deal:
+        return
+    await interaction.response.send_message(
+        f"¿Eliminar **{_deal_name(deal)}** ({DEAL_STATUS_LABELS.get(deal.get('status'), deal.get('status'))})? "
+        f"Se guarda una copia y podrás recuperarlo con `/deshacer`.",
+        view=ConfirmDeleteView(deal["deal_id"]), ephemeral=True
+    )
+
+
+@bot.tree.command(name="deshacer", description="Deshace el último cambio de cartera (compra, venta, cancelación, edición o borrado)")
+@app_commands.describe(anuncio="Opcional: deshacer el último cambio de este artículo concreto")
+@app_commands.autocomplete(anuncio=_ac_any)
+async def slash_deshacer(interaction: discord.Interaction, anuncio: str = None):
+    deal_id = None
+    if anuncio:
+        # Un borrado ya no está en deals: aceptar también el deal_id tal cual
+        found = await db_call(find_deal_in_db, anuncio, None, True)
+        deal_id = found["deal_id"] if found else anuncio.strip()
+    try:
+        await _handle_deal_action(interaction, "undo", deal_id) if deal_id else await _undo_global(interaction)
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+
+
+async def _undo_global(interaction: discord.Interaction):
+    undone, deal = await db_call(undo_last_deal_change, None)
+    if not deal:
+        await interaction.response.send_message(f"⏪ Deshecho el último cambio ({undone}). El registro ya no existe.")
+        return
+    await interaction.response.send_message(
+        embed=build_deal_embed(deal, title=f"⏪ Deshecho: {_deal_name(deal)}"), view=DealActionsView(deal)
+    )
+
+
+@bot.tree.command(name="ficha", description="Muestra la ficha de un anuncio o compra con todos sus botones de gestión")
+@app_commands.describe(anuncio="Anuncio o compra (autocompletado)")
+@app_commands.autocomplete(anuncio=_ac_any)
+async def slash_ficha(interaction: discord.Interaction, anuncio: str):
+    deal = await _resolve_deal(interaction, anuncio)
+    if not deal:
+        return
+    await interaction.response.send_message(embed=build_deal_embed(deal), view=DealActionsView(deal), ephemeral=True)
+
+
+HISTORY_PAGE = 10
+
+
+def _history_embed(rows, total, page, estado, texto):
+    pages = max(1, (total + HISTORY_PAGE - 1) // HISTORY_PAGE)
+    lines = []
+    for r in rows:
+        st = DEAL_STATUS_LABELS.get(r["status"], r["status"])
+        icon = st.split(" ", 1)[0]
+        amount = ""
+        if r["status"] == "sold":
+            amount = f"`{float(r['bought_price'] or 0):.0f}€` ➔ `{float(r['sold_price'] or 0):.0f}€`"
+        elif r["status"] in ("bought", "cancelled") and r["bought_price"]:
+            amount = f"pagado `{float(r['bought_price']):.0f}€`"
+        else:
+            amount = f"anuncio `{float(r['price'] or 0):.0f}€`"
+        name = str(r["model"])[:55]
+        name = f"[{name}]({r['item_url']})" if r.get("item_url") else name
+        lines.append(f"{icon} {name} • {amount} • {_fmt_date(r['updated_at'])}\n   `{r['deal_id']}`")
+    filt = []
+    if estado:
+        filt.append(DEAL_STATUS_LABELS.get(estado, estado))
+    if texto:
+        filt.append(f"«{texto}»")
+    embed = discord.Embed(
+        title=f"🗂️ Historial ({total} registros){' • ' + ' • '.join(filt) if filt else ''}",
+        description="\n".join(lines)[:4000] if lines else "*No hay registros con esos filtros.*",
+        color=0x3498DB
+    )
+    embed.set_footer(text=f"Página {page + 1}/{pages} • Usa /ficha con el ID para gestionar uno")
+    return embed
+
+
+class HistoryView(discord.ui.View):
+    def __init__(self, estado, texto, total, page=0):
+        super().__init__(timeout=600)
+        self.estado, self.texto, self.total, self.page = estado, texto, total, page
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        pages = max(1, (self.total + HISTORY_PAGE - 1) // HISTORY_PAGE)
+        self.prev_btn.disabled = self.page <= 0
+        self.next_btn.disabled = self.page >= pages - 1
+
+    async def _show(self, interaction: discord.Interaction):
+        statuses = [self.estado] if self.estado else None
+        rows, self.total = await db_call(search_deals, self.texto or "", statuses, HISTORY_PAGE, self.page * HISTORY_PAGE)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=_history_embed(rows, self.total, self.page, self.estado, self.texto), view=self)
+
+    @discord.ui.button(label="Anterior", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        await self._show(interaction)
+
+    @discord.ui.button(label="Siguiente", emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        await self._show(interaction)
+
+
+@bot.tree.command(name="historial", description="Busca en todas tus alertas, compras, ventas y cancelaciones")
+@app_commands.describe(estado="Filtrar por estado", texto="Texto a buscar en título, modelo, ID o URL")
+@app_commands.choices(estado=[
+    app_commands.Choice(name="En stock", value="bought"),
+    app_commands.Choice(name="Vendidos", value="sold"),
+    app_commands.Choice(name="Compras canceladas", value="cancelled"),
+    app_commands.Choice(name="Alertas pendientes", value="alerted"),
+    app_commands.Choice(name="Descartados", value="discarded"),
+])
+async def slash_historial(interaction: discord.Interaction, estado: app_commands.Choice[str] = None, texto: str = ""):
+    est = estado.value if estado else None
+    rows, total = await db_call(search_deals, texto or "", [est] if est else None, HISTORY_PAGE, 0)
+    await interaction.response.send_message(
+        embed=_history_embed(rows, total, 0, est, texto), view=HistoryView(est, texto, total), ephemeral=True
+    )
+
+
+@bot.tree.command(name="exportar", description="Descarga tu cartera (compras, ventas y cancelaciones) en CSV para Excel")
+async def slash_exportar(interaction: discord.Interaction):
+    csv_text = await db_call(export_deals_csv)
+    data = io.BytesIO(("﻿" + csv_text).encode("utf-8"))  # BOM para que Excel lea bien las tildes
+    fname = f"cartera_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    await interaction.response.send_message(
+        "📤 Aquí tienes tu cartera completa (separador `;`).", file=discord.File(data, filename=fname), ephemeral=True
+    )
+
+
+@bot.tree.command(name="limpiar_alertas", description="Borra alertas antiguas que nunca compraste (conserva compras y ventas)")
+@app_commands.describe(dias="Antigüedad mínima en días (por defecto 30)")
+async def slash_limpiar_alertas(interaction: discord.Interaction, dias: int = 30):
+    if dias < 7 or dias > 365:
+        await interaction.response.send_message("❌ Indica entre 7 y 365 días.", ephemeral=True)
+        return
+    n = await db_call(count_stale_alerts, dias)
+    if n == 0:
+        await interaction.response.send_message(f"✨ No hay alertas sin comprar de hace más de {dias} días.", ephemeral=True)
+        return
+    view = discord.ui.View(timeout=300)
+    view.add_item(discord.ui.Button(label=f"Sí, borrar {n} alertas", emoji="🧹", style=discord.ButtonStyle.danger,
+                                    custom_id=f"deal:purge_ok:{int(dias)}"))
+    await interaction.response.send_message(
+        f"Se borrarán **{n}** alertas (pendientes o descartadas) de hace más de **{dias} días**. "
+        f"Tus compras, ventas y cancelaciones no se tocan. Esta limpieza **no se puede deshacer**.",
+        view=view, ephemeral=True
+    )
+
+
+class PortfolioView(discord.ui.View):
+    """Selector del stock: abre la ficha del artículo con todos sus botones."""
+    def __init__(self, stock):
+        super().__init__(timeout=600)
+        if stock:
+            options = []
+            for d in stock[:25]:
+                days = f" • {d['days_in_stock']}d en stock" if d.get("days_in_stock") is not None else ""
+                options.append(discord.SelectOption(
+                    label=f"{d['model'][:70]} ({d['bought_price']:.0f}€)"[:100],
+                    value=d["deal_id"][:100],
+                    description=f"Objetivo {d['optimal_price']:.0f}€ • {d['platform']}{days}"[:100],
+                    emoji="💾" if d.get("mode") == "personal" else "📦"
+                ))
+            self.sel = discord.ui.Select(placeholder="Elige un artículo para venderlo, editarlo o cancelarlo...", options=options)
+            self.sel.callback = self.on_select
+            self.add_item(self.sel)
+
+    async def on_select(self, interaction: discord.Interaction):
+        await _handle_deal_action(interaction, "view", self.sel.values[0])
+
+
+@bot.tree.command(name="cartera", description="Tu stock, capital invertido y beneficio real (total y del mes)")
+async def slash_cartera(interaction: discord.Interaction):
+    s = await db_call(get_portfolio_summary)
+    tot, month = s["sold"], s["month"]
+
+    stock_lines = []
+    for d in s["stock"][:15]:
+        days = f" • {d['days_in_stock']}d" if d.get("days_in_stock") is not None else ""
+        stale = " ⏳" if (d.get("days_in_stock") or 0) >= 21 else ""
+        if d.get("mode") == "personal":
+            stock_lines.append(f"• 💾 **{d['model'][:40]}** — `{d['bought_price']:.0f}€`{days}")
+        else:
+            diff = d["optimal_price"] - d["bought_price"]
+            stock_lines.append(f"• 📦 **{d['model'][:40]}** — `{d['bought_price']:.0f}€` ➔ `{d['optimal_price']:.0f}€` (`{diff:+.0f}€`){days}{stale}")
+    if len(s["stock"]) > 15:
+        stock_lines.append(f"*…y {len(s['stock']) - 15} más (usa `/historial estado:En stock`).*")
+
+    sold_lines = []
+    for r in s["recent_sold"]:
+        net = r["sold_price"] - r["bought_price"] - r["sale_fees"]
+        sold_lines.append(f"• ✅ **{r['model'][:38]}** — `{r['bought_price']:.0f}€` ➔ `{r['sold_price']:.0f}€` (`{net:+.0f}€`) • {_fmt_date(r['sold_at'])}")
+
+    desc = [
+        f"📅 **Este mes:** `{month['count']}` ventas • beneficio **`{month['profit']:+.2f}€`**",
+        f"🏆 **Total:** `{tot['count']}` ventas • ingresos `{tot['revenue']:.2f}€` • comisiones `{tot['fees']:.2f}€`",
+        f"• **Beneficio neto real:** **`{tot['profit']:+.2f}€`** (ROI medio `{tot['roi']:.1f}%`)\n",
+        f"📦 **Stock (`{len(s['stock'])}` artículos):** invertido `{s['invested']:.2f}€` • latente **`{s['latent_profit']:+.2f}€`** (`{s['latent_roi']:.1f}%`)",
+    ]
+    desc.append("\n".join(stock_lines) if stock_lines else "*No tienes stock. Pulsa ✅ en una alerta o usa `/comprado`.*")
+    if sold_lines:
+        desc.append("\n**Últimas ventas:**\n" + "\n".join(sold_lines))
+    desc.append("\n💡 Elige un artículo abajo para gestionarlo • `/historial` • `/exportar` • `/deshacer`")
+
+    embed = discord.Embed(title="💼 Cartera", description="\n".join(desc)[:4000], color=0xF1C40F)
+    embed.set_footer(text="⏳ = más de 3 semanas en stock: plantéate bajar el precio")
+    await interaction.response.send_message(embed=embed, view=PortfolioView(s["stock"]))
+
+
+def _fetch_estado_data():
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        platforms = ["WALLAPOP", "VINTED", "MILANUNCIOS", "CASHCONVERTERS", "TODOCOLECCION", "EBAY"]
+        counts = {}
+        for p in platforms:
+            c.execute("SELECT COUNT(*) FROM market_seen_items WHERE platform = ?", (p,))
+            counts[p] = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM cex_cache")
+        cex_cnt = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM cex_catalog_mirror")
+        mirror_cnt = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM ai_prescreen_cache")
+        prescreen_cnt = c.fetchone()[0]
+
+        c.execute("SELECT COALESCE(SUM(usd), 0.0), COUNT(*) FROM ai_cost_log WHERE created_at >= datetime('now', 'start of day')")
+        today_ai_cost, today_ai_calls = c.fetchone()
+
+        c.execute(
+            """SELECT platform, identified_model, price, net_profit, deal_score, item_url, COALESCE(deal_type, 'direct_chollo'), COALESCE(recommended_offer, 0)
+               FROM deals ORDER BY created_at DESC LIMIT 5"""
+        )
+        recent_deals = c.fetchall()
+    finally:
+        conn.close()
+    return counts, cex_cnt, mirror_cnt, prescreen_cnt, today_ai_cost, today_ai_calls, recent_deals
+
+
+@bot.tree.command(name="estado", description="Estado en tiempo real de los 6 motores de escaneo, IA y base de datos")
 async def slash_estado(interaction: discord.Interaction):
-    conn = init_db()
-    c = conn.cursor()
-    platforms = ["WALLAPOP", "VINTED", "MILANUNCIOS", "CASHCONVERTERS", "TODOCOLECCION", "EBAY"]
-    counts = {}
-    for p in platforms:
-        c.execute("SELECT COUNT(*) FROM market_seen_items WHERE platform = ?", (p,))
-        counts[p] = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM cex_cache")
-    cex_cnt = c.fetchone()[0]
-
-    c.execute(
-        """SELECT platform, identified_model, price, net_profit, deal_score, item_url, COALESCE(deal_type, 'direct_chollo'), COALESCE(recommended_offer, 0)
-           FROM deals ORDER BY created_at DESC LIMIT 5"""
-    )
-    recent_deals = c.fetchall()
-    conn.close()
+    data = await asyncio.to_thread(_fetch_estado_data)
+    counts, cex_cnt, mirror_cnt, prescreen_cnt, today_ai_cost, today_ai_calls, recent_deals = data
 
     kits_cnt = len(get_recent_kits(100))
     cfg = load_config()
@@ -1275,7 +1978,9 @@ async def slash_estado(interaction: discord.Interaction):
         color=0x2ECC71,
         description=(
             f"🎯 **Radares Activos:** `{active_radars}/{len(cfg.get('targets', []))}` | "
-            f"🏪 **Modelos en Caché CeX:** `{cex_cnt}` | "
+            f"🏪 **CeX (Espejo/Caché):** `{mirror_cnt}` / `{cex_cnt}` | "
+            f"🤖 **Pre-filtro IA en Caché:** `{prescreen_cnt}`\n"
+            f"💰 **Gasto IA Hoy:** `${today_ai_cost:.4f}` ({today_ai_calls} llamadas) | "
             f"📁 **Kits en Disco:** `{kits_cnt}`\n\n"
             f"📊 **Base de Datos Multi-Mercado (`sniper.db` WAL):**\n" + "\n".join(plat_lines)
         )
@@ -1284,6 +1989,108 @@ async def slash_estado(interaction: discord.Interaction):
         embed.add_field(name="🔥 Últimos 5 Chollos y Oportunidades de Oferta", value="\n".join(deal_lines)[:1020], inline=False)
     embed.set_footer(text=f"Servidor Linux Homelab • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
     await interaction.response.send_message(embed=embed)
+
+
+def _fetch_stats_fraude():
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM seen_image_hashes")
+        total_hashes = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM ai_prescreen_cache WHERE decision = 'reject'")
+        rejected_prescreen = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM fraud_log")
+        fraud_log_count = c.fetchone()[0]
+
+        c.execute(
+            """SELECT reject_reason, confidence, evaluated_at 
+               FROM ai_prescreen_cache 
+               WHERE decision = 'reject' AND reject_reason != '' 
+               ORDER BY evaluated_at DESC LIMIT 5"""
+        )
+        recent_rejections = c.fetchall()
+    finally:
+        conn.close()
+    return total_hashes, rejected_prescreen, fraud_log_count, recent_rejections
+
+
+@bot.tree.command(name="stats_fraude", description="Métricas de fotos hasheadas, descartes por IA y bloqueos antifraude")
+async def slash_stats_fraude(interaction: discord.Interaction):
+    total_hashes, rejected_prescreen, fraud_log_count, recent_rejections = await asyncio.to_thread(_fetch_stats_fraude)
+
+    reasons_lines = []
+    for reason, conf, eval_time in recent_rejections:
+        time_str = str(eval_time).split()[1] if " " in str(eval_time) else str(eval_time)
+        reasons_lines.append(f"• `[{conf.upper()}]` {reason} *({time_str})*")
+
+    embed = discord.Embed(
+        title="🛡️ Estadísticas del Motor Antifraude y Filtro IA",
+        color=0xE74C3C,
+        description=(
+            f"🖼️ **Huellas Visuales en BD (`seen_image_hashes`):** `{total_hashes:,}`\n"
+            f"🚫 **Anuncios Descartados en Puerta 1 (IA Prescreen):** `{rejected_prescreen:,}`\n"
+            f"🛑 **Alertas Críticas de Fraude (`fraud_log`):** `{fraud_log_count:,}`\n"
+        )
+    )
+    if reasons_lines:
+        embed.add_field(name="📋 Últimos 5 Motivos de Descarte de IA", value="\n".join(reasons_lines)[:1020], inline=False)
+    else:
+        embed.add_field(name="📋 Últimos Motivos de Descarte", value="No hay descartes registrados aún.", inline=False)
+    embed.set_footer(text=f"Antifraude Activo • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    await interaction.response.send_message(embed=embed)
+
+
+def _run_purgar_vistas(horas: int):
+    conn = get_db()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM market_seen_items WHERE seen_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_market = c.rowcount
+        c.execute("DELETE FROM seen_items WHERE seen_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_seen = c.rowcount
+        c.execute("DELETE FROM ai_prescreen_cache WHERE evaluated_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_prescreen = c.rowcount
+        c.execute("DELETE FROM ai_eval_cache WHERE evaluated_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_eval = c.rowcount
+        c.execute("DELETE FROM ai_prompt_cache WHERE created_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_prompt = c.rowcount
+        c.execute("DELETE FROM item_embeddings WHERE created_at >= datetime('now', ?)", (f"-{horas} hours",))
+        deleted_embeddings = c.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "market_seen_items": deleted_market + deleted_seen,
+        "ai_prescreen_cache": deleted_prescreen + deleted_eval + deleted_prompt,
+        "item_embeddings": deleted_embeddings
+    }
+
+
+@bot.tree.command(name="purgar_vistas", description="Elimina el historial de anuncios vistos y caché reciente para forzar re-escaneo")
+@app_commands.describe(horas="Número de horas hacia atrás a purgar (por defecto: 24)")
+async def slash_purgar_vistas(interaction: discord.Interaction, horas: int = 24):
+    if horas <= 0 or horas > 720:
+        await interaction.response.send_message("❌ El rango de horas debe estar entre 1 y 720 (máx 30 días).", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+    res = await asyncio.to_thread(_run_purgar_vistas, horas)
+
+    embed = discord.Embed(
+        title="🧹 Purga de Historial Completada",
+        color=0x3498DB,
+        description=(
+            f"Se ha purgado el historial de las últimas **{horas} horas** para permitir re-escanear el mercado:\n\n"
+            f"• **Anuncios Vistos:** `{res['market_seen_items']:,}` filas eliminadas\n"
+            f"• **Caché Pre-Filtro IA:** `{res['ai_prescreen_cache']:,}` filas eliminadas\n"
+            f"• **Embeddings Semánticos:** `{res['item_embeddings']:,}` filas eliminadas\n\n"
+            f"⚡ *Los escáneres volverán a evaluar los anuncios recientes en su siguiente ciclo.*"
+        )
+    )
+    embed.set_footer(text=f"Operación Homelab • {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="guia", description="Guía de 60 segundos para hacer fotos que venden en <24h")
@@ -1306,25 +2113,33 @@ async def slash_guia(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="ayuda", description="Muestra todos los comandos y automatizaciones de Boti v4.3")
+@bot.tree.command(name="ayuda", description="Muestra todos los comandos y cómo gestionar tus compras con Boti")
 async def slash_ayuda(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🤖 Centro de Mando Boti Arbitrage & Homelab v4.3",
+        title="🤖 Boti: centro de mando de chollos y cartera",
         color=0x3498DB,
         description=(
-            "**Sistema de Doble Alerta Push & Oportunidades de Oferta:**\n"
-            "• **⚡ Flash Sin IA:** Te avisa en 50ms cuando sale un anuncio dentro del precio de compra directa.\n"
-            "• **📲 2ª Notificación Push (Veredicto IA):** Mientras estás comprando, te llega una segunda notificación indicando `🛑 ¡DETÉN LA COMPRA!` (si tiene fallos/estafa) o `🚨 ¡SIGUE CON LA COMPRA!` (si está confirmado).\n"
-            "• **🤝 Oportunidad de Chollo (6-7/10):** Detecta productos impecables un poco caros y te da el precio exacto a ofertar y el texto en FR/IT/ES listo para copiar.\n\n"
-            "**Slash Commands disponibles:**\n"
-            "• `/tasar <producto> [precio]`: Tasación instantánea en CeX España + IA de reventa en 48h.\n"
-            "• `/radares`: Activa/pausa nichos y edita precios o blacklist de `config.json` en vivo.\n"
-            "• `/cartera`: Controla tu stock comprado, registra ventas cerradas y mide tu ROI real.\n"
-            "• `/kits`: Genera anuncios de reventa con redacción natural y limpieza EXIF de fotos.\n"
-            "• `/estado`: Estadísticas en vivo de los 6 mercados.\n"
-            "• `/guia`: Masterclass rápida de fotografía para vender al precio más alto."
+            "**En cada alerta de chollo:**\n"
+            "• **✅ ¡Comprado!** abre un formulario con el precio pagado (ya relleno) y notas. Queda en tu cartera con una ficha y sus botones.\n"
+            "• **📋 Mensajes** te da el texto de oferta en ES/FR/IT. **📊 Grados CeX** muestra los precios de CeX en vivo. **🚫 Descartar** borra el aviso.\n\n"
+            "**En la ficha de una compra:**\n"
+            "• **📝 Crear anuncio de reventa**, **💰 Vendido** (con comisiones), **✏️ Editar**,\n"
+            "• **↩️ La compra no se hizo** (sale del stock sin perder el historial), **🗑️ Eliminar** y **⏪ Deshacer**.\n\n"
+            "**Cartera:**\n"
+            "• `/cartera`: stock, capital invertido y beneficio real, total y del mes.\n"
+            "• `/comprado`: registra una compra de una alerta o una compra manual (con precio).\n"
+            "• `/vendido`: registra una venta y descuenta comisiones.\n"
+            "• `/cancelar_compra`, `/editar`, `/eliminar`, `/deshacer`: corrige cualquier error.\n"
+            "• `/ficha`: abre la ficha de cualquier anuncio. `/historial`: busca por estado o texto.\n"
+            "• `/exportar`: descarga la cartera en CSV para Excel.\n\n"
+            "**Mantenimiento:**\n"
+            "• `/limpiar_alertas`: borra alertas viejas que nunca compraste.\n"
+            "• `/purgar_vistas`: fuerza a reescanear anuncios recientes.\n"
+            "• `/estado` y `/stats_fraude`: salud de los escáneres y del antifraude.\n\n"
+            "**Herramientas:** `/tasar` (CeX + IA), `/radares` (editar radares), `/kits` (anuncios de reventa), `/guia` (fotos)."
         )
     )
+    embed.set_footer(text="Todas las acciones de cartera se pueden deshacer con /deshacer")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1335,6 +2150,9 @@ async def on_message(message: discord.Message):
 
     session = active_sessions.get(message.author.id)
     if session and session.get("waiting_photos") and message.attachments:
+        if session.get("channel_id") and message.channel.id != session["channel_id"]:
+            return
+
         valid_attachments = [
             a for a in message.attachments
             if (a.content_type and "image" in a.content_type) or a.filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
@@ -1360,6 +2178,7 @@ async def on_message(message: discord.Message):
 
 
 if __name__ == "__main__":
+    touch_heartbeat()
     if not BOT_TOKEN:
         print("[FATAL] Falta DISCORD_BOT_TOKEN en variables de entorno.")
     else:
