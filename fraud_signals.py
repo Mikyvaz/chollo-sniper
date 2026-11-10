@@ -395,6 +395,25 @@ def _set_cached_seller_profile(key, profile):
                     _SELLER_PROFILE_CACHE.pop(k, None)
         _SELLER_PROFILE_CACHE[key] = (now, profile)
 
+def _vinted_verification_age_days(verification, now):
+    """Días desde la verificación más antigua del perfil de Vinted (cota de la antigüedad de la cuenta)."""
+    if not isinstance(verification, dict):
+        return None
+    oldest = None
+    for v in verification.values():
+        ts = v.get("verified_at") if isinstance(v, dict) else None
+        if not ts:
+            continue
+        try:
+            t = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+            oldest = t if oldest is None else min(oldest, t)
+        except Exception:
+            pass
+    if oldest is None:
+        return None
+    return round(max(0.0, (now - oldest) / 86400.0), 1)
+
+
 def enrich_seller_profile(item_data: dict, http_session=None, platform: str = None) -> dict:
     """
     Enriquece el perfil del vendedor consultando la API pública de la plataforma o extrayendo
@@ -435,6 +454,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
     verified = seller.get("seller_verified", seller.get("verified", False))
 
     should_cache = True
+    extra = {}  # ventas reales, compras, anuncios, denuncias... (para la alerta y el análisis)
     if platform == "CASHCONVERTERS" or "CASH" in platform or seller_id == "cash_converters_official":
         profile = {
             "seller_id": seller_id or "cash_converters_official",
@@ -483,6 +503,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                             if ts > 1e11:
                                 ts /= 1000.0
                             joined_days = round((now - ts) / 86400.0, 1)
+                            extra["seller_age_source"] = "register_date"
                         except Exception:
                             pass
 
@@ -510,8 +531,15 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                                     rev_cnt = max(rev_cnt, int(c_val))
                                 elif c_type in ("sells", "sold"):
                                     sells_cnt = max(sells_cnt, int(c_val))
+                                elif c_type == "buys":
+                                    extra["seller_bought_count"] = int(c_val)
+                                elif c_type == "publish":
+                                    extra["seller_listings"] = int(c_val)
+                                elif c_type == "reports_received":
+                                    extra["seller_reports"] = int(c_val)
                         reviews_count = max(rev_cnt, sells_cnt)
                         seller["sales"] = sells_cnt
+                        extra["seller_sold_count"] = sells_cnt
 
                         if st_data.get("rating_average") is not None and float(st_data.get("rating_average") or 0) > 0:
                             rating = float(st_data["rating_average"])
@@ -529,12 +557,27 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                 should_cache = False
 
     elif platform == "VINTED":
-        if seller_id and (reviews_count is None or rating is None):
+        try:
+            low_rep = reviews_count is None or int(reviews_count) < 10
+        except Exception:
+            low_rep = True
+        # También se consulta si falta la antigüedad en vendedores con poca reputación (los que importan para el fraude)
+        if seller_id and (reviews_count is None or rating is None or (joined_days is None and low_rep)):
             sess = http_session or _get_thread_local_session()
+            vinted_ok = False
             try:
                 url = f"https://www.vinted.es/api/v2/users/{seller_id}"
-                r = sess.get(url, timeout=2.5)
+                r = sess.get(url, timeout=4)
+                if r.status_code in (401, 403) and not getattr(sess, "_vinted_warmed", False):
+                    # Sin cookies de vinted.es la API rechaza la petición: visitar la portada una vez y reintentar
+                    try:
+                        sess.get("https://www.vinted.es/", timeout=8)
+                        sess._vinted_warmed = True
+                    except Exception:
+                        pass
+                    r = sess.get(url, timeout=4)
                 if r.status_code == 200:
+                    vinted_ok = True
                     u_data = r.json().get("user", {})
                     if "feedback_count" in u_data:
                         reviews_count = u_data["feedback_count"]
@@ -548,10 +591,28 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                         try:
                             dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                             joined_days = round((now - dt.timestamp()) / 86400.0, 1)
+                            extra["seller_age_source"] = "created_at"
                         except Exception:
                             pass
+                    if joined_days is None:
+                        # Vinted ya no publica created_at: la verificación más antigua (Google/Facebook/teléfono)
+                        # es una cota de la antigüedad. Si es reciente, la cuenta casi seguro también lo es.
+                        proxy_days = _vinted_verification_age_days(u_data.get("verification"), now)
+                        if proxy_days is not None:
+                            joined_days = proxy_days
+                            extra["seller_age_source"] = "verification"
+                    for src, dst in (("given_item_count", "seller_sold_count"), ("taken_item_count", "seller_bought_count"),
+                                     ("item_count", "seller_listings"), ("followers_count", "seller_followers")):
+                        if u_data.get(src) is not None:
+                            extra[dst] = u_data[src]
+                    if u_data.get("is_account_banned") or u_data.get("is_deleted"):
+                        extra["seller_banned"] = True
             except Exception:
                 pass
+            if not vinted_ok:
+                should_cache = False  # no fijar durante 30 min un perfil incompleto
+                if reviews_count is None:
+                    print(f"[SELLER ENRICH] Vinted no devolvió el perfil de {seller_id}: valoraciones desconocidas")
 
     # Normalizar valores
     try:
@@ -597,6 +658,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
         "seller_trust_badge": badge,
         "platform": platform
     }
+    profile.update(extra)
 
     if seller_id and should_cache:
         _set_cached_seller_profile(cache_key, profile)
@@ -699,6 +761,20 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
 
     verified = bool(seller.get("seller_verified") or seller.get("verified", False))
 
+    # La antigüedad estimada por la verificación (Vinted) es solo una cota: con historial real no se usa
+    if joined_days is not None and seller.get("seller_age_source") == "verification" and reviews_count >= 3:
+        joined_days = None
+
+    def _int_or_none(v):
+        try:
+            return int(v) if v is not None else None
+        except Exception:
+            return None
+
+    sold_count = _int_or_none(seller.get("seller_sold_count"))
+    bought_count = _int_or_none(seller.get("seller_bought_count"))
+    reports = _int_or_none(seller.get("seller_reports")) or 0
+
     # Normalización de escala preventiva
     if rating is not None:
         if rating > 5.0:
@@ -710,6 +786,22 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
     hits = []
     block_flash = False
     seller_trust_badge = ""
+
+    if seller.get("seller_banned"):
+        hits.append({"code": "SELLER_BANNED", "category": "seller",
+                     "label": "⛔ Cuenta del vendedor suspendida o eliminada", "weight": 6})
+        block_flash = True
+
+    if reports > 0:
+        hits.append({"code": "SELLER_REPORTED", "category": "seller",
+                     "label": f"🚩 El vendedor tiene {reports} denuncia(s) recibida(s) en la plataforma",
+                     "weight": 3 if reports >= 3 else 2})
+        block_flash = True
+
+    # Perfil fantasma: nunca ha vendido NI comprado nada (un usuario real suele haber comprado algo)
+    if reviews_count == 0 and sold_count == 0 and bought_count == 0:
+        hits.append({"code": "SELLER_GHOST_PROFILE", "category": "seller",
+                     "label": "Perfil sin ninguna actividad: 0 ventas, 0 compras, 0 valoraciones", "weight": 1})
 
     # Antigüedad de la cuenta
     if joined_days is not None:

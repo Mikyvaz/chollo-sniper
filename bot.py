@@ -16,6 +16,7 @@ import os
 import io
 import re
 import json
+import unicodedata
 import glob
 import time
 import asyncio
@@ -39,8 +40,11 @@ from core_engine import (
     touch_heartbeat, ai_gateway_call, BudgetExceededError,
     DEAL_STATUS_LABELS, get_deal, mark_deal_bought, create_manual_deal, cancel_deal_purchase,
     mark_deal_sold, update_deal_fields, delete_deal, undo_last_deal_change, get_portfolio_summary,
-    search_deals, count_stale_alerts, purge_stale_alerts, export_deals_csv
+    search_deals, count_stale_alerts, purge_stale_alerts, export_deals_csv,
+    FEEDBACK_VERDICTS, FEEDBACK_REASONS, FEEDBACK_REASON_LABELS,
+    save_alert_feedback, get_latest_feedback, get_feedback_summary, export_feedback_csv
 )
+from outcome_tracker import get_outcome_summary, export_outcomes_csv
 
 # ==================== CONFIGURACIÓN Y VARIABLES ====================
 BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
@@ -79,11 +83,12 @@ def get_kit_info_by_folder(folder_path):
     base_content = ""
     photo_urls = []
     clean_photos = sorted(glob.glob(os.path.join(folder_path, "foto_*_limpia.jpg")))
+    meta = {}
 
     if os.path.exists(meta_path):
         try:
             with open(meta_path, "r", encoding="utf-8") as mf:
-                meta = json.load(mf)
+                meta = json.load(mf) or {}
                 preview_title = meta.get("seo_title") or meta.get("identified_model") or preview_title
                 if meta.get("optimal_price"):
                     est_price = f"{float(meta['optimal_price']):.0f}€"
@@ -109,10 +114,26 @@ def get_kit_info_by_folder(folder_path):
         except Exception as e:
             print(f"[ERROR LEYENDO KIT] {folder_path}: {e}")
 
+    def _from_txt(label):
+        m = re.search(rf"{label}:\s*([^\r\n]+)", base_content or "")
+        return m.group(1).strip() if m else ""
+
+    # Modelo completo (seo_title va recortado a 48 caracteres y perdía la variante/edición)
+    product_name = (
+        str(meta.get("identified_model") or "").strip()
+        or _from_txt("Modelo identificado")
+        or preview_title
+    )
+
     return {
         "folder": folder_path,
         "bname": bname,
         "title": preview_title,
+        "product_name": product_name[:120],
+        "original_title": str(meta.get("title") or _from_txt("Producto original") or "").strip(),
+        "visual_notes": str(meta.get("visual_notes") or _from_txt("Inspección visual IA") or "").strip(),
+        "landed_cost": meta.get("landed_cost"),
+        "optimal_price": meta.get("optimal_price"),
         "est_price": est_price,
         "tip_text": tip_text,
         "base_content": base_content,
@@ -133,86 +154,319 @@ def get_recent_kits(limit=50):
     return kits
 
 
+try:  # Soporte HEIC/HEIF del iPhone si pillow-heif está instalado (opcional)
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
+try:
+    from PIL import ImageCms, ImageFilter
+    _SRGB_PROFILE = ImageCms.createProfile("sRGB")
+    _SRGB_ICC_BYTES = ImageCms.ImageCmsProfile(_SRGB_PROFILE).tobytes()
+except Exception:
+    ImageCms = None
+    from PIL import ImageFilter
+    _SRGB_PROFILE = None
+    _SRGB_ICC_BYTES = None
+
+LISTING_PHOTO_MAX_SIDE = 2048  # Wallapop/Vinted reescalan por debajo de esto; controlamos nosotros el downscale
+
+
+def _to_srgb(im):
+    """Convierte de Display P3 (iPhone) u otro perfil embebido a sRGB. Sin esto los colores
+    salen apagados/desplazados, porque las webs y apps interpretan el JPEG sin perfil como sRGB."""
+    icc = im.info.get("icc_profile")
+    if not icc or ImageCms is None or _SRGB_PROFILE is None:
+        return im.convert("RGB")
+    try:
+        src = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        rgb = im.convert("RGB")
+        return ImageCms.profileToProfile(
+            rgb, src, _SRGB_PROFILE,
+            renderingIntent=ImageCms.Intent.PERCEPTUAL, outputMode="RGB"
+        )
+    except Exception:
+        return im.convert("RGB")
+
+
+def _percentile_from_hist(hist, pct):
+    total = sum(hist)
+    if total <= 0:
+        return 0
+    target = total * pct
+    acc = 0
+    for i, v in enumerate(hist):
+        acc += v
+        if acc >= target:
+            return i
+    return 255
+
+
+def _adaptive_tone_lut(y_channel):
+    """Curva tonal sólo si la foto la necesita. Una foto bien expuesta (iPhone con buena luz)
+    devuelve None → no se toca. Trabaja sobre luminancia para no alterar el balance de blancos."""
+    hist = y_channel.histogram()
+    total = sum(hist) or 1
+    lo = _percentile_from_hist(hist, 0.005)
+    hi = _percentile_from_hist(hist, 0.995)
+    mean = sum(i * v for i, v in enumerate(hist)) / total
+
+    black = min(lo, 14) if lo > 10 else 0          # sombras lavadas (velo) → recupera negro, con tope
+    white = max(hi, 238) if hi < 240 else 255      # foto apagada → sube el blanco, sin quemar
+    gamma = 1.0
+    if mean < 100:                                  # subexpuesta → abre medios tonos suavemente
+        gamma = max(0.82, (mean / 118.0) ** 0.6)
+    elif mean > 175:                                # sobreexpuesta → baja medios tonos un pelo
+        gamma = min(1.12, (mean / 160.0) ** 0.6)
+
+    if black == 0 and white == 255 and abs(gamma - 1.0) < 0.02:
+        return None
+
+    span = max(1, white - black)
+    lut = []
+    for i in range(256):
+        x = min(1.0, max(0.0, (i - black) / span))
+        lut.append(int(round(255 * (x ** gamma))))
+    return lut
+
+
 def enhance_photo_organic(img_bytes):
+    """Retoque mínimo y 'invisible' para fotos propias hechas con móvil:
+    - orientación EXIF y conversión de color P3 → sRGB
+    - curva tonal adaptativa sólo en luminancia (no toca si la exposición ya es buena)
+    - downscale de alta calidad + nitidez fina post-reescalado (no sobre la foto de 24 MP)
+    - elimina EXIF (GPS de tu casa, modelo, fecha) y guarda JPEG 4:4:4 con perfil sRGB
+    """
     with Image.open(io.BytesIO(img_bytes)) as im:
         try:
             im = ImageOps.exif_transpose(im)
         except Exception:
             pass
-        im = im.convert("RGB")
-        im = ImageOps.autocontrast(im, cutoff=0.5)
-        im = ImageEnhance.Color(im).enhance(1.06)
-        im = ImageEnhance.Brightness(im).enhance(1.03)
-        im = ImageEnhance.Sharpness(im).enhance(1.18)
+
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGBA")
+            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+            bg.alpha_composite(im)
+            im = bg
+        im = _to_srgb(im)
+
+        w, h = im.size
+        scale = LISTING_PHOTO_MAX_SIDE / float(max(w, h))
+        downscaled = scale < 1.0
+        if downscaled:
+            im = im.resize(
+                (max(1, round(w * scale)), max(1, round(h * scale))),
+                Image.Resampling.LANCZOS, reducing_gap=3.0
+            )
+
+        y, cb, cr = im.convert("YCbCr").split()
+        lut = _adaptive_tone_lut(y)
+        if lut is not None:
+            y = y.point(lut)
+            im = Image.merge("YCbCr", (y, cb, cr)).convert("RGB")
+
+        # Nitidez fina sólo para compensar el reescalado; el iPhone ya aplica la suya (Deep Fusion)
+        im = im.filter(ImageFilter.UnsharpMask(
+            radius=0.8, percent=45 if downscaled else 20, threshold=3
+        ))
 
         buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=94, optimize=True)
+        save_kwargs = dict(format="JPEG", quality=90, subsampling=0, optimize=True, progressive=True)
+        if _SRGB_ICC_BYTES:
+            save_kwargs["icc_profile"] = _SRGB_ICC_BYTES
+        im.save(buf, **save_kwargs)  # sin exif= → metadatos (GPS incluido) eliminados
         return buf.getvalue()
 
 
 # ==================== IA COPYWRITER Y TASADOR ====================
 
-def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, desired_price="", seller_city=SELLER_CITY):
-    p_name = str(product_name or "").strip()[:80]
-    b_text = str(base_text or "").strip()[:300]
-    e_text = str(extras_text or "").strip()[:180]
-    c_notes = str(condition_notes or "").strip()[:180]
-    d_price = str(desired_price or "").strip()[:40]
+def _norm_txt(s):
+    s = unicodedata.normalize("NFKD", str(s or "").lower())
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+
+_ITEM_STOPWORDS = {
+    "con", "sin", "para", "por", "del", "las", "los", "una", "uno", "unos", "unas", "que", "muy",
+    "mas", "incluye", "incluido", "incluida", "incluidos", "regalo", "tambien", "original", "originales",
+    "estado", "nuevo", "nueva", "todo", "toda", "este", "esta", "the", "and",
+}
+
+
+def _split_user_items(text):
+    parts = re.split(r"[\n,;]+|\s\+\s", str(text or ""))
+    items = []
+    for p in parts:
+        p = p.strip(" \t•-*·.")
+        if len(p) >= 3:
+            items.append(p)
+    return items
+
+
+def _item_keywords(item):
+    words = re.findall(r"[a-z0-9ñ]+", _norm_txt(item))
+    return [w for w in words if (len(w) >= 3 or w.isdigit()) and w not in _ITEM_STOPWORDS]
+
+
+def _ensure_user_items_in_description(description, extras_text):
+    """Red de seguridad determinista: cualquier extra que indicaste y la IA no mencionó
+    se añade como viñeta en '¿Qué entrego?'. Devuelve (descripcion, lista_añadidos)."""
+    desc_n = _norm_txt(description)
+    missing = []
+    for item in _split_user_items(extras_text):
+        kws = _item_keywords(item)
+        if not kws:
+            continue
+        hits = sum(1 for k in kws if k in desc_n)
+        if hits / len(kws) < 0.5:
+            missing.append(item[0].upper() + item[1:])
+    if not missing:
+        return description, []
+
+    bullets = [f"• {m}" for m in missing]
+    lines = description.split("\n")
+    idx = next((i for i, l in enumerate(lines) if "que entrego" in _norm_txt(l) or "que incluye" in _norm_txt(l)), None)
+    if idx is None:
+        return description.rstrip() + "\n\n📦 Incluye también:\n" + "\n".join(bullets), missing
+    j = idx + 1
+    while j < len(lines) and lines[j].strip().startswith(("•", "-", "*", "·")):
+        j += 1
+    lines[j:j] = bullets
+    return "\n".join(lines), missing
+
+
+def _clean_listing_text(text):
+    """Texto plano listo para pegar en Wallapop/Vinted (sin markdown que Discord interpretaría)."""
+    t = str(text or "").replace("\r\n", "\n")
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"__(.+?)__", r"\1", t)
+    t = re.sub(r"^\s{0,3}#{1,6}\s*", "", t, flags=re.MULTILINE)
+    t = t.replace("```", "")
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    t = re.sub(r"(¡[^!\n]*)\.(\s*)$", r"\1!\2", t)  # exclamación final abierta y no cerrada
+    return t.strip()
+
+
+def _trim_title(title, limit=48):
+    t = re.sub(r"\s+", " ", str(title or "")).strip().strip('"').strip()
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    if " " in cut:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" -,·|")
+
+
+def call_ai_copywriter(product_name, base_text="", extras_text="", condition_notes="", desired_price="",
+                       seller_city=SELLER_CITY, kit_facts=None, revisions=None, previous=None, variant=0):
+    """Redacta (o revisa) el anuncio. Lo que escribe el usuario manda siempre sobre el borrador del sniper.
+    - revisions: lista acumulada de cambios pedidos por el usuario (todos obligatorios)
+    - previous: dict con el último anuncio generado (seo_title/description) para revisar sin reescribir todo
+    - variant: >0 pide una redacción alternativa (y evita la caché de prompt)
+    """
+    kit_facts = kit_facts or {}
+    p_name = str(product_name or "").strip()[:120]
+    e_text = str(extras_text or "").strip()[:600]
+    c_notes = str(condition_notes or "").strip()[:600]
+    d_price = str(desired_price or "").strip()[:120]
     s_city = str(seller_city or "Sevilla").strip()[:30]
+    revs = [str(r).strip()[:500] for r in (revisions or []) if str(r).strip()]
+
+    ref_lines = []
+    if kit_facts.get("original_title"):
+        ref_lines.append(f"- Título del anuncio donde se compró: {str(kit_facts['original_title'])[:150]}")
+    if kit_facts.get("visual_notes"):
+        ref_lines.append(f"- Inspección IA de las fotos de ese anuncio: {str(kit_facts['visual_notes'])[:400]}")
+    if not ref_lines and base_text:
+        clean_base = "\n".join(
+            l for l in str(base_text).splitlines()
+            if l.strip() and not re.match(r"^\s*(URL origen|Coste real|===|---)", l)
+        )
+        ref_lines.append(clean_base[:600])
+    ref_block = "\n".join(ref_lines) or "- (sin datos)"
+
+    price_lines = []
+    try:
+        if kit_facts.get("optimal_price"):
+            price_lines.append(f"- Precio de mercado estimado por el sniper: {float(kit_facts['optimal_price']):.0f}€")
+        if kit_facts.get("landed_cost"):
+            price_lines.append(f"- Coste de compra (no lo menciones en el anuncio): {float(kit_facts['landed_cost']):.0f}€")
+    except (TypeError, ValueError):
+        pass
+    if d_price:
+        price_lines.append(f"- Indicación del vendedor (MANDA sobre lo anterior): {d_price}")
+    price_block = "\n".join(price_lines) or "- Sin datos: estima un precio realista de segunda mano en España."
+
+    if revs:
+        rev_block = "CAMBIOS PEDIDOS POR EL VENDEDOR (aplícalos TODOS; los últimos mandan si se contradicen):\n" + \
+            "\n".join(f"{i}. {r}" for i, r in enumerate(revs, start=1))
+    else:
+        rev_block = ""
+
+    prev_block = ""
+    if previous and previous.get("description"):
+        prev_block = (
+            "ANUNCIO ANTERIOR (parte de él; cambia lo pedido y conserva el resto salvo que choque con los cambios):\n"
+            f"Título: {str(previous.get('seo_title', ''))[:60]}\n"
+            f"{str(previous['description'])[:2500]}"
+        )
+
+    variant_line = (
+        f"\nVERSIÓN ALTERNATIVA #{int(variant)}: redacta con otras palabras y otro orden de frases, mismos datos.\n"
+        if variant else ""
+    )
 
     prompt = f"""
-    Eres un particular meticuloso, ordenado y transparente vendiendo un artículo de segunda mano en Wallapop o Vinted en España.
-    Tu objetivo es redactar un anuncio 100% NATURAL, creíble y profesional para particulares. Debe justificar el precio más alto del mercado inspirando total confianza, sin sonar JAMÁS como un robot, una tienda o un redactor publicitario.
+Eres un particular meticuloso y honesto que vende un artículo de segunda mano en Wallapop/Vinted (España).
+Redacta un anuncio natural y creíble, que inspire confianza y justifique un precio alto, sin sonar a tienda ni a robot.
 
-    DATOS DEL PRODUCTO:
-    - Producto / Modelo: {p_name}
-    - Información base del kit / sniper:
-    {b_text}
-    - EXTRAS Y ACCESORIOS QUE INCLUYES:
-    {e_text if e_text else "Sin extras adicionales especificados."}
-    - ESTADO REAL Y DETALLES ESPECÍFICOS:
-    {c_notes if c_notes else "En muy buen estado, totalmente probado y funcional."}
-    - PRECIO / OBJETIVO DE VENTA:
-    {d_price if d_price else "Optimizar para máxima rentabilidad rápida y justificada."}
-    - CIUDAD PARA TRATO EN MANO: {s_city}
+PRODUCTO EXACTO (úsalo tal cual, es la identificación correcta): {p_name}
 
-    REGLAS DE ORO DE REDACCIÓN NATURAL (OBLIGATORIAS):
-    1. TONO: Particular cuidadoso y honesto que cuida al máximo sus cosas. Cero lenguaje de marketing ni palabras grandilocuentes.
-    2. PROHIBIDO USAR FRASES DE ESLOGAN: La primera línea debe empezar directamente con:
-       "Vendo [Producto exacto] en un estado [excelente / impoluto / muy bueno], ideal para [uso o público]. Funciona a la perfección, muy cuidado/a."
-    3. MÁXIMO 1 SIGNO DE EXCLAMACIÓN EN TODO EL TEXTO: La única exclamación permitida va en la frase final: "¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!".
-    4. UBICACIÓN REAL (SIN PLACEHOLDERS):
-       "Hago trato en mano en {s_city} (puedes probarlo/a tranquilamente antes de llevártelo/a)."
-    5. ESTRUCTURA EXACTA DEL TEXTO:
-       Vendo [Producto exacto] en un estado [excelente / muy bueno], ideal para [uso]. Funciona a la perfección, muy cuidado/a.
+=== DATOS DEL VENDEDOR — PRIORIDAD MÁXIMA, SON LA VERDAD ===
+EXTRAS / LO QUE SE ENTREGA:
+{e_text if e_text else "(no indicados)"}
+ESTADO REAL Y DETALLES:
+{c_notes if c_notes else "(no indicado: describe un buen estado general sin inventar detalles concretos)"}
 
-       📦 ¿Qué entrego?
-       • [Elemento principal]
-       • [Accesorios originales: dock, cables, cargador, caja...]
-       • [Extras si los hay: juegos, fundas, protector...]
+=== REFERENCIA DEL SNIPER (orientativa, de cuando se compró; puede estar desactualizada) ===
+{ref_block}
+Si algo de la referencia contradice los datos del vendedor, IGNORA la referencia.
 
-       ✨ Estado real:
-       • Pantalla / Exterior: [Detalle honesto]
-       • Funcionamiento / Controles / Batería: [Todo probado al 100%]
-       • Estética y cuidado: [Limpio y muy bien conservado]
+=== PRECIO ===
+{price_block}
 
-       🤝 Entrega y envío:
-       • Hago trato en mano en {s_city} (puedes probarlo/a tranquilamente antes de llevártelo/a).
-       • Hago envíos por la plataforma. Empaqueto muy bien con plástico de burbujas y caja rígida, y suelo depositarlo en Correos/InPost en menos de 24h.
+{rev_block}
 
-       Cualquier duda o si necesitas alguna foto o vídeo extra encendido/a, escríbeme sin compromiso. ¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!
+{prev_block}
+{variant_line}
+REGLAS OBLIGATORIAS:
+1. Incluye TODOS y cada uno de los extras del vendedor como viñeta propia en "¿Qué entrego?", con su nombre concreto (no los resumas como "varios accesorios").
+2. Refleja TODOS los detalles de estado del vendedor. Si menciona algún defecto, dilo con honestidad y no escribas "perfecto" ni "impecable" sobre esa parte.
+3. NO inventes accesorios, caja, garantía ni ticket que no consten en los datos del vendedor.
+4. Tono de particular cuidadoso. Sin lenguaje de marketing. Máximo 1 signo de exclamación en todo el texto.
+5. TEXTO PLANO: nada de markdown (sin **, sin #, sin guiones bajos). Viñetas con "•".
+6. Estructura:
+Vendo [producto] en un estado [excelente / muy bueno / bueno, según los datos], ideal para [uso]. [Frase breve y honesta sobre funcionamiento y cuidado.]
 
-    6. TÍTULO SEO (MÁXIMO 48 CARACTERES estrictos): Nombre del modelo exacto y extras principales.
+📦 ¿Qué entrego?
+• [Elemento principal]
+• [Cada extra del vendedor, uno por línea]
 
-    IMPORTANTE: Cero texto conversacional ni saludos. Devuelve ÚNICAMENTE un objeto JSON válido con estas claves exactas:
-    {{
-      "seo_title": "Título máx 48 caracteres",
-      "description": "Texto completo estructurado según las reglas anteriores",
-      "listing_price": 220,
-      "minimum_price": 195,
-      "pricing_rationale": "Breve justificación de precio para el usuario"
-    }}
-    """
+✨ Estado real:
+• [Detalles reales del vendedor, uno por línea]
+
+🤝 Entrega y envío:
+• Hago trato en mano en {s_city} (puedes probarlo tranquilamente antes de llevártelo).
+• Hago envíos por la plataforma. Empaqueto muy bien con plástico de burbujas y caja rígida, y suelo depositarlo en menos de 24h.
+
+Cualquier duda o si necesitas alguna foto o vídeo extra, escríbeme sin compromiso. ¡Echa un vistazo a mis valoraciones para comprar con total tranquilidad!
+
+7. seo_title: máximo 48 caracteres, modelo exacto + el extra más atractivo. Sin emojis.
+8. listing_price (precio de publicación, entero en €) y minimum_price (mínimo aceptable, entero, menor o igual que listing_price). Si el vendedor indica precio, respétalo.
+
+Devuelve ÚNICAMENTE un JSON válido con estas claves:
+{{"seo_title": "...", "description": "...", "listing_price": 0, "minimum_price": 0, "pricing_rationale": "una frase breve"}}
+""".strip()
 
     conn = None
     try:
@@ -221,13 +475,13 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
             prompt=prompt,
             candidate_models=["gemini-3.5-flash-lite", "gemini-flash-lite-latest"],
             openrouter_models=["google/gemini-2.5-flash-lite", "openai/gpt-4o-mini"],
-            max_tokens=350,
-            temperature=0.2,
+            max_tokens=1400,
+            temperature=0.5 if variant else 0.25,
             conn=conn,
             platform="DISCORD_BOT",
             radar_id="relister",
             call_type="bot_description",
-            timeout=15,
+            timeout=25,
             enforce_budget=True,
             schema_defaults={
                 "seo_title": "",
@@ -237,11 +491,30 @@ def call_ai_copywriter(product_name, base_text, extras_text, condition_notes, de
                 "pricing_rationale": ""
             }
         )
-        if result and isinstance(result, dict):
-            desc = result.get("description", "")
-            desc = re.sub(r"\[(?:Tu )?Ciudad(?:/Zona)?\]", seller_city, desc, flags=re.IGNORECASE)
-            result["description"] = desc.strip()
-            return result
+        if not result or not isinstance(result, dict):
+            return None
+
+        desc = _clean_listing_text(result.get("description", ""))
+        desc = re.sub(r"\[(?:Tu )?Ciudad(?:/Zona)?\]", s_city, desc, flags=re.IGNORECASE)
+        if len(desc) < 80:
+            print(f"[BOT RELISTER] Descripción vacía o truncada ({len(desc)} chars)")
+            return None
+
+        desc, added = _ensure_user_items_in_description(desc, e_text)
+        result["description"] = desc
+        result["auto_added_items"] = added
+        result["seo_title"] = _trim_title(result.get("seo_title") or p_name)
+
+        def _to_int(v):
+            try:
+                return int(round(float(str(v).replace("€", "").replace(",", ".").strip())))
+            except (TypeError, ValueError):
+                return 0
+        lp, mp = _to_int(result.get("listing_price")), _to_int(result.get("minimum_price"))
+        if mp > lp > 0:
+            lp, mp = mp, lp
+        result["listing_price"], result["minimum_price"] = lp, mp
+        return result
     except BudgetExceededError as e:
         print(f"[BOT RELISTER] Cortafuegos IA diario activo: {e}")
         return None
@@ -314,7 +587,39 @@ def call_ai_appraiser(product_query, buy_price, cex_variants):
 
 # ==================== VISTAS Y MODALES DEL RELISTER ====================
 
+def _new_listing_session(kit_info, channel_id, product="", extras="", notes="", price_note=""):
+    return {
+        "kit_folder": kit_info["folder"],
+        "kit_bname": kit_info["bname"],
+        "kit_title": kit_info["title"],
+        "product_name": (product or kit_info.get("product_name") or kit_info["title"]).strip(),
+        "base_txt": kit_info["base_content"],
+        "kit_facts": {
+            "original_title": kit_info.get("original_title", ""),
+            "visual_notes": kit_info.get("visual_notes", ""),
+            "optimal_price": kit_info.get("optimal_price"),
+            "landed_cost": kit_info.get("landed_cost"),
+        },
+        "extras": extras.strip(),
+        "notes": notes.strip(),
+        "price_note": price_note.strip(),
+        "revisions": [],
+        "last_result": None,
+        "variant": 0,
+        "waiting_photos": False,
+        "uploaded_photos": [],
+        "channel_id": channel_id,
+    }
+
+
 class ExtrasModal(discord.ui.Modal, title="Personalizar Anuncio y Extras"):
+    product_input = discord.ui.TextInput(
+        label="Producto exacto (corrígelo si no es correcto)",
+        style=discord.TextStyle.short,
+        placeholder="Ej: Nintendo Switch OLED Edición Zelda",
+        required=True,
+        max_length=120
+    )
     extras_input = discord.ui.TextInput(
         label="Extras incluidos (juegos, funda, SD...)",
         style=discord.TextStyle.paragraph,
@@ -340,30 +645,26 @@ class ExtrasModal(discord.ui.Modal, title="Personalizar Anuncio y Extras"):
     def __init__(self, kit_info, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.kit_info = kit_info
+        self.product_input.default = (kit_info.get("product_name") or kit_info.get("title") or "")[:120]
 
     async def on_submit(self, interaction: discord.Interaction):
         user_id = interaction.user.id
-        active_sessions[user_id] = {
-            "kit_folder": self.kit_info["folder"],
-            "kit_bname": self.kit_info["bname"],
-            "kit_title": self.kit_info["title"],
-            "base_txt": self.kit_info["base_content"],
-            "extras": self.extras_input.value.strip(),
-            "notes": self.condition_input.value.strip(),
-            "price_note": self.price_input.value.strip(),
-            "waiting_photos": False,
-            "uploaded_photos": [],
-            "channel_id": interaction.channel_id
-        }
+        active_sessions[user_id] = _new_listing_session(
+            self.kit_info, interaction.channel_id,
+            product=self.product_input.value,
+            extras=self.extras_input.value,
+            notes=self.condition_input.value,
+            price_note=self.price_input.value,
+        )
 
         embed = discord.Embed(
             title="📸 Paso Final: Selección de Fotos",
             description=(
-                f"✅ **Datos guardados para:** `{self.kit_info['title']}`\n\n"
+                f"✅ **Datos guardados para:** `{active_sessions[user_id]['product_name']}`\n\n"
                 f"**Extras indicados:** {self.extras_input.value.strip() or '*(Ninguno)*'}\n"
                 f"**Estado:** {self.condition_input.value.strip() or '*(Estándar muy cuidado)*'}\n\n"
                 "**¿Cómo quieres gestionar las fotos del anuncio?**\n"
-                "• **Opción A (Fotos Propias):** Sube fotos desde tu móvil (limpieza EXIF/GPS y nitidez orgánica automática).\n"
+                "• **Opción A (Fotos Propias):** Sube fotos desde tu móvil (color corregido, sin EXIF/GPS, retoque sólo si hace falta).\n"
                 "• **Opción B (Fotos del Kit):** Usa al instante las fotos limpias descargadas por el sniper."
             ),
             color=0x2ECC71
@@ -515,25 +816,15 @@ class KitActionsView(discord.ui.View):
     @discord.ui.button(label="Generar Rápido (1-Clic sin cambios)", style=discord.ButtonStyle.primary, emoji="⚡")
     async def instant_generate(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
-        active_sessions[user_id] = {
-            "kit_folder": self.kit_info["folder"],
-            "kit_bname": self.kit_info["bname"],
-            "kit_title": self.kit_info["title"],
-            "base_txt": self.kit_info["base_content"],
-            "extras": "",
-            "notes": "",
-            "price_note": self.kit_info["est_price"],
-            "waiting_photos": False,
-            "uploaded_photos": [],
-            "channel_id": interaction.channel_id
-        }
+        active_sessions[user_id] = _new_listing_session(self.kit_info, interaction.channel_id)
         await interaction.response.defer()
         await finalize_listing(interaction, user_id, use_original_photos=True)
 
     @discord.ui.button(label="Copiar Borrador Base", style=discord.ButtonStyle.secondary, emoji="📋")
     async def show_base(self, interaction: discord.Interaction, button: discord.ui.Button):
         txt = self.kit_info["base_content"] or "No hay texto disponible."
-        await interaction.response.send_message(f"```text\n{txt[:1950]}\n```", ephemeral=True)
+        await interaction.response.send_message(txt[:1990], ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
 
 
 def _prepare_photos_sync(use_original_photos: bool, kit_dir: str, uploaded_photos: list) -> list:
@@ -600,76 +891,198 @@ def _save_published_listing_sync(kit_dir: str, seo_title: str, p_listing, p_min,
             pass
 
 
-async def finalize_listing(interaction_or_channel, user_id, use_original_photos=False):
+def _split_for_discord(text, limit=1990):
+    """Trocea por párrafos para no superar el límite de 2000 caracteres de Discord."""
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    chunks, cur = [], ""
+    for para in text.split("\n\n"):
+        candidate = f"{cur}\n\n{para}" if cur else para
+        if len(candidate) <= limit:
+            cur = candidate
+            continue
+        if cur:
+            chunks.append(cur)
+        while len(para) > limit:
+            chunks.append(para[:limit])
+            para = para[limit:]
+        cur = para
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+_PLAIN = discord.AllowedMentions.none()
+
+
+async def _send_plain(channel, text):
+    """Mensaje SOLO con el texto a copiar: en el móvil, mantener pulsado → 'Copiar texto' copia exactamente esto."""
+    for chunk in _split_for_discord(text):
+        await channel.send(chunk, allowed_mentions=_PLAIN, suppress_embeds=True)
+
+
+async def _generate_listing(session):
+    last = session.get("last_result")
+    return await asyncio.to_thread(
+        call_ai_copywriter,
+        product_name=session.get("product_name") or session["kit_title"],
+        base_text=session.get("base_txt", ""),
+        extras_text=session.get("extras", ""),
+        condition_notes=session.get("notes", ""),
+        desired_price=session.get("price_note", ""),
+        seller_city=SELLER_CITY,
+        kit_facts=session.get("kit_facts"),
+        revisions=session.get("revisions"),
+        previous=last if session.get("revisions") else None,
+        variant=session.get("variant", 0),
+    )
+
+
+async def finalize_listing(interaction_or_channel, user_id, use_original_photos=False, photos_already_sent=False):
     session = active_sessions.get(user_id)
     if not session:
         return
 
     kit_dir = session["kit_folder"]
-    channel = interaction_or_channel.channel if isinstance(interaction_or_channel, discord.Interaction) else interaction_or_channel
-    status_notify = await channel.send("⏳ **Redactando anuncio natural de alta conversión y preparando fotos...**")
-
-    output_photos = await asyncio.to_thread(
-        _prepare_photos_sync,
-        use_original_photos,
-        kit_dir,
-        session.get("uploaded_photos", [])
+    is_inter = isinstance(interaction_or_channel, discord.Interaction)
+    channel = interaction_or_channel.channel if is_inter else interaction_or_channel
+    status_notify = await channel.send(
+        "⏳ **Aplicando tus cambios...**" if photos_already_sent else "⏳ **Redactando anuncio y preparando fotos...**"
     )
 
-    ai_result = await asyncio.to_thread(
-        call_ai_copywriter,
-        product_name=session["kit_title"],
-        base_text=session["base_txt"],
-        extras_text=session["extras"],
-        condition_notes=session["notes"],
-        desired_price=session.get("price_note", ""),
-        seller_city=SELLER_CITY
-    )
+    output_photos = []
+    if not photos_already_sent:
+        output_photos = await asyncio.to_thread(
+            _prepare_photos_sync, use_original_photos, kit_dir, session.get("uploaded_photos", [])
+        )
+        session["uploaded_photos"] = []  # liberar RAM: ya están procesadas
+        session["waiting_photos"] = False
 
+    ai_result = await _generate_listing(session)
     if not ai_result:
-        await status_notify.edit(content="❌ Error al invocar la IA. Inténtalo de nuevo en unos segundos.")
+        await status_notify.edit(content="❌ La IA no devolvió un anuncio completo. Pulsa **🔄 Otra versión** o inténtalo en unos segundos.")
+        if session.get("last_result"):
+            await channel.send("Sigues pudiendo corregir el anuncio anterior:", view=ListingRevisionView(user_id))
         return
 
-    seo_title = ai_result.get("seo_title", session["kit_title"])[:48]
+    seo_title = ai_result.get("seo_title") or session["kit_title"][:48]
     description = ai_result.get("description", "")
     p_listing = ai_result.get("listing_price", 0)
     p_min = ai_result.get("minimum_price", 0)
     rationale = ai_result.get("pricing_rationale", "")
+    session["last_result"] = {"seo_title": seo_title, "description": description,
+                              "listing_price": p_listing, "minimum_price": p_min}
 
-    await asyncio.to_thread(
-        _save_published_listing_sync,
-        kit_dir, seo_title, p_listing, p_min, description, output_photos
-    )
-
+    await asyncio.to_thread(_save_published_listing_sync, kit_dir, seo_title, p_listing, p_min, description, output_photos)
     await status_notify.delete()
 
-    embed = discord.Embed(
-        title=f"📋 Anuncio Listo: {seo_title}",
-        color=0x2ECC71,
-        description=(
-            f"💰 **Estrategia de Precio Recomendada:**\n"
-            f"• **Publicar a:** **`{p_listing}€`** (con margen para negociar)\n"
-            f"• **Aceptar ofertas hasta:** **`{p_min}€`** (cierre rápido)\n"
-            f"• *{rationale}*\n\n"
-            f"📍 **Ubicación en mano:** `{SELLER_CITY}`\n"
-            f"📱 **Copia los bloques de abajo con 1 toque en tu móvil:**"
-        )
-    )
-    embed.set_footer(text="Boti Relister v4.3 • Redacción Natural Particular Meticuloso")
+    revs = session.get("revisions") or []
+    header = "📋 Anuncio actualizado" if photos_already_sent else "📋 Anuncio listo"
+    info = [
+        f"💰 **Publicar a:** `{p_listing}€` · **Mínimo:** `{p_min}€`",
+        f"*{rationale}*" if rationale else "",
+        f"📍 Trato en mano: `{SELLER_CITY}`",
+    ]
+    if revs:
+        info.append(f"✏️ Cambios aplicados: {len(revs)} (último: _{revs[-1][:120]}_)")
+    if ai_result.get("auto_added_items"):
+        info.append("🧩 Añadido a la lista porque la IA lo omitió: " + ", ".join(ai_result["auto_added_items"])[:300])
+    info.append("\n📱 **Para copiar:** mantén pulsado el mensaje del **título** o de la **descripción** → *Copiar texto*. "
+                "Cada uno va en su propio mensaje sin nada más.")
+    embed = discord.Embed(title=f"{header}: {seo_title}"[:256], color=0x2ECC71,
+                          description="\n".join(l for l in info if l))
+    embed.set_footer(text="Boti Relister v4.4")
 
-    files_to_send = [discord.File(io.BytesIO(pb), filename=f"foto_{i}.jpg") for i, pb in enumerate(output_photos[:6], start=1)]
-
-    if isinstance(interaction_or_channel, discord.Interaction):
+    if is_inter:
         await interaction_or_channel.followup.send(embed=embed)
     else:
         await channel.send(embed=embed)
 
-    await channel.send(f"📱 **TÍTULO SEO (1 toque para copiar):**\n```text\n{seo_title}\n```")
-    await channel.send(f"📝 **DESCRIPCIÓN COMPLETA (1 toque para copiar):**\n```text\n{description}\n```")
-    if files_to_send:
+    await channel.send("⬇️ **TÍTULO**")
+    await _send_plain(channel, seo_title)
+    await channel.send("⬇️ **DESCRIPCIÓN**")
+    await _send_plain(channel, description)
+
+    if output_photos:
+        files_to_send = [discord.File(io.BytesIO(pb), filename=f"foto_{i}.jpg") for i, pb in enumerate(output_photos[:6], start=1)]
         await channel.send("🖼️ **Fotos optimizadas sin EXIF listas para guardar:**", files=files_to_send)
 
-    active_sessions.pop(user_id, None)
+    await channel.send(
+        "¿Falta algo o no ha pillado bien un detalle? Pulsa **✏️ Corregir / añadir** y escríbelo con tus palabras.",
+        view=ListingRevisionView(user_id)
+    )
+
+
+class RevisionModal(discord.ui.Modal, title="Corregir o añadir al anuncio"):
+    change_input = discord.ui.TextInput(
+        label="¿Qué cambio o añado?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Ej: añade que incluye 2 mandos y la caja original; quita lo del envío en 24h; el modelo es la Lite",
+        required=False,
+        max_length=600
+    )
+    price_input = discord.ui.TextInput(
+        label="Nuevo precio (opcional)",
+        style=discord.TextStyle.short,
+        placeholder="Ej: publicar a 180€, mínimo 160€",
+        required=False,
+        max_length=100
+    )
+
+    def __init__(self, user_id):
+        super().__init__(timeout=900)
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        session = active_sessions.get(self.user_id)
+        if not session:
+            await interaction.response.send_message("La sesión ha expirado. Usa `/kits` de nuevo.", ephemeral=True)
+            return
+        change = self.change_input.value.strip()
+        price = self.price_input.value.strip()
+        if not change and not price:
+            await interaction.response.send_message("No has escrito ningún cambio.", ephemeral=True)
+            return
+        if change:
+            session.setdefault("revisions", []).append(change)
+        if price:
+            session["price_note"] = price
+            session.setdefault("revisions", []).append(f"Precio: {price}")
+        session["variant"] = 0
+        await interaction.response.defer()
+        await finalize_listing(interaction, self.user_id, photos_already_sent=True)
+
+
+class ListingRevisionView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=3600)
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Esta sesión pertenece a otro usuario.", ephemeral=True)
+            return False
+        if not active_sessions.get(self.user_id):
+            await interaction.response.send_message("La sesión ha terminado. Usa `/kits` de nuevo.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Corregir / añadir", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def revise(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RevisionModal(self.user_id))
+
+    @discord.ui.button(label="Otra versión", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def regenerate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = active_sessions[self.user_id]
+        session["variant"] = int(session.get("variant", 0)) + 1
+        await interaction.response.defer()
+        await finalize_listing(interaction, self.user_id, photos_already_sent=True)
+
+    @discord.ui.button(label="Terminar", style=discord.ButtonStyle.success, emoji="✅")
+    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        active_sessions.pop(self.user_id, None)
+        await interaction.response.edit_message(content="✅ Anuncio cerrado y guardado en el kit.", view=None)
 
 
 # ==================== GESTIÓN DE RADARES EN VIVO (/radares) ====================
@@ -1072,6 +1485,126 @@ class CancelPurchaseModal(discord.ui.Modal, title="La compra no se hizo"):
         )
 
 
+# ==================== CALIFICACIÓN DE ALERTAS (Nivel 1: auditoría del cuello de botella) ====================
+# 📝 Calificar abre un panel privado: marcas los motivos (opcional), pulsas el veredicto y escribes una nota.
+# Se guarda en alert_feedback (core_engine) y la alerta original queda marcada como calificada.
+
+_RATED_TAG_RE = re.compile(r"\n?🏷️ \*\*Calificada:\*\*[^\n]*")
+
+
+def _feedback_prompt(deal, previous=None):
+    price = float(deal.get("price") or 0)
+    profit = float(deal.get("net_profit") or 0)
+    lines = [
+        f"📝 **Calificar:** {_deal_name(deal)} (`{price:.0f}€` • {deal.get('platform') or 'MANUAL'})",
+        f"Beneficio estimado por el sistema: `{profit:+.0f}€` • tipo `{deal.get('deal_type') or '—'}`",
+    ]
+    try:
+        seller = (json.loads(deal.get("alert_context_json") or "{}").get("seller") or {})
+    except Exception:
+        seller = {}
+    if seller:
+        bits = []
+        if seller.get("rating") is not None:
+            r_val = float(seller["rating"])
+            bits.append(f"{r_val:.0f}%" if r_val > 5.0 else f"⭐ {r_val:.1f}")
+        if seller.get("sales") is not None:
+            bits.append(f"{seller['sales']} ventas")
+        if seller.get("age_days") is not None:
+            bits.append(f"{float(seller['age_days']):.0f} días de cuenta")
+        if bits:
+            lines.append(f"Vendedor según el sistema: {' · '.join(bits)}")
+    if previous:
+        lines.append(f"ℹ️ Ya la calificaste: **{FEEDBACK_VERDICTS.get(previous['verdict'], previous['verdict'])}**. "
+                     "Si vuelves a calificar, cuenta la nueva.")
+    lines.append("\n**1.** Marca los motivos que apliquen (opcional). **2.** Pulsa el veredicto y escribe lo que viste.")
+    return "\n".join(lines)
+
+
+async def _mark_alert_message_rated(message, verdict, reasons):
+    """Añade una línea 'Calificada' al mensaje de la alerta para saber cuáles ya revisaste."""
+    if message is None:
+        return
+    try:
+        tag = f"\n🏷️ **Calificada:** {FEEDBACK_VERDICTS.get(verdict, verdict)}"
+        if reasons:
+            tag += " · " + " ".join(FEEDBACK_REASON_LABELS.get(r, r).split(" ", 1)[0] for r in reasons[:10])
+        base = _RATED_TAG_RE.sub("", message.content or "")
+        await message.edit(content=base[:2000 - len(tag)] + tag)
+    except Exception as e:
+        print(f"[WARN] No se pudo marcar la alerta como calificada: {e}")
+
+
+class FeedbackNoteModal(discord.ui.Modal):
+    def __init__(self, panel, verdict):
+        super().__init__(title=f"Calificar: {FEEDBACK_VERDICTS[verdict]}"[:45])
+        self.panel = panel
+        self.verdict = verdict
+        self.note_in = discord.ui.TextInput(
+            label="¿Qué viste? (opcional)", style=discord.TextStyle.paragraph, required=False, max_length=1000,
+            placeholder="Ej: cuenta creada ayer, 0 ventas y la pantalla sale apagada en todas las fotos",
+            default=(panel.prev_note or "")[:1000] or None
+        )
+        self.add_item(self.note_in)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reasons = list(self.panel.reasons)
+        try:
+            await db_call(save_alert_feedback, self.panel.deal["deal_id"], self.verdict, reasons, self.note_in.value)
+        except ValueError as e:
+            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            return
+        await _mark_alert_message_rated(self.panel.alert_message, self.verdict, reasons)
+        self.panel.stop()
+        reasons_txt = "\n".join(f"• {FEEDBACK_REASON_LABELS.get(r, r)}" for r in reasons) or "• (sin motivos marcados)"
+        note_txt = f"\n📝 {self.note_in.value.strip()[:300]}" if (self.note_in.value or "").strip() else ""
+        done = f"✅ Guardada: **{FEEDBACK_VERDICTS[self.verdict]}** — {_deal_name(self.panel.deal)}\n{reasons_txt}{note_txt}"
+        try:
+            await interaction.response.edit_message(content=done[:2000], view=None)
+        except Exception:
+            await interaction.response.send_message(done[:2000], ephemeral=True)
+
+
+class FeedbackView(discord.ui.View):
+    def __init__(self, deal, alert_message=None, previous=None):
+        super().__init__(timeout=900)
+        self.deal = deal
+        self.alert_message = alert_message
+        self.reasons = list(previous["reasons"]) if previous else []
+        self.prev_note = previous["note"] if previous else ""
+        self.select = discord.ui.Select(
+            placeholder="Motivos (puedes marcar varios)", min_values=0, max_values=len(FEEDBACK_REASONS), row=0,
+            options=[discord.SelectOption(label=label[:100], value=code, emoji=emoji, default=code in self.reasons)
+                     for code, label, emoji in FEEDBACK_REASONS]
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+        for verdict, style in (("good", discord.ButtonStyle.success), ("risky", discord.ButtonStyle.primary),
+                               ("bad", discord.ButtonStyle.danger)):
+            emoji, text = FEEDBACK_VERDICTS[verdict].split(" ", 1)
+            btn = discord.ui.Button(label=text, emoji=emoji, style=style, row=1)
+            btn.callback = self._verdict_callback(verdict)
+            self.add_item(btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        self.reasons = list(self.select.values)
+        for opt in self.select.options:
+            opt.default = opt.value in self.reasons
+        await interaction.response.edit_message(view=self)
+
+    def _verdict_callback(self, verdict):
+        async def cb(interaction: discord.Interaction):
+            await interaction.response.send_modal(FeedbackNoteModal(self, verdict))
+        return cb
+
+
+async def _open_feedback(interaction: discord.Interaction, deal, alert_message=None):
+    previous = await db_call(get_latest_feedback, deal["deal_id"])
+    await interaction.response.send_message(
+        _feedback_prompt(deal, previous), view=FeedbackView(deal, alert_message, previous), ephemeral=True
+    )
+
+
 def build_sale_embed(deal, summary):
     bought = float(deal.get("bought_price") or 0)
     sold = float(deal.get("sold_price") or 0)
@@ -1294,6 +1827,10 @@ async def _handle_deal_action(interaction: discord.Interaction, action, deal_id)
 
     if action == "view":
         await interaction.response.send_message(embed=build_deal_embed(deal), view=DealActionsView(deal), ephemeral=True)
+        return
+
+    if action == "rate":
+        await _open_feedback(interaction, deal, interaction.message)
         return
 
     if action == "buy":
@@ -1836,6 +2373,90 @@ async def slash_exportar(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="calificar", description="Califica una alerta (buena, dudosa o mala) con motivos y notas para la auditoría")
+@app_commands.describe(anuncio="Alerta a calificar (autocompletado)")
+@app_commands.autocomplete(anuncio=_ac_any)
+async def slash_calificar(interaction: discord.Interaction, anuncio: str):
+    deal = await _resolve_deal(interaction, anuncio)
+    if not deal:
+        return
+    await _open_feedback(interaction, deal)
+
+
+def _verdict_counts_txt(counts):
+    return " · ".join(f"{FEEDBACK_VERDICTS[v].split(' ', 1)[0]} {counts.get(v, 0)}" for v in FEEDBACK_VERDICTS)
+
+
+@bot.tree.command(name="calificaciones", description="Resumen de tus calificaciones de alertas y CSV completo para el análisis")
+@app_commands.describe(dias="Solo los últimos N días (0 = todo)")
+async def slash_calificaciones(interaction: discord.Interaction, dias: int = 0):
+    days = dias if dias and dias > 0 else None
+    s = await db_call(get_feedback_summary, days)
+    csv_text = await db_call(export_feedback_csv)
+    total, rated = s["total_alerts"], s["rated"]
+    pct = (rated / total * 100) if total else 0.0
+    lines = [f"**Calificadas:** {rated} de {total} alertas ({pct:.0f}%)" + (f" en los últimos {days} días" if days else ""),
+             f"**Veredictos:** {_verdict_counts_txt(s['by_verdict'])}", ""]
+    top_reasons = sorted(s["by_reason"].items(), key=lambda kv: -kv[1])[:10]
+    if top_reasons:
+        lines.append("**Motivos más frecuentes:**")
+        lines += [f"• {FEEDBACK_REASON_LABELS.get(code, code)}: **{n}**" for code, n in top_reasons]
+        lines.append("")
+    if s["by_platform"]:
+        lines.append("**Por plataforma:**")
+        lines += [f"• `{p}`: {_verdict_counts_txt(c)}" for p, c in sorted(s["by_platform"].items())]
+        lines.append("")
+    radars = sorted(s["by_radar"].items(), key=lambda kv: -sum(kv[1].values()))[:6]
+    if radars:
+        lines.append("**Radares más calificados:**")
+        lines += [f"• {str(r)[:60]}: {_verdict_counts_txt(c)}" for r, c in radars]
+    embed = discord.Embed(title="📝 Auditoría de alertas (Nivel 1)", description="\n".join(lines)[:4000], color=0x9B59B6)
+    embed.set_footer(text="El CSV incluye todas las calificaciones con notas, vendedor y lo que estimó el sistema")
+    data = io.BytesIO(("﻿" + csv_text).encode("utf-8"))
+    fname = f"calificaciones_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    await interaction.response.send_message(embed=embed, file=discord.File(data, filename=fname), ephemeral=True)
+
+
+def _outcome_line(name, s):
+    delay = f"{s['median_delay_min']:.0f} min" if s.get("median_delay_min") is not None else "—"
+    return (f"**{name}** ({s['tracked']} seguidas)\n"
+            f"   Desaparecen en 1 h: **{s['gone_pct_60']:.0f}%** ({s['eligible_60']}) · 6 h: **{s['gone_pct_360']:.0f}%** "
+            f"({s['eligible_360']}) · 24 h: **{s['gone_pct_1440']:.0f}%** ({s['eligible_1440']})\n"
+            f"   Reservadas en algún momento: {s['reserved']} · Retraso mediano publicación→alerta: **{delay}** ({s['with_delay']})")
+
+
+@bot.tree.command(name="resultados", description="Qué pasó con las alertas: cuántas se vendieron, en cuánto tiempo y el retraso de las alertas")
+@app_commands.describe(dias="Solo alertas de los últimos N días (0 = todo)")
+async def slash_resultados(interaction: discord.Interaction, dias: int = 0):
+    await interaction.response.defer(ephemeral=True)
+    days = dias if dias and dias > 0 else None
+    s = await db_call(get_outcome_summary, days)
+    csv_text = await db_call(export_outcomes_csv)
+    lines = []
+    for plat, stats in sorted(s["by_platform"].items(), key=lambda kv: -kv[1]["tracked"]):
+        lines.append(_outcome_line(f"`{plat}`", stats))
+    radars = sorted(s["by_radar"].items(), key=lambda kv: -kv[1]["tracked"])[:6]
+    if radars:
+        lines.append("\n**Radares con más alertas:**")
+        lines += [_outcome_line(str(r)[:60], st) for r, st in radars]
+    if not lines:
+        lines.append("Aún no hay alertas comprobadas. El rastreador las revisa a los 15 min, 1 h, 3 h, 6 h, 24 h y 72 h.")
+    truth = s.get("seller_truth") or {}
+    if any(g["checked"] for g in truth.values()):
+        lines.append("\n**🛡️ Cuentas de vendedor suspendidas o eliminadas 24 h después:**")
+        for label, key in (("Sin valoraciones", "sin_valoraciones"), ("Con historial", "con_historial")):
+            g = truth.get(key, {"checked": 0, "banned": 0})
+            pct = (g["banned"] / g["checked"] * 100) if g["checked"] else 0.0
+            lines.append(f"• {label}: **{g['banned']}** de {g['checked']} ({pct:.0f}%)")
+    if s["pending"]:
+        lines.append(f"\n⏳ {s['pending']} alertas pendientes de su primera comprobación.")
+    embed = discord.Embed(title="⏱️ Resultados de las alertas (Nivel 1)", description="\n".join(lines)[:4000], color=0x1ABC9C)
+    embed.set_footer(text="% sobre alertas con evidencia en esa ventana (entre paréntesis). 'Desaparece' = vendido o retirado (reservado no cuenta).")
+    data = io.BytesIO(("﻿" + csv_text).encode("utf-8"))
+    fname = f"resultados_alertas_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    await interaction.followup.send(embed=embed, file=discord.File(data, filename=fname), ephemeral=True)
+
+
 @bot.tree.command(name="limpiar_alertas", description="Borra alertas antiguas que nunca compraste (conserva compras y ventas)")
 @app_commands.describe(dias="Antigüedad mínima en días (por defecto 30)")
 async def slash_limpiar_alertas(interaction: discord.Interaction, dias: int = 30):
@@ -2107,7 +2728,7 @@ async def slash_guia(interaction: discord.Interaction):
             "• **Foto 2 (Bodegón ordenado):** Todo el conjunto alineado en paralelo limpio.\n"
             "• **Foto 3 (Confianza total):** Trasera limpia enfocando estado de bisagras/lente/etiqueta.\n"
             "• **Foto 4 (Extras):** Juegos físicos, cargador original o accesorios de cerca.\n\n"
-            "✨ *El bot elimina automáticamente los metadatos EXIF/GPS y aplica nitidez orgánica.*"
+            "✨ *El bot elimina los metadatos EXIF/GPS, corrige el color del iPhone y sólo retoca la luz si hace falta.*"
         )
     )
     await interaction.response.send_message(embed=embed)
@@ -2121,7 +2742,9 @@ async def slash_ayuda(interaction: discord.Interaction):
         description=(
             "**En cada alerta de chollo:**\n"
             "• **✅ ¡Comprado!** abre un formulario con el precio pagado (ya relleno) y notas. Queda en tu cartera con una ficha y sus botones.\n"
-            "• **📋 Mensajes** te da el texto de oferta en ES/FR/IT. **📊 Grados CeX** muestra los precios de CeX en vivo. **🚫 Descartar** borra el aviso.\n\n"
+            "• **📋 Mensajes** te da el texto de oferta en ES/FR/IT. **📊 Grados CeX** muestra los precios de CeX en vivo. **🚫 Descartar** borra el aviso.\n"
+            "• **📝 Calificar**: veredicto (👍/🤔/👎), motivos y nota. `/calificar` para alertas antiguas y `/calificaciones` para ver el resumen y bajar el CSV.\n"
+            "• `/resultados`: qué alertas se vendieron y en cuánto tiempo, y el retraso real de las alertas (se mide solo).\n\n"
             "**En la ficha de una compra:**\n"
             "• **📝 Crear anuncio de reventa**, **💰 Vendido** (con comisiones), **✏️ Editar**,\n"
             "• **↩️ La compra no se hizo** (sale del stock sin perder el historial), **🗑️ Eliminar** y **⏪ Deshacer**.\n\n"
@@ -2155,7 +2778,7 @@ async def on_message(message: discord.Message):
 
         valid_attachments = [
             a for a in message.attachments
-            if (a.content_type and "image" in a.content_type) or a.filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+            if (a.content_type and "image" in a.content_type) or a.filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"))
         ]
         if valid_attachments:
             for att in valid_attachments:

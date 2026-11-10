@@ -112,9 +112,38 @@ services:
       - ./fraud_signals.py:/app/fraud_signals.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./bot.py:/app/bot.py:ro
+      - ./outcome_tracker.py:/app/outcome_tracker.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
       - ./tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Nivel 1: vuelve a consultar cada alerta (15 min ... 72 h) para saber si se vendió y en cuánto tiempo
+  outcome-tracker:
+    image: boti-sniper:v4.1
+    container_name: outcome-tracker
+    restart: unless-stopped
+    command: ["python", "-u", "outcome_tracker.py"]
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Madrid
+      - PYTHONIOENCODING=utf-8
+      - OUTCOME_BACKFILL_DAYS=14
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+      - ./antiban.py:/app/antiban.py:ro
+      - ./core_engine.py:/app/core_engine.py:ro
+      - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./logger.py:/app/logger.py:ro
+      - ./outcome_tracker.py:/app/outcome_tracker.py:ro
+      - ./healthcheck.py:/app/healthcheck.py:ro
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s

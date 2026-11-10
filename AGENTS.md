@@ -24,6 +24,8 @@ Este directorio es un montaje en red (Samba SMB) correspondiente al servidor Lin
 
 # AGENTS.md — Guía Operativa del Proyecto para Agentes de IA
 
+> **Hoja de ruta y estado del trabajo en curso:** lee también [`ROADMAP.md`](ROADMAP.md) (Niveles 1–3, pendientes y limitaciones conocidas) y actualízalo al terminar cada bloque.
+
 > **Instrucción para el Agente:** Lee este archivo SIEMPRE al inicio de cada sesión antes de explorar el repositorio. Contiene el mapa completo de la arquitectura, esquema de base de datos, flujos de datos e invariantes críticas para que no tengas que gastar tokens ni tiempo redescubriendo cómo funciona el sistema.
 
 ---
@@ -83,6 +85,13 @@ Todas las tablas residen en `/opt/wallapop-sniper/sniper.db` bajo modo `WAL`:
 * `price_history`: Observaciones reales de mercado validadas por IA para medianas y percentiles locales.
 * `seller_reputation`: Historial de reputación por vendedor y plataforma (ventas, flags de fraude, score promedio).
 * `ai_cost_log`: Auditoría de tokens y coste en euros por llamada a Gemini / OpenRouter.
+* `alert_feedback`: Calificaciones manuales de alertas (botón 📝 Calificar, `/calificar`): veredicto, motivos, nota y foto de lo que estimó el sistema.
+* `alert_outcomes` / `alert_outcome_checks`: Seguimiento automático (`outcome_tracker.py`, contenedor `outcome-tracker`) de cada alerta a 15 min/1 h/3 h/6 h/24 h/72 h: disponible/reservado/vendido/eliminado, visitas/favoritos/conversaciones, retraso publicación→alerta y estado de la cuenta del vendedor 24 h después (etiqueta de verdad antifraude). Informe: `/resultados`.
+* `deals.alert_context_json`: Perfil del vendedor (valoraciones, ventas, compras, antigüedad y su fuente, denuncias), hora de publicación y decisión de aviso sonoro (`push`, `quiet_reason`) de cada alerta.
+
+### Política de notificaciones (`config.json` → `notifications`, `decide_alert_push`)
+* `flash_mode` (`off`/`silent`/`on`): alerta previa a la IA. Desactivada por defecto (>90% las rechazaba luego la IA).
+* Solo suenan (mención + ntfy) las alertas finales con margen suficiente, sin vendedor de 0 valoraciones ni "alto riesgo", hasta `push_max_per_hour`. El resto se publica con el flag de Discord `SUPPRESS_NOTIFICATIONS` (4096) y una línea 🔕 con el motivo.
 
 ---
 

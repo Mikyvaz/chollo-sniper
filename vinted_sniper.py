@@ -32,7 +32,8 @@ from core_engine import (
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, is_ai_budget_paused,
-    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin
+    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin,
+    parse_relative_age_minutes
 )
 
 SCAN_INTERVAL = int(os.getenv("VINTED_SCAN_INTERVAL_SECONDS", os.getenv("SCAN_INTERVAL_SECONDS", "45")))
@@ -663,6 +664,8 @@ def main():
 
                     time.sleep(random.uniform(1.2, 2.3))
                     desc, extra_photos, upload_date, seller_info = vinted.fetch_item_details(item["url"])
+                    _age_min = parse_relative_age_minutes(upload_date)
+                    vinted_published_ts = (time.time() - _age_min * 60.0) if _age_min is not None else None
                     if seller_info:
                         if not seller_info.get("country_code") and item.get("country_code"):
                             seller_info["country_code"] = item["country_code"]
@@ -968,7 +971,9 @@ def main():
                         flash_message=flash_msg,
                         fraud_banner=fraud_eval.get("warning_banner", ""),
                         seller=item.get("seller"),
-                        item_vec=item_vec
+                        item_vec=item_vec,
+                        listing_published_at=vinted_published_ts,
+                        listing_age_text=upload_date
                     )
 
                     send_one_tap_ntfy_alert(
@@ -976,7 +981,8 @@ def main():
                         {
                             "cex_cash": float((cex_data or {}).get("cash", 0.0) or 0.0),
                             "p2p_net_profit": float(best_net_profit or 0.0),
-                            "deal_tier": ai_data.get("deal_tier", 1)
+                            "deal_tier": ai_data.get("deal_tier", 1),
+                            "push": ai_data.get("_alert_push", True)
                         },
                         is_flash=False
                     )

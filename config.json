@@ -4,6 +4,14 @@
   "min_personal_savings_eur": 25,
   "price_drop_threshold_pct": 15,
   "price_drop_min_eur": 10,
+  "notifications": {
+    "flash_mode": "off",
+    "push_min_profit_eur": 40,
+    "push_offer_min_profit_eur": 80,
+    "push_max_per_hour": 4,
+    "push_zero_review_sellers": false,
+    "push_high_risk": false
+  },
   "global_blacklist": [
     "busco",
     "compro",

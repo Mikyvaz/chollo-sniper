@@ -438,11 +438,13 @@ def main():
 
                     created_at_ms = item.get("created_at") or item.get("creation_date") or item.get("modified_at")
                     age_days = None
+                    listing_ts = None  # hora de publicación (para medir el retraso real hasta la alerta)
                     if created_at_ms:
                         try:
                             ts_val = float(created_at_ms)
                             if ts_val > 1e11:
                                 ts_val = ts_val / 1000.0
+                            listing_ts = ts_val
                             age_days = max(0.0, (time.time() - ts_val) / 86400.0)
                             if not price_drop_info and not was_budget_deferred and age_days > 1.0:
                                 mark_item_seen(conn, "WALLAPOP", item_id, title, price)
@@ -748,7 +750,8 @@ def main():
                         flash_message=flash_msg,
                         fraud_banner=fraud_eval.get("warning_banner", ""),
                         seller=item.get("seller"),
-                        item_vec=item_vec
+                        item_vec=item_vec,
+                        listing_published_at=listing_ts
                     )
                     item["url"] = item_url
                     send_one_tap_ntfy_alert(
@@ -756,7 +759,8 @@ def main():
                         {
                             "cex_cash": float((cex_data or {}).get("cash", 0.0) or 0.0),
                             "p2p_net_profit": float(best_net_profit or 0.0),
-                            "deal_tier": ai_data.get("deal_tier", 1)
+                            "deal_tier": ai_data.get("deal_tier", 1),
+                            "push": ai_data.get("_alert_push", True)
                         },
                         is_flash=False
                     )

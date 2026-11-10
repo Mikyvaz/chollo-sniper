@@ -419,6 +419,7 @@ def init_db(conn=None):
         for col_name, col_def in (
             ("bought_at", "DATETIME"), ("sold_at", "DATETIME"), ("notes", "TEXT DEFAULT ''"),
             ("sale_fees", "REAL DEFAULT 0"), ("status_changed_at", "DATETIME"),
+            ("alert_context_json", "TEXT DEFAULT ''"),
         ):
             if col_name not in deal_cols:
                 try:
@@ -426,6 +427,7 @@ def init_db(conn=None):
                 except sqlite3.OperationalError:
                     pass  # Otro contenedor la añadió a la vez
         ensure_deal_events_table(conn)
+        ensure_alert_feedback_table(conn)
 
         embed_cols = [col[1] for col in c.execute("PRAGMA table_info(item_embeddings)").fetchall()]
         if "seller_id" not in embed_cols:
@@ -790,6 +792,9 @@ def ai_gateway_call(
                 max_tokens = 300
             if call_type == "prescreen":
                 max_tokens = min(max_tokens, 200)
+            elif call_type == "bot_description":
+                # Anuncio completo en JSON (~400-700 tokens): con 500 el JSON llegaba truncado
+                max_tokens = min(max_tokens, 1500)
             else:
                 max_tokens = min(max_tokens, 500)
 
@@ -1499,6 +1504,11 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
     para que al pulsar la notificación en el móvil se abra directamente la app nativa / anuncio.
     """
     if not NTFY_TOPIC_URL:
+        return False
+    # Mismo criterio que Discord: el flash solo suena en modo "on" y la alerta final solo si decide_alert_push lo aprobó
+    if is_flash and str(get_notification_policy().get("flash_mode", "off")).lower() != "on":
+        return False
+    if not is_flash and (analysis_result or {}).get("push") is False:
         return False
 
     try:
@@ -4629,6 +4639,358 @@ def export_deals_csv(conn, statuses=("bought", "sold", "cancelled")):
     return buf.getvalue()
 
 
+# ==================== CALIFICACIÓN MANUAL DE ALERTAS (Nivel 1: auditoría del cuello de botella) ====================
+# Cada vez que el usuario califica una alerta se guarda una fila nueva (la última manda) con su veredicto,
+# los motivos marcados, su nota libre y una foto de lo que el sistema creía en ese momento (precio, margen,
+# vendedor...). Así el dataset sirve para el análisis aunque la alerta se borre o se re-alerte después.
+
+FEEDBACK_VERDICTS = {
+    "good": "👍 Lo compraría",
+    "risky": "🤔 Dudoso / con riesgo",
+    "bad": "👎 No vale",
+}
+
+# (código, etiqueta, emoji). Máximo 25 por limitación de los menús de Discord.
+FEEDBACK_REASONS = [
+    ("seller_new", "Vendedor nuevo / 0 ventas / 0 valoraciones", "🆕"),
+    ("seller_bad", "Vendedor con mala reputación", "👤"),
+    ("scam_signs", "Señales de estafa (pago fuera, WhatsApp, texto raro)", "🚩"),
+    ("stock_photos", "Fotos de internet / robadas / genéricas", "🖼️"),
+    ("not_working_proof", "No se ve funcionando (pantalla apagada, sin encender)", "📴"),
+    ("few_photos", "Pocas fotos o de mala calidad", "📷"),
+    ("defect", "Defecto, piezas que faltan o para piezas", "🔧"),
+    ("ambiguous", "Descripción ambigua / modelo sin confirmar", "❓"),
+    ("wrong_model", "Modelo o variante mal identificado por la IA", "🏷️"),
+    ("cex_wrong", "Precio CeX de referencia incorrecto", "🏪"),
+    ("margin_inflated", "El margen real es menor que el estimado", "💸"),
+    ("price_not_deal", "El precio no es chollo (es el de mercado)", "📈"),
+    ("shipping_cost", "Envío, país o distancia no compensan", "🚚"),
+    ("already_sold", "Ya vendido o reservado al abrirlo", "⏱️"),
+    ("too_slow", "Me llegó tarde / mucha competencia", "🐢"),
+    ("no_reply", "El vendedor no responde o rechaza la oferta", "🙅"),
+    ("duplicate", "Duplicado de otra alerta", "🔁"),
+    ("not_interested", "No me interesa este producto o categoría", "😐"),
+    ("no_capital_time", "Ahora no tengo capital o tiempo", "💰"),
+    ("good_price", "Precio muy bueno de verdad", "🔥"),
+    ("trusted_seller", "Vendedor fiable", "✅"),
+    ("contacted", "Contactado / en negociación", "🤝"),
+    ("bought_it", "Lo compré", "🛒"),
+]
+FEEDBACK_REASON_LABELS = {code: f"{emoji} {label}" for code, label, emoji in FEEDBACK_REASONS}
+
+# Campos de la alerta que se copian en cada calificación (lo que el sistema "creía" al alertar)
+_FEEDBACK_SNAPSHOT_FIELDS = (
+    "platform", "item_id", "radar_id", "radar_name", "title", "identified_model", "price", "landed_cost", "fees",
+    "optimal_price", "net_profit", "deal_score", "deal_type", "recommended_offer", "cex_box_name", "cex_cash",
+    "cex_voucher", "cex_sell", "seller_city", "is_local", "visual_notes", "item_url", "status", "created_at",
+)
+
+
+def ensure_alert_feedback_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alert_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deal_id TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            reasons TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            platform TEXT,
+            radar_id TEXT,
+            price REAL,
+            net_profit REAL,
+            deal_type TEXT,
+            minutes_since_alert REAL,
+            snapshot_json TEXT DEFAULT '',
+            source TEXT DEFAULT 'discord',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_feedback_deal ON alert_feedback(deal_id, id)")
+
+
+# ==================== POLÍTICA DE NOTIFICACIONES (menos avisos, más valiosos) ====================
+# Solo "suenan" (mención en Discord + ntfy) las alertas que merecen interrumpir. El resto llega en silencio
+# (flag SUPPRESS_NOTIFICATIONS de Discord: aparece en el canal pero no hace saltar el móvil).
+# Se configura en config.json -> "notifications".
+
+NOTIFICATION_DEFAULTS = {
+    "flash_mode": "off",               # off | silent | on  (alerta previa a la IA)
+    "push_min_profit_eur": 40,         # compra directa: beneficio mínimo para sonar
+    "push_offer_min_profit_eur": 80,   # oportunidad de regateo: beneficio mínimo para sonar
+    "push_max_per_hour": 4,            # tope de avisos sonoros por hora (entre todos los escáneres)
+    "push_zero_review_sellers": False, # ¿sonar con vendedores sin valoraciones?
+    "push_high_risk": False,           # ¿sonar con "alto riesgo / precio anómalo"?
+}
+DISCORD_SILENT_FLAG = 4096  # SUPPRESS_NOTIFICATIONS
+_notif_cache = {"t": 0.0, "policy": dict(NOTIFICATION_DEFAULTS)}
+
+
+def get_notification_policy():
+    now = time.time()
+    if now - _notif_cache["t"] > 60:
+        try:
+            cfg = load_raw_config()
+            _notif_cache["policy"] = {**NOTIFICATION_DEFAULTS, **(cfg.get("notifications") or {})}
+        except Exception:
+            pass
+        _notif_cache["t"] = now
+    return _notif_cache["policy"]
+
+
+def _seller_review_count(seller):
+    if not isinstance(seller, dict):
+        return None
+    for k in ("seller_reviews_count", "reviews_count", "feedback_count", "sales"):
+        if seller.get(k) is not None:
+            try:
+                return int(seller[k])
+            except Exception:
+                pass
+    return None
+
+
+def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", seller=None):
+    """Decide si una alerta final debe sonar. Devuelve (push: bool, motivo_silencio: str)."""
+    pol = get_notification_policy()
+    plat = str(platform or "").upper()
+    profit = float(net_profit or 0)
+    reviews = _seller_review_count(seller)
+    is_shop = "CASH" in plat
+    if deal_type == "high_risk_opportunity" and not pol.get("push_high_risk"):
+        return False, "alto riesgo / precio anómalo"
+    if not is_shop and reviews == 0 and not pol.get("push_zero_review_sellers"):
+        return False, "vendedor sin valoraciones"
+    if deal_type == "offer_opportunity":
+        if profit < float(pol.get("push_offer_min_profit_eur", 80)):
+            return False, f"regateo con margen < {pol.get('push_offer_min_profit_eur')}€"
+    elif profit < float(pol.get("push_min_profit_eur", 40)):
+        return False, f"margen < {pol.get('push_min_profit_eur')}€"
+    try:
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM deals WHERE created_at >= datetime('now', '-1 hour') "
+            "AND json_extract(alert_context_json, '$.push') = 1"
+        ).fetchone()[0]
+        if recent >= int(pol.get("push_max_per_hour", 4)):
+            return False, f"límite de {pol.get('push_max_per_hour')} avisos/hora"
+    except Exception:
+        pass
+    return True, ""
+
+
+def _fmt_account_age(days):
+    d = float(days)
+    if d < 2:
+        return f"{d * 24:.0f} h" if d < 1 else "1 día"
+    if d < 60:
+        return f"{d:.0f} días"
+    if d < 730:
+        return f"{d / 30.4:.0f} meses"
+    return f"{d / 365:.1f} años"
+
+
+def format_seller_line(seller):
+    """Línea de vendedor para la alerta: valoraciones, ventas reales, compras, antigüedad y denuncias."""
+    if not (seller and isinstance(seller, dict) and (seller.get("name") or seller.get("seller_name"))):
+        return ""
+    s_name = seller.get("name") or seller.get("seller_name")
+    parts = []
+    reviews = _seller_review_count(seller)
+    rating = seller.get("seller_rating", seller.get("rating"))
+    if reviews is not None:
+        if reviews == 0:
+            parts.append("**0 valoraciones**")
+        elif rating is not None:
+            r_val = float(rating)
+            parts.append(f"⭐ {r_val / 20.0 if r_val > 5.0 else r_val:.1f} ({reviews} val.)")
+        else:
+            parts.append(f"{reviews} val.")
+    if seller.get("seller_sold_count") is not None:
+        parts.append(f"{seller['seller_sold_count']} vendidos")
+    if seller.get("seller_bought_count") is not None:
+        parts.append(f"{seller['seller_bought_count']} comprados")
+    age = seller.get("seller_joined_days", seller.get("age_days"))
+    if age is not None:
+        approx = "≈" if seller.get("seller_age_source") == "verification" else ""
+        warn = " 🆕" if float(age) <= 14 else ""
+        parts.append(f"cuenta de {approx}{_fmt_account_age(age)}{warn}")
+    else:
+        parts.append("antigüedad desconocida")
+    if seller.get("seller_reports"):
+        parts.append(f"🚩 {seller['seller_reports']} denuncias")
+    if seller.get("seller_banned"):
+        parts.append("⛔ cuenta suspendida")
+    return f"👤 **Vendedor:** `{s_name}` ({' · '.join(parts)})\n"
+
+
+def _to_utc_iso(ts):
+    """Epoch (s o ms) -> 'YYYY-MM-DD HH:MM:SS' en UTC, mismo formato que CURRENT_TIMESTAMP de SQLite."""
+    if ts in (None, "", 0):
+        return None
+    try:
+        val = float(ts)
+        if val > 1e11:
+            val /= 1000.0
+        return datetime.utcfromtimestamp(val).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def parse_relative_age_minutes(text):
+    """'hace 5 minutos' / 'hace una hora' / 'hace 2 días' (Vinted ES) -> minutos aproximados, o None."""
+    t = str(text or "").lower().strip()
+    if not t:
+        return None
+    if any(w in t for w in ("segundo", "ahora", "instante", "just now")):
+        return 0.0
+    m = re.search(r"(\d+|un|una|unos|unas)\s*(minuto|min|hora|h\b|d[ií]a|semana|mes|año)", t)
+    if not m:
+        return None
+    qty = 1.0 if m.group(1) in ("un", "una", "unos", "unas") else float(m.group(1))
+    unit = m.group(2)
+    if unit.startswith("min"):
+        mult = 1
+    elif unit.startswith("h"):
+        mult = 60
+    elif unit.startswith("d"):
+        mult = 1440
+    elif unit.startswith("semana"):
+        mult = 10080
+    elif unit.startswith("mes"):
+        mult = 43200
+    else:
+        mult = 525600
+    return qty * mult
+
+
+def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner="", country_tag="", extra=None):
+    """Guarda en la alerta los datos del vendedor y de la IA que no tienen columna propia (para el análisis)."""
+    try:
+        s = seller if isinstance(seller, dict) else {}
+        a = ai_data if isinstance(ai_data, dict) else {}
+        seller_keys = ("name", "seller_reviews_count", "seller_rating", "sales", "seller_joined_days", "seller_age_source",
+                       "seller_sold_count", "seller_bought_count", "seller_listings", "seller_followers",
+                       "seller_reports", "seller_verified", "seller_banned", "age_days")
+        sel = {k: s.get(k) for k in seller_keys if s.get(k) is not None}
+        # Nombres cortos y estables para el análisis
+        if "seller_rating" in sel:
+            sel["rating"] = sel["seller_rating"]
+        if "seller_reviews_count" in sel:
+            sel["reviews"] = sel["seller_reviews_count"]
+        if sel.get("seller_joined_days") is not None:
+            sel["age_days"] = sel["seller_joined_days"]
+        ctx = {
+            "seller": sel,
+            "ai": {k: a.get(k) for k in ("visual_confidence", "deal_tier", "deal_tier_label", "fraud_risk_score",
+                                         "is_anomalously_low", "offer_discount_pct", "model_used") if a.get(k) is not None},
+            "fraud_banner": re.sub(r"\s+", " ", str(fraud_banner or ""))[:400],
+            "country_tag": country_tag,
+            "alert_sent_at_utc": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+        if extra:
+            ctx.update(extra)
+        conn.execute("UPDATE deals SET alert_context_json = ? WHERE deal_id = ?",
+                     (json.dumps(ctx, ensure_ascii=False, default=str), str(deal_id)))
+        conn.commit()
+    except Exception as e:
+        print(f"[WARN] No se pudo guardar el contexto de la alerta {deal_id}: {e}")
+
+
+def get_latest_feedback(conn, deal_id):
+    ensure_alert_feedback_table(conn)
+    row = conn.execute(
+        "SELECT verdict, reasons, note, created_at FROM alert_feedback WHERE deal_id = ? ORDER BY id DESC LIMIT 1",
+        (str(deal_id),)
+    ).fetchone()
+    if not row:
+        return None
+    return {"verdict": row[0], "reasons": [r for r in (row[1] or "").split(",") if r], "note": row[2] or "", "created_at": row[3]}
+
+
+def save_alert_feedback(conn, deal_id, verdict, reasons=None, note="", source="discord"):
+    """Registra la calificación manual de una alerta. Devuelve (deal, feedback_id)."""
+    if verdict not in FEEDBACK_VERDICTS:
+        raise ValueError(f"Veredicto desconocido: {verdict}")
+    deal = _require_deal(conn, deal_id)
+    clean_reasons = [r for r in (reasons or []) if r in FEEDBACK_REASON_LABELS]
+    snapshot = {k: deal.get(k) for k in _FEEDBACK_SNAPSHOT_FIELDS}
+    try:
+        snapshot["alert_context"] = json.loads(deal.get("alert_context_json") or "{}")
+    except Exception:
+        snapshot["alert_context"] = {}
+    minutes = None
+    try:
+        created = datetime.fromisoformat(str(deal.get("created_at"))[:19])
+        # created_at lo pone SQLite (CURRENT_TIMESTAMP) en UTC
+        minutes = round((datetime.utcnow() - created).total_seconds() / 60.0, 1)
+    except Exception:
+        pass
+    ensure_alert_feedback_table(conn)
+    cur = conn.execute(
+        """INSERT INTO alert_feedback (deal_id, verdict, reasons, note, platform, radar_id, price, net_profit,
+                                       deal_type, minutes_since_alert, snapshot_json, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (str(deal["deal_id"]), verdict, ",".join(clean_reasons), str(note or "").strip()[:1000],
+         deal.get("platform"), deal.get("radar_id"), deal.get("price"), deal.get("net_profit"), deal.get("deal_type"),
+         minutes, json.dumps(snapshot, ensure_ascii=False, default=str), source)
+    )
+    conn.commit()
+    return deal, cur.lastrowid
+
+
+def get_feedback_summary(conn, days=None):
+    """Resumen de las calificaciones (solo la última por alerta) para /calificaciones."""
+    ensure_alert_feedback_table(conn)
+    where = "WHERE f.created_at >= datetime('now', ?)" if days else ""
+    params = [f"-{int(days)} days"] if days else []
+    rows = conn.execute(f"""
+        SELECT f.deal_id, f.verdict, f.reasons, f.platform, COALESCE(d.radar_name, f.radar_id), f.net_profit
+        FROM alert_feedback f
+        JOIN (SELECT deal_id, MAX(id) AS mid FROM alert_feedback GROUP BY deal_id) last ON last.mid = f.id
+        LEFT JOIN deals d ON d.deal_id = f.deal_id
+        {where}
+    """, params).fetchall()
+    alerts_q = "SELECT COUNT(*) FROM deals" + (" WHERE created_at >= datetime('now', ?)" if days else "")
+    total_alerts = conn.execute(alerts_q, params).fetchone()[0]
+    by_verdict, by_reason, by_platform, by_radar = {}, {}, {}, {}
+    for _did, verdict, reasons, plat, radar, _np in rows:
+        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
+        for r in (reasons or "").split(","):
+            if r:
+                by_reason[r] = by_reason.get(r, 0) + 1
+        pv = by_platform.setdefault(plat or "?", {})
+        pv[verdict] = pv.get(verdict, 0) + 1
+        rv = by_radar.setdefault(radar or "?", {})
+        rv[verdict] = rv.get(verdict, 0) + 1
+    return {"rated": len(rows), "total_alerts": total_alerts, "by_verdict": by_verdict,
+            "by_reason": by_reason, "by_platform": by_platform, "by_radar": by_radar}
+
+
+def export_feedback_csv(conn):
+    """Todas las calificaciones (también las repetidas) con el contexto de la alerta, para el análisis."""
+    import csv
+    ensure_alert_feedback_table(conn)
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["fecha_calificacion", "deal_id", "veredicto", "motivos", "nota", "plataforma", "radar", "producto",
+                "precio", "beneficio_estimado", "tipo_alerta", "efectivo_cex", "minutos_desde_alerta",
+                "vendedor_rating", "vendedor_ventas", "vendedor_antiguedad_dias", "aviso_fraude", "url"])
+    for r in conn.execute("""SELECT created_at, deal_id, verdict, reasons, note, platform, radar_id, price, net_profit,
+                                    deal_type, minutes_since_alert, snapshot_json FROM alert_feedback ORDER BY id""").fetchall():
+        try:
+            snap = json.loads(r[11] or "{}")
+        except Exception:
+            snap = {}
+        ctx = snap.get("alert_context") or {}
+        seller = ctx.get("seller") or {}
+        reasons_txt = ", ".join(FEEDBACK_REASON_LABELS.get(x, x) for x in (r[3] or "").split(",") if x)
+        w.writerow([r[0], r[1], FEEDBACK_VERDICTS.get(r[2], r[2]), reasons_txt, r[4], r[5],
+                    snap.get("radar_name") or r[6], snap.get("identified_model") or snap.get("title") or "",
+                    r[7], r[8], r[9], snap.get("cex_cash") or "", r[10] if r[10] is not None else "",
+                    seller.get("rating", ""), seller.get("sales", seller.get("reviews", "")), seller.get("age_days", ""),
+                    ctx.get("fraud_banner", ""), snap.get("item_url") or ""])
+    return buf.getvalue()
+
+
 def register_deal_in_db(
     conn, deal_id, platform, item_id, target, title, description, price, landed_cost, fees,
     optimal_price, net_profit, ai_data, cex_data, item_url, checkout_url, image_url, kit_folder,
@@ -4745,6 +5107,11 @@ def send_flash_discord_alert(
       (Si el anuncio es más caro y solo se escanea para hacer oferta, espera a que la IA lo verifique).
     - Incluye el enlace directo y de Checkout en la primera línea para abrirlo con 1 toque desde la notificación.
     """
+    flash_mode = str(get_notification_policy().get("flash_mode", "off")).lower()
+    if flash_mode not in ("on", "silent"):
+        return None  # >90% de los flash los rechaza luego la IA: desactivado por defecto
+    silent = flash_mode == "silent"
+
     if isinstance(target, dict):
         direct_cap = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))
         if price > direct_cap:
@@ -4753,7 +5120,8 @@ def send_flash_discord_alert(
     clean_item_url, clean_checkout_url = normalize_and_build_links(platform, item_id, item_url)
     clean_t = re.sub(r"\s+", " ", (title or "").strip())
     loc_str = f" 🔥 **EN MANO ({seller_city})**" if is_local else f" ({seller_city})"
-    user_ping = f"<@{ALERT_USER_ID}> " if ALERT_USER_ID else ""
+    user_ping = f"<@{ALERT_USER_ID}> " if (ALERT_USER_ID and not silent) else ""
+    flash_flags = {"flags": DISCORD_SILENT_FLAG} if silent else {}
 
     deeplink = build_native_deeplink(platform, clean_item_url, item_id)
     app_link_str = f"📲 **App Directa:** [Abrir en App Nativa]({deeplink})\n" if deeplink else ""
@@ -4781,13 +5149,13 @@ def send_flash_discord_alert(
             r = HTTP_SESSION.post(
                 bot_api_url,
                 headers=bot_headers,
-                json={"content": flash_content, "components": flash_components},
+                json={"content": flash_content, "components": flash_components, **flash_flags},
                 timeout=6
             )
             if r.status_code in (200, 201):
                 msg_id = r.json().get("id")
                 if msg_id:
-                    return {"via": "bot", "message_id": str(msg_id)}
+                    return {"via": "bot", "message_id": str(msg_id), "silent": silent}
         except Exception as e:
             print(f"[WARN] Fallo enviando Flash Alert por Bot API: {e}")
 
@@ -4797,13 +5165,13 @@ def send_flash_discord_alert(
         try:
             r = HTTP_SESSION.post(
                 wh_wait_url,
-                json={"content": flash_content},
+                json={"content": flash_content, **flash_flags},
                 timeout=6
             )
             if r.status_code in (200, 201):
                 msg_id = r.json().get("id")
                 if msg_id:
-                    return {"via": "webhook", "message_id": str(msg_id)}
+                    return {"via": "webhook", "message_id": str(msg_id), "silent": silent}
         except Exception as e:
             print(f"[WARN] Fallo enviando Flash Alert por Webhook: {e}")
 
@@ -4825,6 +5193,18 @@ def resolve_flash_discord_alert(
     msg_id = flash_message.get("message_id")
     via = flash_message.get("via")
     if not msg_id:
+        return
+
+    if flash_message.get("silent"):
+        # El flash no hizo sonar el móvil: basta con borrarlo, sin un 2º aviso de "detén la compra"
+        try:
+            if via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
+                HTTP_SESSION.delete(f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{msg_id}",
+                                    headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5)
+            elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
+                HTTP_SESSION.delete(f"{WEBHOOK_URL.split('?')[0].rstrip('/')}/messages/{msg_id}", timeout=5)
+        except Exception:
+            pass
         return
 
     clean_t = re.sub(r"\s+", " ", (title or "").strip())[:70]
@@ -4882,7 +5262,7 @@ def send_discord_alert(
     charger_penalty=0.0, net_profit=0.0, item_url="", checkout_url=None, image_url="",
     seller_city="España", is_local=False, country_tag="ES", shipping_label="📦 Envío disponible",
     price_drop_info=None, image_urls=None, flash_message=None, fraud_banner="", seller=None,
-    item_vec=None, seller_id=""
+    item_vec=None, seller_id="", listing_published_at=None, listing_age_text=""
 ):
     plat = platform.upper()
     deal_id = f"{plat[:3]}_{item_id}"[:40]
@@ -4910,6 +5290,13 @@ def send_discord_alert(
         kit_folder, seller_city=seller_city, is_local=is_local, image_urls=image_urls,
         item_vec=item_vec, seller_id=s_id
     )
+    should_push, quiet_reason = decide_alert_push(conn, plat, deal_type, net_profit, mode=mode, seller=seller)
+    ai_data["_alert_push"] = should_push
+    save_alert_context(conn, deal_id, seller=seller, ai_data=ai_data, fraud_banner=fraud_banner,
+                       country_tag=country_tag,
+                       extra={"seller_id": s_id, "listing_age_text": str(listing_age_text or "")[:60],
+                              "published_at_utc": _to_utc_iso(listing_published_at),
+                              "push": should_push, "quiet_reason": quiet_reason})
 
     if deal_type == "high_risk_opportunity":
         score_badge = "⚠️ 7/10 • ALTO RIESGO / PRECIO ANÓMALO (REVISAR CON CAUTELA)"
@@ -4971,19 +5358,7 @@ def send_discord_alert(
             "Paga **EXCLUSIVAMENTE con protección de envíos dentro de la aplicación**. Jamás aceptes Bizum, transferencia bancaria ni trato externo.\n"
         )
     fb_block = f"{risk_banner}\n{fraud_banner}\n" if (risk_banner or fraud_banner) else ""
-    seller_line = ""
-    if seller and isinstance(seller, dict) and seller.get("name"):
-        s_name = seller.get("name")
-        s_parts = []
-        if seller.get("rating") is not None:
-            r_val = float(seller["rating"])
-            s_parts.append(f"{r_val:.1f}%" if r_val > 5.0 else f"⭐ {r_val:.1f}")
-        if seller.get("sales") is not None:
-            s_parts.append(f"{seller['sales']} ventas/opiniones")
-        if seller.get("age_days") is not None:
-            s_parts.append(f"{seller['age_days']:.0f}d")
-        extra_str = f" ({' · '.join(s_parts)})" if s_parts else ""
-        seller_line = f"👤 **Vendedor:** `{s_name}`{extra_str}\n"
+    seller_line = format_seller_line(seller)
 
     ai_text = (
         f"{fb_block}"
@@ -5001,7 +5376,8 @@ def send_discord_alert(
 
     # Si es un 10/10, el enlace principal lleva directo al Checkout 1-Tap; en caso contrario lleva directo al anuncio
     primary_action_url = clean_checkout_url if (score == 10 and deal_type not in ("offer_opportunity", "high_risk_opportunity")) else clean_item_url
-    user_ping = f"<@{ALERT_USER_ID}> " if ALERT_USER_ID else ""
+    # Solo las alertas que merecen interrumpir mencionan al usuario (ver decide_alert_push)
+    user_ping = f"<@{ALERT_USER_ID}> " if (ALERT_USER_ID and should_push) else ""
 
     # ==================== CABECERA DISTINTA PARA OPORTUNIDAD DE CHOLLO (HACER OFERTA) ====================
     if deal_type == "offer_opportunity":
@@ -5081,6 +5457,11 @@ def send_discord_alert(
                 f"🔗 **Modelo:** `{identified_model}` ({price:.0f}€)"
             )
 
+    # Alerta silenciosa: llega al canal pero no hace saltar el móvil (y se dice por qué)
+    msg_flags = {} if should_push else {"flags": DISCORD_SILENT_FLAG}
+    if not should_push:
+        push_notification_content = f"🔕 *Sin aviso sonoro: {quiet_reason}*\n{push_notification_content}"
+
     clean_embed_desc = re.sub(r"\s+", " ", html.unescape(description or "Sin descripción.")).strip()
     footer_text = f"Boti Sniper v4.3 (Visión Multimodal + Offer Sniper) • ID: {deal_id} • {datetime.now().strftime('%H:%M:%S')}".replace("\n", " ").strip()
 
@@ -5155,6 +5536,7 @@ def send_discord_alert(
                 {"type": 2, "style": 3, "label": "¡Comprado! -> Reventa", "emoji": {"name": "✅"}, "custom_id": f"deal:buy:{deal_id}"},
                 {"type": 2, "style": 1, "label": "Mensajes / Regateo 1-Clic", "emoji": {"name": "📋"}, "custom_id": f"deal:msg:{deal_id}"},
                 {"type": 2, "style": 2, "label": "Grados CeX", "emoji": {"name": "📊"}, "custom_id": f"deal:cex:{deal_id}"},
+                {"type": 2, "style": 2, "label": "Calificar", "emoji": {"name": "📝"}, "custom_id": f"deal:rate:{deal_id}"},
                 {"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:{deal_id}"}
             ]
         }
@@ -5185,7 +5567,7 @@ def send_discord_alert(
         try:
             if enhanced_cover_bytes:
                 embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], "components": components})
+                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], "components": components, **msg_flags})
                 mp = CurlMime()
                 mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
                 mp.addpart(name="files[0]", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
@@ -5194,7 +5576,7 @@ def send_discord_alert(
                 r = HTTP_SESSION.post(
                     bot_api_url,
                     headers={**bot_headers, "Content-Type": "application/json"},
-                    json={"content": push_notification_content, "embeds": [embed], "components": components},
+                    json={"content": push_notification_content, "embeds": [embed], "components": components, **msg_flags},
                     timeout=10
                 )
             if r.status_code in (200, 201):
@@ -5206,12 +5588,12 @@ def send_discord_alert(
         try:
             if enhanced_cover_bytes:
                 embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed]})
+                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], **msg_flags})
                 mp = CurlMime()
                 mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
                 mp.addpart(name="file", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
                 requests.post(WEBHOOK_URL, multipart=mp, timeout=15)
             else:
-                HTTP_SESSION.post(WEBHOOK_URL, json={"content": push_notification_content, "embeds": [embed]}, timeout=10)
+                HTTP_SESSION.post(WEBHOOK_URL, json={"content": push_notification_content, "embeds": [embed], **msg_flags}, timeout=10)
         except Exception:
             pass
