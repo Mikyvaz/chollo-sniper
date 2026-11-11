@@ -5048,6 +5048,7 @@ def _discord_send(method, url, *, headers=None, json_payload=None, multipart=Non
     method = str(method or "POST").upper()
     backoffs = (0.5, 1.5)
     status, last_err = None, ""
+    ambiguous = False  # un intento previo falló por red/timeout: Discord pudo haber publicado el mensaje
     for attempt in range(max(1, attempts)):
         last = attempt >= attempts - 1
         try:
@@ -5060,6 +5061,7 @@ def _discord_send(method, url, *, headers=None, json_payload=None, multipart=Non
                 resp = getattr(HTTP_SESSION, method.lower())(url, **kwargs)
         except Exception as e:
             status, last_err = None, f"{type(e).__name__}: {e}"
+            ambiguous = True
             if not last:
                 time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
             continue
@@ -5072,6 +5074,15 @@ def _discord_send(method, url, *, headers=None, json_payload=None, multipart=Non
                     msg_id = str(data["id"])
             except Exception:
                 pass
+            if ambiguous and method == "POST":
+                # Se prefiere un posible duplicado a perder la alerta, pero se deja constancia
+                print(f"[DISCORD WARN] Posible duplicado: reintento 2xx tras fallo ambiguo de red ({_redact(last_err)[:120]})")
+                try:
+                    from logger import log_metric
+                    log_metric("discord_possible_duplicate", service="core_engine", status=status,
+                               message_id=msg_id, detail=_redact(last_err)[:200])
+                except Exception:
+                    pass
             return True, status, msg_id
         last_err = _redact(getattr(resp, "text", "") or "")[:300]
         if status == 429:

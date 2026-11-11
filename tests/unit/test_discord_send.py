@@ -102,6 +102,25 @@ class TestDiscordSend(DiscordTestBase):
         self.assertEqual((ok, mid), (True, "9"))
         self.assertEqual(post.call_count, 3)
 
+    def test_ambiguous_timeout_then_ok_logs_possible_duplicate(self):
+        buf = io.StringIO()
+        with mock.patch.object(ce.HTTP_SESSION, "post",
+                               side_effect=[TimeoutError("timed out"), FakeResp(200, {"id": "9"})]) as post, \
+                mock.patch("logger.log_metric") as metric, contextlib.redirect_stdout(buf):
+            ok, status, mid = ce._discord_send("POST", "https://x/y", json_payload={"content": "x"})
+        self.assertEqual((ok, status, mid), (True, 200, "9"))
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("Posible duplicado", buf.getvalue())
+        self.assertEqual(metric.call_args.args[0], "discord_possible_duplicate")
+
+    def test_clean_send_does_not_log_duplicate(self):
+        buf = io.StringIO()
+        with mock.patch.object(ce.HTTP_SESSION, "post", return_value=FakeResp(200, {"id": "1"})), \
+                mock.patch("logger.log_metric") as metric, contextlib.redirect_stdout(buf):
+            ce._discord_send("POST", "https://x/y", json_payload={"content": "x"})
+        self.assertNotIn("duplicado", buf.getvalue())
+        metric.assert_not_called()
+
     def test_4xx_not_retried(self):
         with mock.patch.object(ce.HTTP_SESSION, "post", return_value=FakeResp(403, {"message": "Missing Access"})) as post, \
                 contextlib.redirect_stdout(io.StringIO()):
