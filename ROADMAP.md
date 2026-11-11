@@ -1,7 +1,9 @@
 # ROADMAP — Llevar el sniper al siguiente nivel
 
 > Documento vivo. Actualízalo al terminar cada bloque de trabajo (estado, fecha y hallazgos).
-> Última actualización: **2026-11-10**
+> Última actualización: **2026-11-11**
+>
+> **Plan de ingeniería pendiente (2026-11-11):** [`docs/audits/2026-11-11-plan-maestro.md`](docs/audits/2026-11-11-plan-maestro.md). Son 34 tareas en 3 fases (bugs y coste, latencia y anti-detección, precisión y notificaciones), con evidencia en `docs/audits/2026-11-11-sondas/`. Cubre la «Velocidad de reacción» y parte del «Antifraude» de este documento. Ejecútalo en orden y anota en `docs/audits/registro.md` cada tarea cerrada.
 
 ## Diagnóstico de partida (2026-11-10)
 
