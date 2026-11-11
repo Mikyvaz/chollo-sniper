@@ -5005,6 +5005,118 @@ SCORE_BADGES = {
 }
 
 
+def _valid_http(u):
+    """True si u es una URL http(s) utilizable en embed.url o en un botón de enlace de Discord."""
+    return isinstance(u, str) and u.strip().startswith(("http://", "https://"))
+
+
+def _redact(text):
+    """Quita tokens y URLs de webhook de un texto antes de imprimirlo o registrarlo."""
+    t = str(text or "")
+    t = re.sub(r"(https?://[^\s/]*discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\d+/)[\w\-.]+", r"\1<redacted>", t)
+    t = re.sub(r"(Bot\s+)[\w\-.]+", r"\1<redacted>", t)
+    if BOT_TOKEN:
+        t = t.replace(BOT_TOKEN, "<redacted>")
+    return t
+
+
+def _discord_retry_after(resp):
+    """Segundos pedidos por Discord en un 429 (JSON `retry_after` o cabecera Retry-After); 1.0 por defecto."""
+    try:
+        data = resp.json()
+        if isinstance(data, dict) and data.get("retry_after") is not None:
+            return max(0.0, float(data["retry_after"]))
+    except Exception:
+        pass
+    try:
+        hdr = (getattr(resp, "headers", None) or {}).get("Retry-After")
+        if hdr is not None:
+            return max(0.0, float(hdr))
+    except Exception:
+        pass
+    return 1.0
+
+
+def _discord_send(method, url, *, headers=None, json_payload=None, multipart=None, timeout=10, attempts=3):
+    """Envía una petición a Discord sin perder la alerta en silencio.
+
+    Devuelve (ok: bool, status: int|None, message_id: str|None).
+    2xx -> ok. 429 -> duerme min(retry_after, 5) y reintenta. 5xx/red -> backoff 0.5 s, 1.5 s.
+    4xx != 429 -> sin reintento: imprime `[DISCORD ERROR]` (redactado) y emite la métrica `discord_error`.
+    `multipart` es un callable que devuelve un CurlMime nuevo (un CurlMime no se puede reutilizar).
+    """
+    method = str(method or "POST").upper()
+    backoffs = (0.5, 1.5)
+    status, last_err = None, ""
+    for attempt in range(max(1, attempts)):
+        last = attempt >= attempts - 1
+        try:
+            if multipart is not None:
+                resp = requests.request(method, url, headers=headers, multipart=multipart(), timeout=timeout)
+            else:
+                kwargs = {"headers": headers, "timeout": timeout}
+                if json_payload is not None:
+                    kwargs["json"] = json_payload
+                resp = getattr(HTTP_SESSION, method.lower())(url, **kwargs)
+        except Exception as e:
+            status, last_err = None, f"{type(e).__name__}: {e}"
+            if not last:
+                time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
+            continue
+        status = resp.status_code
+        if 200 <= status < 300:
+            msg_id = None
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("id"):
+                    msg_id = str(data["id"])
+            except Exception:
+                pass
+            return True, status, msg_id
+        last_err = _redact(getattr(resp, "text", "") or "")[:300]
+        if status == 429:
+            if not last:
+                time.sleep(min(_discord_retry_after(resp), 5.0))
+            continue
+        if status >= 500:
+            if not last:
+                time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
+            continue
+        break  # 4xx != 429: reintentar no sirve
+    print(f"[DISCORD ERROR] {status} {_redact(last_err)[:300]}")
+    try:
+        from logger import log_metric
+        log_metric("discord_error", service="core_engine", status=status, method=method, detail=_redact(last_err)[:200])
+    except Exception:
+        pass
+    return False, status, None
+
+
+def _discord_post_with_fallback(url, *, headers=None, payload=None, fallback_content="", multipart=None,
+                                flags=None, timeout=10):
+    """POST con el payload completo; si Discord responde 400, reintenta una vez solo con `content`."""
+    ok, status, mid = _discord_send("POST", url, headers=headers, json_payload=None if multipart else payload,
+                                    multipart=multipart, timeout=timeout)
+    if not ok and status == 400 and fallback_content:
+        fb = {"content": str(fallback_content)[:1900], **(flags or {})}
+        ok, status, mid = _discord_send("POST", url, headers=headers, json_payload=fb, timeout=timeout)
+    return ok, status, mid
+
+
+def _save_discord_message_id(conn, deal_id, message_id, channel_id="", via="bot"):
+    """Guarda en deals.alert_context_json el mensaje de Discord de la alerta (lo usa el ciclo de vida, T3.7)."""
+    if not (conn is not None and deal_id and message_id):
+        return
+    try:
+        conn.execute(
+            "UPDATE deals SET alert_context_json = json_set(COALESCE(NULLIF(alert_context_json,''),'{}'), "
+            "'$.discord_message_id', ?, '$.discord_channel_id', ?, '$.discord_via', ?) WHERE deal_id = ?",
+            (str(message_id), str(channel_id or ""), str(via), str(deal_id)))
+        conn.commit()
+    except Exception as e:
+        print(f"[WARN] No se pudo guardar el message_id de Discord de {deal_id}: {e}")
+
+
 def send_flash_discord_alert(
     platform, item_id, title, price, landed_cost=0.0, item_url="",
     image_url="", seller_city="España", is_local=False, target=None
@@ -5041,10 +5153,10 @@ def send_flash_discord_alert(
         f"⏳ *Puesto en casa: ~{landed_cost:.0f}€{loc_str} • Auditando con IA (recibirás 2ª notificación en 3s con la decisión)...*"
     )
 
-    btn_row = [
-        {"type": 2, "style": 5, "label": f"⚡ Abrir Anuncio ({price:.0f}€)", "url": clean_item_url}
-    ]
-    if clean_checkout_url and clean_checkout_url != clean_item_url:
+    btn_row = []
+    if _valid_http(clean_item_url):
+        btn_row.append({"type": 2, "style": 5, "label": f"⚡ Abrir Anuncio ({price:.0f}€)", "url": clean_item_url})
+    if _valid_http(clean_checkout_url) and clean_checkout_url != clean_item_url:
         btn_row.append({"type": 2, "style": 5, "label": "💳 Checkout Directo 1-Tap", "url": clean_checkout_url})
     btn_row.append({"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:flash_{item_id}"})
 
@@ -5053,35 +5165,21 @@ def send_flash_discord_alert(
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
-        try:
-            r = HTTP_SESSION.post(
-                bot_api_url,
-                headers=bot_headers,
-                json={"content": flash_content, "components": flash_components, **flash_flags},
-                timeout=6
-            )
-            if r.status_code in (200, 201):
-                msg_id = r.json().get("id")
-                if msg_id:
-                    return {"via": "bot", "message_id": str(msg_id), "silent": silent}
-        except Exception as e:
-            print(f"[WARN] Fallo enviando Flash Alert por Bot API: {e}")
+        ok, _status, msg_id = _discord_post_with_fallback(
+            bot_api_url, headers=bot_headers,
+            payload={"content": flash_content, "components": flash_components, **flash_flags},
+            fallback_content=flash_content, flags=flash_flags, timeout=6)
+        if ok and msg_id:
+            return {"via": "bot", "message_id": msg_id, "silent": silent}
 
     if WEBHOOK_URL and "http" in WEBHOOK_URL:
         sep = "&" if "?" in WEBHOOK_URL else "?"
         wh_wait_url = f"{WEBHOOK_URL}{sep}wait=true"
-        try:
-            r = HTTP_SESSION.post(
-                wh_wait_url,
-                json={"content": flash_content, **flash_flags},
-                timeout=6
-            )
-            if r.status_code in (200, 201):
-                msg_id = r.json().get("id")
-                if msg_id:
-                    return {"via": "webhook", "message_id": str(msg_id), "silent": silent}
-        except Exception as e:
-            print(f"[WARN] Fallo enviando Flash Alert por Webhook: {e}")
+        ok, _status, msg_id = _discord_post_with_fallback(
+            wh_wait_url, payload={"content": flash_content, **flash_flags},
+            fallback_content=flash_content, flags=flash_flags, timeout=6)
+        if ok and msg_id:
+            return {"via": "webhook", "message_id": msg_id, "silent": silent}
 
     return None
 
@@ -5105,14 +5203,11 @@ def resolve_flash_discord_alert(
 
     if flash_message.get("silent"):
         # El flash no hizo sonar el móvil: basta con borrarlo, sin un 2º aviso de "detén la compra"
-        try:
-            if via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
-                HTTP_SESSION.delete(f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{msg_id}",
-                                    headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5)
-            elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
-                HTTP_SESSION.delete(f"{WEBHOOK_URL.split('?')[0].rstrip('/')}/messages/{msg_id}", timeout=5)
-        except Exception:
-            pass
+        if via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
+            _discord_send("DELETE", f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{msg_id}",
+                          headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5, attempts=1)
+        elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
+            _discord_send("DELETE", f"{WEBHOOK_URL.split('?')[0].rstrip('/')}/messages/{msg_id}", timeout=5, attempts=1)
         return
 
     clean_t = re.sub(r"\s+", " ", (title or "").strip())[:70]
@@ -5131,7 +5226,7 @@ def resolve_flash_discord_alert(
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         try:
             # 1. Borramos el mensaje Flash antiguo para no duplicar
-            HTTP_SESSION.delete(old_msg_url, headers=bot_headers, timeout=5)
+            _discord_send("DELETE", old_msg_url, headers=bot_headers, timeout=5, attempts=1)
             # 2. Publicamos un POST NUEVO para forzar la notificación push en el móvil
             dismiss_comp = [
                 {
@@ -5141,12 +5236,10 @@ def resolve_flash_discord_alert(
                     ]
                 }
             ]
-            HTTP_SESSION.post(
-                base_url,
-                headers=bot_headers,
-                json={"content": stop_push_content, "components": dismiss_comp},
-                timeout=6
-            )
+            _discord_post_with_fallback(
+                base_url, headers=bot_headers,
+                payload={"content": stop_push_content, "components": dismiss_comp},
+                fallback_content=stop_push_content, timeout=6)
         except Exception as e:
             print(f"[WARN] Error enviando notificación Push de rechazo (Bot): {e}")
 
@@ -5154,12 +5247,9 @@ def resolve_flash_discord_alert(
         base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
         old_msg_url = f"{base_wh}/messages/{msg_id}"
         try:
-            HTTP_SESSION.delete(old_msg_url, timeout=5)
-            HTTP_SESSION.post(
-                WEBHOOK_URL,
-                json={"content": stop_push_content},
-                timeout=6
-            )
+            _discord_send("DELETE", old_msg_url, timeout=5, attempts=1)
+            _discord_post_with_fallback(WEBHOOK_URL, payload={"content": stop_push_content},
+                                        fallback_content=stop_push_content, timeout=6)
         except Exception as e:
             print(f"[WARN] Error enviando notificación Push de rechazo (Webhook): {e}")
 
@@ -5399,7 +5489,6 @@ def send_discord_alert(
 
     embed = {
         "title": header_title[:250],
-        "url": primary_action_url,
         "color": color,
         "description": full_embed_desc.strip(),
         "fields": [
@@ -5413,6 +5502,8 @@ def send_discord_alert(
         ],
         "footer": {"text": footer_text}
     }
+    if _valid_http(primary_action_url):
+        embed["url"] = primary_action_url
 
     if not enhanced_cover_bytes and image_url:
         embed["image"] = {"url": image_url}
@@ -5435,6 +5526,8 @@ def send_discord_alert(
             row1_buttons.append({"type": 2, "style": 5, "label": f"⚡ Comprar en {plat.capitalize()} ({price:.0f}€)", "url": clean_item_url})
 
     row1_buttons.append({"type": 2, "style": 5, "label": "🏪 Ficha CeX", "url": cex_link})
+    # Un botón de enlace sin URL válida hace que Discord rechace todo el mensaje (400)
+    row1_buttons = [b for b in row1_buttons if b.get("style") != 5 or _valid_http(b.get("url"))]
 
     components = [
         {"type": 1, "components": row1_buttons},
@@ -5457,51 +5550,52 @@ def send_discord_alert(
         f_via = flash_message.get("via")
         if f_via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
             del_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
-            try:
-                HTTP_SESSION.delete(del_url, headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5)
-            except Exception:
-                pass
+            _discord_send("DELETE", del_url, headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5, attempts=1)
         elif f_via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
             base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
             del_url = f"{base_wh}/messages/{f_id}"
-            try:
-                HTTP_SESSION.delete(del_url, timeout=5)
-            except Exception:
-                pass
+            _discord_send("DELETE", del_url, timeout=5, attempts=1)
 
+    def _cover_multipart(payload, file_field):
+        def _build():
+            mp = CurlMime()
+            mp.addpart(name="payload_json", content_type="application/json",
+                       data=json.dumps(payload).encode("utf-8"))
+            mp.addpart(name=file_field, content_type="image/jpeg", filename="portada_chollo.jpg",
+                       data=enhanced_cover_bytes)
+            return mp
+        return _build
+
+    if enhanced_cover_bytes:
+        embed["image"] = {"url": "attachment://portada_chollo.jpg"}
+
+    delivered = False
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}"}
-        try:
-            if enhanced_cover_bytes:
-                embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], "components": components, **msg_flags})
-                mp = CurlMime()
-                mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
-                mp.addpart(name="files[0]", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
-                r = requests.post(bot_api_url, headers=bot_headers, multipart=mp, timeout=15)
-            else:
-                r = HTTP_SESSION.post(
-                    bot_api_url,
-                    headers={**bot_headers, "Content-Type": "application/json"},
-                    json={"content": push_notification_content, "embeds": [embed], "components": components, **msg_flags},
-                    timeout=10
-                )
-            if r.status_code in (200, 201):
-                return
-        except Exception as e:
-            print(f"[WARN] Error enviando alerta por Bot API: {e}")
+        bot_payload = {"content": push_notification_content, "embeds": [embed], "components": components, **msg_flags}
+        ok, _status, msg_id = _discord_post_with_fallback(
+            bot_api_url,
+            headers=bot_headers if enhanced_cover_bytes else {**bot_headers, "Content-Type": "application/json"},
+            payload=bot_payload, fallback_content=push_notification_content, flags=msg_flags,
+            multipart=_cover_multipart(bot_payload, "files[0]") if enhanced_cover_bytes else None,
+            timeout=15 if enhanced_cover_bytes else 10)
+        if ok:
+            delivered = True
+            _save_discord_message_id(conn, deal_id, msg_id, ALERTS_CHANNEL_ID, "bot")
 
-    if WEBHOOK_URL and "http" in WEBHOOK_URL:
-        try:
-            if enhanced_cover_bytes:
-                embed["image"] = {"url": "attachment://portada_chollo.jpg"}
-                payload_json = json.dumps({"content": push_notification_content, "embeds": [embed], **msg_flags})
-                mp = CurlMime()
-                mp.addpart(name="payload_json", content_type="application/json", data=payload_json.encode("utf-8"))
-                mp.addpart(name="file", content_type="image/jpeg", filename="portada_chollo.jpg", data=enhanced_cover_bytes)
-                requests.post(WEBHOOK_URL, multipart=mp, timeout=15)
-            else:
-                HTTP_SESSION.post(WEBHOOK_URL, json={"content": push_notification_content, "embeds": [embed], **msg_flags}, timeout=10)
-        except Exception:
-            pass
+    if not delivered and WEBHOOK_URL and "http" in WEBHOOK_URL:
+        sep = "&" if "?" in WEBHOOK_URL else "?"
+        wh_payload = {"content": push_notification_content, "embeds": [embed], **msg_flags}
+        ok, _status, msg_id = _discord_post_with_fallback(
+            f"{WEBHOOK_URL}{sep}wait=true", payload=wh_payload,
+            fallback_content=push_notification_content, flags=msg_flags,
+            multipart=_cover_multipart(wh_payload, "file") if enhanced_cover_bytes else None,
+            timeout=15 if enhanced_cover_bytes else 10)
+        if ok:
+            delivered = True
+            _save_discord_message_id(conn, deal_id, msg_id, "", "webhook")
+
+    if not delivered:
+        print(f"[DISCORD ERROR] Alerta {deal_id} NO entregada por bot ni webhook")
+    return delivered
