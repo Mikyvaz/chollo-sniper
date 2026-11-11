@@ -457,11 +457,31 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                     item_data["seller_trust_badge"] = cached_profile.get("seller_trust_badge", "")
                     return cached_profile
 
-    # Valores existentes en item_data o seller
-    reviews_count = seller.get("seller_reviews_count", seller.get("reviews_count", seller.get("sales", seller.get("feedback_count"))))
-    rating = seller.get("seller_rating", seller.get("rating", seller.get("scoring", seller.get("feedback_reputation"))))
-    joined_days = seller.get("seller_joined_days", seller.get("joined_days", seller.get("age_days")))
-    verified = seller.get("seller_verified", seller.get("verified", False))
+    # Valores existentes en item_data o seller (ignorando claves con valor None)
+    def _pick(*keys):
+        for k in keys:
+            v = seller.get(k)
+            if v is not None:
+                return v
+            v2 = item_data.get(k)
+            if v2 is not None:
+                return v2
+        return None
+
+    reviews_count = _pick("seller_reviews_count", "reviews_count", "sales", "feedback_count")
+    rating = _pick("seller_rating", "rating", "scoring", "feedback_reputation")
+    joined_days = _pick("seller_joined_days", "joined_days", "age_days", "account_age_days")
+    if joined_days is None:
+        raw_created_ts = _pick("created_ts")
+        if raw_created_ts is not None:
+            try:
+                ts_val = float(raw_created_ts)
+                if ts_val > 1e11:
+                    ts_val /= 1000.0
+                joined_days = round(max(0.0, (now - ts_val) / 86400.0), 1)
+            except Exception:
+                pass
+    verified = bool(_pick("seller_verified", "verified") or False)
 
     should_cache = True
     extra = {}  # ventas reales, compras, anuncios, denuncias... (para la alerta y el análisis)

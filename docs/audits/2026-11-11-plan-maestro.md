@@ -136,7 +136,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.1 | [x] | Gemini 3.8 Max | Latencia por etapa + métricas por proceso | Medir; 0 % de métricas perdidas | S | T1.0 |
 | T2.2 | [x] | Argon 4 | Capa HTTP coherente (sesiones, huella, cabeceras) | Anti-detección y menos latencia por petición | M | T2.1 |
 | T2.3 | [x] | Argon 4 | Cadencia por consulta + *token bucket* | Wallapop de 26 a 20 s; Vinted de 108 a 75 s o menos | M | T2.1, T2.2 |
-| T2.4 | [ ] | Gemini 3.8 Max | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |
+| T2.4 | [x] | Gemini 3.8 Max | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |
 | T2.5 | [ ] | Argon 4 | Vendedor Wallapop: identidad, límite y caché persistente | Menos peticiones y ningún falso «0 valoraciones» | S | T2.2, T1.4 |
 | T2.6 | [ ] | Argon 4 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
 | T2.7 | [ ] | Argon 4 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |

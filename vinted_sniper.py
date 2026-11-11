@@ -84,6 +84,9 @@ class VintedClient:
         self.rotator.rotate()
         self._init_session()
 
+    def is_in_cooldown(self):
+        return bool(self.health_monitor and self.health_monitor.is_in_cooldown())
+
     def ensure_fresh_session(self):
         if self.session is None or self.session_epoch != self.rotator.rotation_epoch or self.consecutive_empty >= 4:
             self._init_session()
@@ -348,6 +351,8 @@ class VintedClient:
             return []
 
     def fetch_item_details(self, item_url):
+        if self.is_in_cooldown():
+            return None
         bkt = get_platform_bucket("VINTED")
         if bkt is not None:
             bkt.acquire()
@@ -355,13 +360,13 @@ class VintedClient:
         try:
             r = self.session.get(item_url, timeout=12)
             default_rate_limiter.record_request("VINTED", time.time() - t0, r.status_code)
-            if r.status_code in (403, 429):
+            if r.status_code in (401, 403, 429):
                 if bkt is not None:
                     bkt.penalize()
                 self.health_monitor.handle_http_response(r.status_code, url=item_url)
-                return "", [], "", None
+                return None
             if r.status_code != 200:
-                return "", [], "", None
+                return None
             if bkt is not None:
                 bkt.recover()
 
@@ -410,6 +415,7 @@ class VintedClient:
             if m_fb:
                 try:
                     seller_info["sales"] = int(m_fb.group(1))
+                    seller_info["feedback_count"] = seller_info["sales"]
                 except Exception:
                     pass
 
@@ -417,6 +423,7 @@ class VintedClient:
             if m_rep:
                 try:
                     rep_val = float(m_rep.group(1))
+                    seller_info["feedback_reputation"] = rep_val
                     if rep_val > 0:
                         seller_info["rating"] = round(rep_val * 5.0, 1)
                     elif seller_info["sales"] == 0:
@@ -484,7 +491,26 @@ class VintedClient:
 
             return desc, clean_photos, upload_date, seller_info
         except Exception:
-            return "", [], "", None
+            return None
+
+
+def handle_vinted_details_result(conn, item_id, title, base_price, details_res, details_fail, max_retries=2):
+    """
+    Gestiona el resultado de fetch_item_details(url):
+    - Si es None: no marca el anuncio como visto hasta agotar max_retries (2 reintentos = 3.er fallo),
+      momento en que lo marca visto y emite log_metric("item_skipped", ..., reason="details_unavailable").
+    - Si es una tupla válida: limpia el contador de fallos y devuelve True.
+    """
+    if details_res is None:
+        fails = int(details_fail.get(item_id, 0)) + 1
+        details_fail[item_id] = fails
+        if fails > max_retries:
+            details_fail.pop(item_id, None)
+            mark_item_seen(conn, "VINTED", item_id, title, base_price)
+            log_metric("item_skipped", "vinted-sniper", "VINTED", reason="details_unavailable", item_id=item_id)
+        return False
+    details_fail.pop(item_id, None)
+    return True
 
 
 VintedScraper = VintedClient
@@ -559,6 +585,7 @@ def main():
     seen_cnt = count_platform_seen(conn, "VINTED")
     warmup = seen_cnt == 0
     item_eval_fails = {}
+    details_fail = {}
     budget_deferred = set()  # Anuncios aplazados por pausa de presupuesto IA (A-001)
     round_num = 0
 
@@ -591,6 +618,7 @@ def main():
         if time.time() - last_maintenance > 21600:
             run_db_maintenance(conn)
             item_eval_fails.clear()
+            details_fail.clear()
             last_maintenance = time.time()
 
         if scheduler.reload_if_changed():
@@ -656,6 +684,8 @@ def main():
             raw_items.sort(key=fast_lane_key)
 
             for item in raw_items:
+                    if vinted.is_in_cooldown():
+                        break
                     item_id = item.get("id")
                     if not item_id:
                         continue
@@ -704,7 +734,14 @@ def main():
                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
                         continue
 
-                    desc, extra_photos, upload_date, seller_info = vinted.fetch_item_details(item["url"])
+                    if vinted.is_in_cooldown():
+                        break
+                    details_res = vinted.fetch_item_details(item["url"])
+                    if not handle_vinted_details_result(conn, item_id, title, base_price, details_res, details_fail):
+                        if vinted.is_in_cooldown():
+                            break
+                        continue
+                    desc, extra_photos, upload_date, seller_info = details_res
                     _age_min = parse_relative_age_minutes(upload_date)
                     vinted_published_ts = (time.time() - _age_min * 60.0) if _age_min is not None else None
                     if seller_info:
