@@ -441,6 +441,13 @@ def init_db(conn=None):
         ensure_deal_events_table(conn)
         ensure_alert_feedback_table(conn)
 
+        # T1.6: motivo de fin y tokens de razonamiento por llamada (detecta MAX_TOKENS)
+        for col_name, col_def in (("finish_reason", "TEXT"), ("tokens_thoughts", "INTEGER DEFAULT 0")):
+            try:
+                c.execute(f"ALTER TABLE ai_cost_log ADD COLUMN {col_name} {col_def};")
+            except sqlite3.OperationalError:
+                pass  # columna ya existente (o añadida a la vez por otro contenedor)
+
         embed_cols = [col[1] for col in c.execute("PRAGMA table_info(item_embeddings)").fetchall()]
         if "seller_id" not in embed_cols:
             c.execute("ALTER TABLE item_embeddings ADD COLUMN seller_id TEXT DEFAULT '';")
@@ -577,18 +584,28 @@ def calculate_ai_cost_usd(model, tokens_in, tokens_out, thoughts_tokens=0):
     return round(in_cost + out_cost, 6)
 
 
-def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_out, thoughts_tokens=0):
+def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_out, thoughts_tokens=0, finish_reason=None):
     if not conn:
         return
     try:
         usd = calculate_ai_cost_usd(model, tokens_in, tokens_out, thoughts_tokens)
         c = conn.cursor()
         total_out = int(tokens_out or 0) + int(thoughts_tokens or 0)
-        c.execute(
-            """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-            (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd)
-        )
+        try:
+            c.execute(
+                """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd,
+                                            finish_reason, tokens_thoughts, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd,
+                 finish_reason, int(thoughts_tokens or 0))
+            )
+        except sqlite3.OperationalError:
+            # BD sin migrar (columnas nuevas ausentes): registrar al menos el coste
+            c.execute(
+                """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd)
+            )
         conn.commit()
     except Exception as e:
         print(f"[WARN] Error registrando coste IA: {e}")
@@ -608,6 +625,8 @@ def get_today_ai_cost(conn):
 
 AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
 _AI_GATEWAY_SEMAPHORE = threading.Semaphore(AI_MAX_CONCURRENCY)
+# T1.6: presupuesto de salida de los modelos Gemini no lite (incluye el thinking, que no se puede desactivar)
+GEMINI_NON_LITE_MAX_OUTPUT_TOKENS = 2048
 
 
 class BudgetExceededError(RuntimeError):
@@ -836,12 +855,14 @@ def ai_gateway_call(
                 for model in candidate_models:
                     if "3.8" in model:
                         continue
+                    # T1.6: en modelos no lite el límite incluye el thinking; 2048 para que quepan thinking + JSON
+                    model_max_tokens = max_tokens if "lite" in model.lower() else GEMINI_NON_LITE_MAX_OUTPUT_TOKENS
                     payload = {
                         "contents": [{"parts": parts}],
                         "generationConfig": {
                             "responseMimeType": "application/json",
                             "temperature": temperature,
-                            "maxOutputTokens": max_tokens
+                            "maxOutputTokens": model_max_tokens
                         }
                     }
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -853,9 +874,16 @@ def ai_gateway_call(
                             p_tokens = usage.get("promptTokenCount", 0)
                             c_tokens = usage.get("candidatesTokenCount", 0)
                             thoughts_tokens = usage.get("thoughtsTokenCount", 0)
-                            log_ai_cost(active_conn, platform, radar_id, model, call_type, p_tokens, c_tokens, thoughts_tokens)
-
                             candidates = resp_json.get("candidates", [])
+                            finish = (candidates[0].get("finishReason") if candidates else None)
+                            log_ai_cost(active_conn, platform, radar_id, model, call_type, p_tokens, c_tokens,
+                                        thoughts_tokens, finish_reason=finish)
+
+                            if finish == "MAX_TOKENS":
+                                # Respuesta truncada: no se parsea la parte parcial, se pasa al siguiente modelo
+                                print(f"[AI_GATEWAY] MAX_TOKENS {model} out={c_tokens} thoughts={thoughts_tokens}")
+                                continue
+
                             if candidates:
                                 for p in candidates[0].get("content", {}).get("parts", []):
                                     if "text" in p and not p.get("thought", False):
@@ -3608,6 +3636,20 @@ class ModelPair(str):
         return super().__getitem__(item)
 
 
+def _pro_model_enabled(cfg=None):
+    """config.json -> "ai": {"pro_model_enabled": true}. Sin config explícita, lee el archivo (por defecto: activado)."""
+    try:
+        ai_cfg = cfg.get("ai") if isinstance(cfg, dict) else None
+        if not isinstance(ai_cfg, dict):
+            raw = load_raw_config(CONFIG_PATH)
+            ai_cfg = raw.get("ai") if isinstance(raw, dict) else None
+        if isinstance(ai_cfg, dict):
+            return bool(ai_cfg.get("pro_model_enabled", True))
+    except Exception:
+        pass
+    return True
+
+
 def select_multimodal_model(item_or_price=None, target_or_title=None, desc="", target=None, budget_status="NORMAL", config=None, price=None, title="", **kwargs):
     """
     Enrutamiento inteligente de modelos multimodales (CORRECION_FALLOS.md 2.2):
@@ -3655,6 +3697,8 @@ def select_multimodal_model(item_or_price=None, target_or_title=None, desc="", t
     pro_model = str(cfg.get("ai_pro_model", "gemini-3.5-flash"))
     if "2.5" in pro_model or "3.8" in pro_model or "latest" in pro_model:
         pro_model = "gemini-3.5-flash"
+    # T1.6: interruptor config.json -> "ai": {"pro_model_enabled": false} (decisión del usuario: toca la invariante 2)
+    pro_enabled = _pro_model_enabled(cfg)
 
     if b_status == "DEGRADED":
         return ModelPair(fast_model, "google/gemini-2.5-flash-lite")
@@ -3668,7 +3712,7 @@ def select_multimodal_model(item_or_price=None, target_or_title=None, desc="", t
     # Prohibido usar modelos pesados o escalar por precio unitario alto.
     # El 95%+ de llamadas usan modelos Flash-Lite / Mini.
     # Escala a gemini-3.5-flash ÚNICAMENTE para lotes complejos combinados con precio alto (>=150€ con lote).
-    if is_complex_lot and p >= 150.0:
+    if is_complex_lot and p >= 150.0 and pro_enabled:
         primary_gemini = pro_model
         primary_openrouter = "google/gemini-2.5-flash"
     else:

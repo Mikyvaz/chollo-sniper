@@ -4,6 +4,9 @@
   "min_personal_savings_eur": 25,
   "price_drop_threshold_pct": 15,
   "price_drop_min_eur": 10,
+  "ai": {
+    "pro_model_enabled": true
+  },
   "notifications": {
     "flash_mode": "off",
     "push_min_profit_eur": 40,
