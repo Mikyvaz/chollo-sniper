@@ -4,6 +4,8 @@
 > Última actualización: **2026-11-11**
 >
 > **Plan de ingeniería pendiente (2026-11-11):** [`docs/audits/2026-11-11-plan-maestro.md`](docs/audits/2026-11-11-plan-maestro.md). Son 34 tareas en 3 fases (bugs y coste, latencia y anti-detección, precisión y notificaciones), con evidencia en `docs/audits/2026-11-11-sondas/`. Cubre la «Velocidad de reacción» y parte del «Antifraude» de este documento. Ejecútalo en orden y anota en `docs/audits/registro.md` cada tarea cerrada.
+>
+> **Estado del plan (2026-11-11):** Fase 1 implementada y revisada en la rama `plan-fase-1` (T1.0–T1.7, T1.9–T1.13; T1.8 solo el código, sin fijar el valor de `AI_DAILY_BUDGET_USD`). **Sin desplegar**: en espera de la aprobación del usuario y de 24–48 h de observación antes de la Fase 2.
 
 ## Diagnóstico de partida (2026-11-10)
 
