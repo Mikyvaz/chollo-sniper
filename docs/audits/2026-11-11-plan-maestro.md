@@ -133,7 +133,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T1.11 | [x] | — | eBay: precios ≥ 1.000 € y precio tachado | Sin falsos candidatos | S | T1.0 |
 | T1.12 | [x] | — | ntfy mediante JSON | Canal *1-Tap* operativo | S | T1.0 |
 | T1.13 | [x] | — | Visión: salida mínima + tokens por modalidad | Entre −20 y −25 % de tokens de salida; aporta el dato que necesita T3.10 | S | T1.6 |
-| T2.1 | [ ] | Gemini 3.8 Max | Latencia por etapa + métricas por proceso | Medir; 0 % de métricas perdidas | S | T1.0 |
+| T2.1 | [x] | Gemini 3.8 Max | Latencia por etapa + métricas por proceso | Medir; 0 % de métricas perdidas | S | T1.0 |
 | T2.2 | [ ] | Argon 4 | Capa HTTP coherente (sesiones, huella, cabeceras) | Anti-detección y menos latencia por petición | M | T2.1 |
 | T2.3 | [ ] | Argon 4 | Cadencia por consulta + *token bucket* | Wallapop de 26 a 20 s; Vinted de 108 a 75 s o menos | M | T2.1, T2.2 |
 | T2.4 | [ ] | Gemini 3.8 Max | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |

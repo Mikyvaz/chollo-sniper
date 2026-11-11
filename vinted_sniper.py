@@ -18,7 +18,7 @@ import urllib.parse
 from curl_cffi import requests
 
 from antiban import BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker, default_rate_limiter
-from logger import setup_logger, log_metric
+from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
     WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL,
     init_db, load_config, run_db_maintenance,
@@ -598,11 +598,14 @@ def main():
             seen_target_ids = set()
             for q in queries:
                 items = vinted.search_items(q, target["min_price"], target["max_price"])
+                _t_fetch = time.perf_counter()
                 target_items_count += len(items)
                 round_total_fetched += len(items)
                 for itm in items:
                     iid = itm.get("id")
                     if iid and iid not in seen_target_ids:
+                        if isinstance(itm, dict):
+                            itm.setdefault("_t_fetch", _t_fetch)
                         seen_target_ids.add(iid)
                         raw_items.append(itm)
                 timing.inter_query_sleep(1.0, 2.0)
@@ -626,6 +629,14 @@ def main():
                     item_id = item.get("id")
                     if not item_id:
                         continue
+
+                    t = {"fetch": float(item.get("_t_fetch") or time.perf_counter())}
+                    radar_id = target.get("id", "")
+
+                    def _emit_pipeline(outcome):
+                        ms = compute_pipeline_ms(t)
+                        log_metric("item_pipeline", service="vinted", platform="VINTED", radar_id=radar_id, outcome=outcome, **ms)
+                        return ms
 
                     title = item.get("title", "")
                     brand = item.get("brand_title", "")
@@ -654,6 +665,7 @@ def main():
 
                     extra_meta_str = f"{brand} {status_cond}"
                     # FASE 1A: Pre-Filtro sobre título/marca antes de abrir la ficha
+                    t["filters"] = time.perf_counter()
                     if not passes_filters(title, "", base_price, target, global_blacklist, extra_text=extra_meta_str):
                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
                         continue
@@ -684,6 +696,7 @@ def main():
                         continue
 
                     item["platform"] = "VINTED"
+                    t["enrich"] = time.perf_counter()
                     enrich_seller_profile(item, http_session=vinted.session if 'vinted' in locals() else None)
 
                     # EVALUACIÓN DE FRAUDE DETERMINISTA EN CAPAS (P2)
@@ -730,9 +743,11 @@ def main():
                         continue
 
                     # PUERTA 1: Criba ultra-ligera por texto (0 fotos, 0 thinking tokens)
+                    t["p1"] = time.perf_counter()
                     ps_decision, ps_reason, ps_conf, from_cache = prescreen_item_text(
                         "VINTED", title, desc, base_price, landed_cost, target, conn=conn, health_monitor=health_monitor
                     )
+                    t["p1_end"] = time.perf_counter()
 
                     if ps_decision == "reject":
                         if AI_PRESCREEN_SHADOW_MODE:
@@ -745,6 +760,7 @@ def main():
                                     title=title, price=base_price, item_url=item.get("url", "")
                                 )
                             mark_item_seen(conn, "VINTED", item_id, title, base_price)
+                            _emit_pipeline("p1_reject")
                             continue
 
                     # Si hay riesgo moderado (2-3) y Puerta 1 no está segura ('unsure'), descartar y registrar evento
@@ -757,6 +773,7 @@ def main():
                                 title=title, price=base_price, item_url=item.get("url", "")
                             )
                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
+                        _emit_pipeline("p1_unsure_fraud")
                         continue
 
                     # FASE 5: Comprobación de duplicado semántico (P1-6)
@@ -790,6 +807,7 @@ def main():
                                         if flash_msg:
                                             resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Duplicado semántico rechazado: {rej}", title=title, price=base_price, item_url=item.get("url", ""))
                                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
+                                        _emit_pipeline("sem_dup_reject")
                                         continue
                                     else:
                                         print(f"[VINTED DEDUP SEMÁNTICA] Match rechazado previo pero sim={sim_score:.2f} < 0.96 -> Inspección visual obligatoria")
@@ -808,6 +826,7 @@ def main():
                         # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
                         photo_urls = extra_photos if extra_photos else (item.get("photos") or ([item["photo"]] if item.get("photo") else []))
                         cover_url = photo_urls[0] if photo_urls else ""
+                        t["image"] = time.perf_counter()
                         raw_photos = download_item_images(photo_urls, rotator=rotator, max_images=1)
 
                         # Comprobación de dHash para fotos reutilizadas (P2-5)
@@ -833,11 +852,13 @@ def main():
                                         if flash_msg:
                                             resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Foto reutilizada de {r_info['platform']} ({r_info['item_id']})", title=title, price=base_price, item_url=item.get("url", ""))
                                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
+                                        _emit_pipeline("image_fraud_reject")
                                         continue
 
                         round_evaluated += 1
                         drop_tag = f" [REBAJA -{price_drop_info['drop_eur']:.0f}€]" if price_drop_info else ""
                         print(f"[EVALUANDO VINTED IA + {len(raw_photos)} FOTOS]{drop_tag} {title} ({base_price:.0f}€ | Casa: {landed_cost:.0f}€)...")
+                        t["vision"] = time.perf_counter()
                         ai_data = analyze_and_generate_kit(
                             "VINTED", title, desc, base_price, landed_cost, False, target=target,
                             conn=conn, health_monitor=health_monitor,
@@ -858,6 +879,7 @@ def main():
                                 )
                                 if ai_data_retry:
                                     ai_data = ai_data_retry
+                        t["vision_end"] = time.perf_counter()
 
                         if ai_data and not ai_data.get("_api_error"):
                             save_item_embedding(
@@ -873,6 +895,7 @@ def main():
                     if ai_data and ai_data.get("_budget_paused"):
                         budget_deferred.add(item_id)
                         print(f"[VINTED BUDGET] '{title}' ({base_price:.0f}€) aplazado hasta que se reanude el presupuesto IA.")
+                        _emit_pipeline("budget_paused")
                         continue
 
                     if not ai_data or ai_data.get("_api_error"):
@@ -880,6 +903,7 @@ def main():
                         item_eval_fails[item_id] = fail_cnt
                         if fail_cnt >= 2:
                             mark_item_seen(conn, "VINTED", item_id, title, base_price)
+                        _emit_pipeline("vision_error")
                         continue
 
                     mark_item_seen(conn, "VINTED", item_id, title, base_price)
@@ -889,10 +913,12 @@ def main():
                         print(f"[VINTED DESCARTADO IA] {title} ({base_price:.0f}€) -> {reason}")
                         if flash_msg:
                             resolve_flash_discord_alert(flash_msg, approved=False, reason=reason, title=title, price=base_price, item_url=item.get("url", ""))
+                        _emit_pipeline("vision_reject")
                         continue
 
                     # FASE 3: Verificación CeX España en vivo + Regla de Amortización + Rating Determinista
                     cex_data = None
+                    t["cex"] = time.perf_counter()
                     if mode == "resale":
                         cex_query = ai_data.get("cex_search_query") or ai_data.get("identified_model") or q
                         cex_data = fetch_cex_live(
@@ -904,7 +930,6 @@ def main():
 
                         # BUNDLE SUM ENGINE (Task 4.2): Valoración acumulativa de juegos/mandos extra en CeX
                         bundled_q = ai_data.get("bundled_games_queries", [])
-                        radar_id = (target or {}).get("id", "")
                         is_console = (radar_id in CONSOLE_RADAR_IDS) or any(c_id in radar_id for c_id in CONSOLE_RADAR_IDS)
                         if is_console and bundled_q and cex_data and isinstance(cex_data, dict):
                             bundle_bonus = evaluate_bundle_cex_bonus(conn, bundled_q)
@@ -917,6 +942,7 @@ def main():
                                 cex_data["box_name"] = f"{cex_data.get('box_name', cex_query)} + {len(matched_extras)} extra(s)"
                                 ai_data["bundled_matches"] = matched_extras
                                 print(f"[BUNDLE SUM ENGINE] Añadido bonus de {len(matched_extras)} extra(s) (+{extra_cash:.1f}€ cash / +{extra_voucher:.1f}€ vale) a '{cex_query}'")
+                    t["cex_end"] = time.perf_counter()
 
                     ai_data["fraud_risk_score"] = int(fraud_eval.get("risk", 0) or 0)
                     approved, score, optimal_price, best_net_profit, charger_penalty, reject_msg = evaluate_deal_math_and_score(
@@ -931,6 +957,7 @@ def main():
                                 flash_msg, approved=False, reason=reject_msg,
                                 title=title, price=base_price, item_url=item.get("url", "")
                             )
+                        _emit_pipeline("math_reject")
                         continue
 
                     kit_folder = build_kit_folder_name("VINTED", item_id, ai_data)
@@ -942,6 +969,8 @@ def main():
                         or "EU"
                     ).upper()
 
+                    t["alert"] = time.perf_counter()
+                    ai_data["_pipeline_ms"] = compute_pipeline_ms(t)
                     send_discord_alert(
                         conn=conn,
                         platform="VINTED",
@@ -986,6 +1015,17 @@ def main():
                         },
                         is_flash=False
                     )
+                    t["alert_end"] = time.perf_counter()
+                    ms_final = _emit_pipeline("alerted")
+                    try:
+                        conn.execute(
+                            "UPDATE deals SET alert_context_json = json_set(COALESCE(NULLIF(alert_context_json,''),'{}'), "
+                            "'$.pipeline_ms.ms_alert', ?) WHERE deal_id = ?",
+                            (ms_final["ms_alert"], f"VIN_{item_id}"[:40]),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
 
                     timing.item_processing_sleep()
 

@@ -11,57 +11,83 @@ Lee metrics.jsonl y genera estadísticas de:
 
 import os
 import sys
+import glob
 import json
 import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
 
-def get_metrics_path():
-    candidates = [
-        os.getenv("METRICS_FILE", ""),
-        "/app/data/logs/metrics.jsonl",
-        "./data/logs/metrics.jsonl",
-        "../data/logs/metrics.jsonl",
-        os.path.join(os.path.dirname(__file__), "..", "data", "logs", "metrics.jsonl")
+def get_metrics_paths(log_dir=None):
+    env_file = os.getenv("METRICS_FILE", "").strip()
+    if env_file and os.path.isfile(env_file):
+        return [os.path.abspath(env_file)]
+
+    candidate_dirs = [
+        log_dir or "",
+        os.getenv("LOG_DIR", "").strip(),
+        "/app/data/logs",
+        "/src/data/logs",
+        "./data/logs",
+        "../data/logs",
+        os.path.join(os.path.dirname(__file__), "..", "data", "logs"),
     ]
-    for p in candidates:
-        if p and os.path.exists(p):
-            return os.path.abspath(p)
+    seen_real = set()
+    found = []
+    for d in candidate_dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        matches = sorted(glob.glob(os.path.join(d, "metrics*.jsonl")))
+        for m in matches:
+            if os.path.isfile(m):
+                rp = os.path.realpath(m)
+                if rp not in seen_real:
+                    seen_real.add(rp)
+                    found.append(os.path.abspath(m))
+        if found:
+            return found
+    return []
+
+
+def get_metrics_path():
+    paths = get_metrics_paths()
+    if paths:
+        return paths[0]
     return "./data/logs/metrics.jsonl"
 
 
-def run_metrics_report(hours=24):
-    path = get_metrics_path()
+def run_metrics_report(hours=24, log_dir=None):
+    paths = get_metrics_paths(log_dir=log_dir)
+    path_label = ", ".join(os.path.basename(p) for p in paths) if paths else get_metrics_path()
     print("=" * 75)
     print("📈 REPORTE DE MÉTRICAS OPERACIONALES — BOTI SNIPER SUITE")
-    print(f"Fichero: {path} | Ventana: últimas {hours}h | Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Ficheros: {path_label} | Ventana: últimas {hours}h | Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 75)
 
-    if not os.path.exists(path):
-        print(f"[INFO] No se ha encontrado el fichero de métricas en '{path}'.")
+    if not paths:
+        print(f"[INFO] No se han encontrado ficheros de métricas ('metrics*.jsonl').")
         print("  Las métricas se generarán automáticamente a medida que los snipers completen rondas.")
         return
 
     cutoff = datetime.now() - timedelta(hours=hours)
 
     records = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    ts = datetime.fromisoformat(data.get("timestamp", ""))
-                    if ts >= cutoff:
-                        records.append(data)
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"[ERROR] Leyendo métricas: {e}")
-        return
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        ts = datetime.fromisoformat(data.get("timestamp", ""))
+                        if ts >= cutoff:
+                            records.append(data)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[ERROR] Leyendo métricas ({path}): {e}")
 
     if not records:
         print(f"[INFO] 0 registros de métricas encontrados en las últimas {hours} horas.")

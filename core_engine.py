@@ -4913,9 +4913,10 @@ def parse_relative_age_minutes(text):
     return qty * mult
 
 
-def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner="", country_tag="", extra=None):
+def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner="", country_tag="", extra=None, pipeline_ms=None):
     """Guarda en la alerta los datos del vendedor y de la IA que no tienen columna propia (para el análisis)."""
     try:
+        from logger import compute_pipeline_ms
         s = seller if isinstance(seller, dict) else {}
         a = ai_data if isinstance(ai_data, dict) else {}
         seller_keys = ("name", "seller_reviews_count", "seller_rating", "sales", "seller_joined_days", "seller_age_source",
@@ -4929,6 +4930,16 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
             sel["reviews"] = sel["seller_reviews_count"]
         if sel.get("seller_joined_days") is not None:
             sel["age_days"] = sel["seller_joined_days"]
+        raw_pms = (
+            pipeline_ms
+            if pipeline_ms is not None
+            else (
+                a.get("_pipeline_ms")
+                or a.get("pipeline_ms")
+                or ((extra or {}).get("pipeline_ms") if isinstance(extra, dict) else None)
+                or ((extra or {}).get("t") if isinstance(extra, dict) else None)
+            )
+        )
         ctx = {
             "seller": sel,
             "ai": {k: a.get(k) for k in ("visual_confidence", "deal_tier", "deal_tier_label", "fraud_risk_score",
@@ -4937,9 +4948,14 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
             "country_tag": country_tag,
             "alert_sent_at_utc": datetime.utcnow().isoformat(timespec="seconds"),
             "pipeline_version": PIPELINE_VERSION,
+            "pipeline_ms": compute_pipeline_ms(raw_pms) if raw_pms is not None else compute_pipeline_ms({}),
         }
         if extra:
-            ctx.update(extra)
+            for k, v in extra.items():
+                if k == "pipeline_ms" and isinstance(v, dict):
+                    ctx["pipeline_ms"] = compute_pipeline_ms(v)
+                elif k != "t":
+                    ctx[k] = v
         conn.execute("UPDATE deals SET alert_context_json = ? WHERE deal_id = ?",
                      (json.dumps(ctx, ensure_ascii=False, default=str), str(deal_id)))
         conn.commit()

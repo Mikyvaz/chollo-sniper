@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from curl_cffi import requests
 
 from antiban import BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker, default_rate_limiter
-from logger import setup_logger, log_metric
+from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
     WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL,
     init_db, load_config, run_db_maintenance,
@@ -136,6 +136,10 @@ def fetch_store_for_target(store, target, rotator):
             time.sleep(random.uniform(q_min_s, q_max_s))
         try:
             items = fetcher(rotator, q, target["min_price"], target["max_price"])
+            _t_fetch = time.perf_counter()
+            for _it in (items or []):
+                if isinstance(_it, dict):
+                    _it.setdefault("_t_fetch", _t_fetch)
             batches.append((q, items or []))
         except WafBlockedError as wbe:
             waf_err = wbe
@@ -327,6 +331,14 @@ def main():
                         landed_cost = item["landed_cost"]
                         fees = item["fees"]
 
+                        t = {"fetch": float(item.get("_t_fetch") or time.perf_counter())}
+                        radar_id = target.get("id", "")
+
+                        def _emit_pipeline(outcome):
+                            ms = compute_pipeline_ms(t)
+                            log_metric("item_pipeline", service="multi_market", platform=plat, radar_id=radar_id, outcome=outcome, **ms)
+                            return ms
+
                         already_seen, price_drop_info = check_item_seen_or_dropped(
                             conn, plat, item_id, price, min_drop_pct=drop_pct, min_drop_eur=drop_eur
                         )
@@ -349,6 +361,7 @@ def main():
                             continue
 
                         # FASE 1: Pre-Filtro Determinista
+                        t["filters"] = time.perf_counter()
                         if not passes_filters(title, desc, price, target, global_blacklist):
                             mark_item_seen(conn, plat, item_id, title, price)
                             continue
@@ -358,6 +371,7 @@ def main():
                             continue
 
                         item["platform"] = plat
+                        t["enrich"] = time.perf_counter()
                         enrich_seller_profile(item)
 
                         # EVALUACIÓN DE FRAUDE DETERMINISTA EN CAPAS (P2)
@@ -404,9 +418,11 @@ def main():
                             continue
 
                         # PUERTA 1: Criba ultra-ligera por texto (0 fotos, 0 thinking tokens)
+                        t["p1"] = time.perf_counter()
                         ps_decision, ps_reason, ps_conf, from_cache = prescreen_item_text(
                             plat, title, desc, price, landed_cost, target, conn=conn, health_monitor=health_monitor
                         )
+                        t["p1_end"] = time.perf_counter()
 
                         if ps_decision == "reject":
                             if AI_PRESCREEN_SHADOW_MODE:
@@ -416,6 +432,7 @@ def main():
                                 if flash_msg:
                                     resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Descartado texto Puerta 1: {ps_reason}", title=title, price=price, item_url=item.get("url", ""))
                                 mark_item_seen(conn, plat, item_id, title, price)
+                                _emit_pipeline("p1_reject")
                                 continue
 
                         # Si hay riesgo moderado (2-3) y Puerta 1 no está segura ('unsure'), descartar y registrar evento
@@ -425,6 +442,7 @@ def main():
                             if flash_msg:
                                 resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Riesgo moderado antifraude", title=title, price=price, item_url=item.get("url", ""))
                             mark_item_seen(conn, plat, item_id, title, price)
+                            _emit_pipeline("p1_unsure_fraud")
                             continue
 
                         # FASE 5: Comprobación de duplicado semántico (P1-6)
@@ -459,6 +477,7 @@ def main():
                                             if flash_msg:
                                                 resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Duplicado semántico: {rej}", title=title, price=price, item_url=item.get("url", ""))
                                             mark_item_seen(conn, plat, item_id, title, price)
+                                            _emit_pipeline("sem_dup_reject")
                                             continue
                                         else:
                                             print(f"[{plat} DEDUP SEMÁNTICA] Match rechazado previo pero sim={sim_score:.2f} < 0.96 -> Inspección visual obligatoria")
@@ -477,6 +496,7 @@ def main():
                             # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
                             img_urls = item.get("images", [])
                             cover_url = img_urls[0] if img_urls else ""
+                            t["image"] = time.perf_counter()
                             raw_photos = download_item_images(
                                 img_urls, rotator=rotator, max_images=1, force_safari=store["img_safari"]
                             )
@@ -504,12 +524,14 @@ def main():
                                             if flash_msg:
                                                 resolve_flash_discord_alert(flash_msg, approved=False, reason="Foto reutilizada de otro anuncio", title=title, price=price, item_url=item.get("url", ""))
                                             mark_item_seen(conn, plat, item_id, title, price)
+                                            _emit_pipeline("image_fraud_reject")
                                             continue
 
                             round_evaluated += 1
                             drop_tag = f" [REBAJA -{price_drop_info['drop_eur']:.0f}€]" if price_drop_info else ""
                             print(f"[EVALUANDO {plat} IA + {len(raw_photos)} FOTOS]{drop_tag} {title} ({price:.0f}€ | Casa: {landed_cost:.0f}€)...")
 
+                            t["vision"] = time.perf_counter()
                             ai_data = analyze_and_generate_kit(
                                 plat, title, desc, price, landed_cost, False, target=target,
                                 conn=conn, health_monitor=health_monitor, raw_images=raw_photos, call_type="vision"
@@ -528,6 +550,7 @@ def main():
                                     )
                                     if ai_data_retry:
                                         ai_data = ai_data_retry
+                            t["vision_end"] = time.perf_counter()
 
                             if ai_data and not ai_data.get("_api_error"):
                                 save_item_embedding(
@@ -543,6 +566,7 @@ def main():
                         if ai_data and ai_data.get("_budget_paused"):
                             budget_deferred.add(deferred_key)
                             print(f"[{plat} BUDGET] '{title}' ({price:.0f}€) aplazado hasta que se reanude el presupuesto IA.")
+                            _emit_pipeline("budget_paused")
                             continue
 
                         if not ai_data or ai_data.get("_api_error"):
@@ -552,6 +576,7 @@ def main():
                             if fail_cnt >= 2:
                                 mark_item_seen(conn, plat, item_id, title, price)
                             print(f"[{plat} WARN] Fallo temporal IA en {title} ({price:.0f}€). Fail-open.")
+                            _emit_pipeline("vision_error")
                             continue
 
                         mark_item_seen(conn, plat, item_id, title, price)
@@ -562,10 +587,12 @@ def main():
                             print(f"[{plat} DESCARTADO IA] {title} ({price:.0f}€) -> {reason}")
                             if flash_msg:
                                 resolve_flash_discord_alert(flash_msg, approved=False, reason=reason, title=title, price=price, item_url=item.get("url", ""))
+                            _emit_pipeline("vision_reject")
                             continue
 
                         # FASE 3: Verificación CeX España en vivo + Regla de Amortización + Rating Determinista
                         cex_data = None
+                        t["cex"] = time.perf_counter()
                         if mode == "resale":
                             cex_query = ai_data.get("cex_search_query") or ai_data.get("identified_model") or q
                             cex_data = fetch_cex_live(
@@ -577,7 +604,6 @@ def main():
 
                             # BUNDLE SUM ENGINE (Task 4.2): Valoración acumulativa de juegos/mandos extra en CeX
                             bundled_q = ai_data.get("bundled_games_queries", [])
-                            radar_id = (target or {}).get("id", "")
                             is_console = (radar_id in CONSOLE_RADAR_IDS) or any(c_id in radar_id for c_id in CONSOLE_RADAR_IDS)
                             if is_console and bundled_q and cex_data and isinstance(cex_data, dict):
                                 bundle_bonus = evaluate_bundle_cex_bonus(conn, bundled_q)
@@ -590,6 +616,7 @@ def main():
                                     cex_data["box_name"] = f"{cex_data.get('box_name', cex_query)} + {len(matched_extras)} extra(s)"
                                     ai_data["bundled_matches"] = matched_extras
                                     print(f"[BUNDLE SUM ENGINE] Añadido bonus de {len(matched_extras)} extra(s) (+{extra_cash:.1f}€ cash / +{extra_voucher:.1f}€ vale) a '{cex_query}'")
+                        t["cex_end"] = time.perf_counter()
 
                         ai_data["fraud_risk_score"] = int(fraud_eval.get("risk", 0) or 0)
                         approved, score, optimal_price, best_net_profit, charger_penalty, reject_msg = evaluate_deal_math_and_score(
@@ -601,10 +628,13 @@ def main():
                             print(f"[{plat} DESCARTADO - {score}/10] {title} ({price:.0f}€ | Casa: {landed_cost:.0f}€) -> {reject_msg}")
                             if flash_msg:
                                 resolve_flash_discord_alert(flash_msg, approved=False, reason=reject_msg, title=title, price=price, item_url=item.get("url", ""))
+                            _emit_pipeline("math_reject")
                             continue
 
                         kit_folder = build_kit_folder_name(plat, item_id, ai_data)
                         print(f"[🔥 CHOLLO {plat} ({score}/10) +{best_net_profit:.0f}€] {title} ({landed_cost:.0f}€) -> Alertando Discord!")
+                        t["alert"] = time.perf_counter()
+                        ai_data["_pipeline_ms"] = compute_pipeline_ms(t)
                         send_discord_alert(
                             conn=conn,
                             platform=plat,
@@ -636,6 +666,17 @@ def main():
                             seller=item.get("seller"),
                             item_vec=item_vec
                         )
+                        t["alert_end"] = time.perf_counter()
+                        ms_final = _emit_pipeline("alerted")
+                        try:
+                            conn.execute(
+                                "UPDATE deals SET alert_context_json = json_set(COALESCE(NULLIF(alert_context_json,''),'{}'), "
+                                "'$.pipeline_ms.ms_alert', ?) WHERE deal_id = ?",
+                                (ms_final["ms_alert"], f"{plat.upper()[:3]}_{item_id}"[:40]),
+                            )
+                            conn.commit()
+                        except Exception:
+                            pass
                         timing.item_processing_sleep()
 
             time.sleep(random.uniform(0.6, 1.4))
