@@ -68,6 +68,9 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/sniper.db" if os.path.exists("/app") e
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.json" if os.path.exists("/app/config.json") else "./config.json")
 KITS_DIR = os.getenv("KITS_DIR", "/app/kits" if os.path.exists("/app") else "./kits")
 
+# Marca de versión del pipeline: se guarda en cada alerta (alert_context_json). Incrementar en cada despliegue.
+PIPELINE_VERSION = "2026.11.11-f1"
+
 AI_DAILY_BUDGET_USD = float(os.getenv("AI_DAILY_BUDGET_USD", "0.10"))
 AI_PRESCREEN_SHADOW_MODE = os.getenv("AI_PRESCREEN_SHADOW_MODE", "false").strip().lower() in ("true", "1", "yes")
 
@@ -4885,6 +4888,7 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
             "fraud_banner": re.sub(r"\s+", " ", str(fraud_banner or ""))[:400],
             "country_tag": country_tag,
             "alert_sent_at_utc": datetime.utcnow().isoformat(timespec="seconds"),
+            "pipeline_version": PIPELINE_VERSION,
         }
         if extra:
             ctx.update(extra)

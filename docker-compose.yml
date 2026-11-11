@@ -23,7 +23,6 @@ services:
       - ./bot.py:/app/bot.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
-      - ./tests:/app/tests:ro
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
@@ -53,7 +52,6 @@ services:
       - ./vinted_sniper.py:/app/vinted_sniper.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
-      - ./tests:/app/tests:ro
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
@@ -83,7 +81,6 @@ services:
       - ./multi_sniper.py:/app/multi_sniper.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
-      - ./tests:/app/tests:ro
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
@@ -115,7 +112,6 @@ services:
       - ./outcome_tracker.py:/app/outcome_tracker.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
-      - ./tests:/app/tests:ro
     healthcheck:
       test: ["CMD", "python", "healthcheck.py"]
       interval: 30s
