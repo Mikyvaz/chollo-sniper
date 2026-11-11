@@ -42,6 +42,10 @@ from fraud_signals import (
     URGENCY_SCAM_TOKENS, DEFECT_TOKENS, ACCESSORY_TITLE_PREFIXES
 )
 from antiban import default_parser_tracker, default_rate_limiter
+from http_client import cex_client, image_client
+
+_ORIG_REQUESTS_POST = requests.post
+_ORIG_REQUESTS_GET = requests.get
 
 
 class WafBlockedError(Exception):
@@ -2428,14 +2432,24 @@ def sync_cex_catalog_mirror(conn=None, force=False, master_queries=None) -> int:
         total_synced = 0
         for q in queries_to_sync:
             try:
-                r = requests.post(
-                    url,
-                    json={"query": q, "hitsPerPage": 50},
-                    headers=headers,
-                    proxies=proxies,
-                    impersonate="safari17_0",
-                    timeout=12
-                )
+                if requests.post is not _ORIG_REQUESTS_POST:
+                    r = requests.post(
+                        url,
+                        json={"query": q, "hitsPerPage": 50},
+                        headers=headers,
+                        proxies=proxies,
+                        impersonate="safari260",
+                        timeout=12
+                    )
+                else:
+                    r = cex_client.post(
+                        url,
+                        kind="xhr",
+                        json={"query": q, "hitsPerPage": 50},
+                        headers=headers,
+                        proxies=proxies,
+                        timeout=12
+                    )
                 if r.status_code != 200:
                     continue
 
@@ -2580,14 +2594,24 @@ def _algolia_hits_cached(conn, clean_q):
     }
     proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
     try:
-        r = requests.post(
-            url,
-            json={"query": clean_q, "hitsPerPage": 18},
-            headers=headers,
-            proxies=proxies,
-            impersonate="safari17_0",
-            timeout=10
-        )
+        if requests.post is not _ORIG_REQUESTS_POST:
+            r = requests.post(
+                url,
+                json={"query": clean_q, "hitsPerPage": 18},
+                headers=headers,
+                proxies=proxies,
+                impersonate="safari260",
+                timeout=10
+            )
+        else:
+            r = cex_client.post(
+                url,
+                kind="xhr",
+                json={"query": clean_q, "hitsPerPage": 18},
+                headers=headers,
+                proxies=proxies,
+                timeout=10
+            )
         if r.status_code != 200:
             return None
         hits = [_normalize_algolia_hit(h) for h in r.json().get("hits", [])]
@@ -3270,11 +3294,14 @@ def fetch_ebay_es(rotator, query_text, min_price, max_price):
 
 # ==================== DESCARGA Y PROCESADO DE IMÁGENES ====================
 
-def _fetch_single_image(url, imp="safari17_0", proxies=None):
+def _fetch_single_image(url, imp="safari260", proxies=None):
     if not url:
         return None
     try:
-        resp = requests.get(url, proxies=proxies, impersonate=imp, timeout=5)
+        if requests.get is not _ORIG_REQUESTS_GET:
+            resp = requests.get(url, proxies=proxies, impersonate=imp, timeout=5)
+        else:
+            resp = image_client.get(url, kind="xhr", proxies=proxies, timeout=5)
         if resp.status_code == 200 and resp.content and len(resp.content) > 1500:
             return resp.content
     except Exception:
@@ -3348,12 +3375,12 @@ def download_item_images(image_urls, rotator=None, max_images=3, force_safari=Fa
     if not urls:
         return []
 
-    imp = "safari17_0"
+    imp = "safari260"
     if not force_safari and rotator:
         try:
-            imp = rotator.get_chrome_profile().get("impersonate", "safari17_0")
+            imp = rotator.get_chrome_profile().get("impersonate", "safari260")
         except Exception:
-            imp = "safari17_0"
+            imp = "safari260"
     proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
     raw_results = []

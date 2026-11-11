@@ -27,6 +27,7 @@ except ImportError:
 
 from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, _negated as _is_negated
 from text_rules import redact_secrets as _redact
+from http_client import wallapop_client, vinted_doc_client, PlatformClient
 
 # ==================== TOKENS CATEGORIZADOS ====================
 
@@ -383,14 +384,10 @@ _SELLER_CACHE_MAX_SIZE = 2000
 _THREAD_LOCAL_HTTP = threading.local()
 
 def _get_thread_local_session():
-    sess = getattr(_THREAD_LOCAL_HTTP, "session", None)
-    if sess is None:
-        try:
-            sess = requests.Session(impersonate="chrome124")
-        except Exception:
-            sess = requests.Session()
-        _THREAD_LOCAL_HTTP.session = sess
-    return sess
+    return wallapop_client
+
+
+_ORIG_GET_THREAD_LOCAL_SESSION = _get_thread_local_session
 
 def _set_cached_seller_profile(key, profile):
     now = time.time()
@@ -530,8 +527,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
             if reviews_count is None or rating is None:
                 try:
                     stats_url = f"https://api.wallapop.com/api/v3/users/{seller_id}/stats"
-                    st_headers = {"User-Agent": "Mozilla/5.0", "X-DeviceOS": "0"}
-                    st_r = sess.get(stats_url, headers=st_headers, timeout=2.5)
+                    st_r = sess.get(stats_url, timeout=2.5)
                     if st_r.status_code == 200:
                         wallapop_http_ok = True
                         st_data = st_r.json()
@@ -577,7 +573,12 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
             low_rep = True
         # También se consulta si falta la antigüedad en vendedores con poca reputación (los que importan para el fraude)
         if seller_id and (reviews_count is None or rating is None or (joined_days is None and low_rep)):
-            sess = http_session or _get_thread_local_session()
+            if http_session is not None:
+                sess = http_session
+            elif _get_thread_local_session is not _ORIG_GET_THREAD_LOCAL_SESSION:
+                sess = _get_thread_local_session()
+            else:
+                sess = vinted_doc_client
             vinted_ok = False
             try:
                 url = f"https://www.vinted.es/api/v2/users/{seller_id}"
@@ -585,7 +586,10 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                 if r.status_code in (401, 403) and not getattr(sess, "_vinted_warmed", False):
                     # Sin cookies de vinted.es la API rechaza la petición: visitar la portada una vez y reintentar
                     try:
-                        sess.get("https://www.vinted.es/", timeout=8)
+                        if isinstance(sess, PlatformClient):
+                            sess.get("https://www.vinted.es/", kind="document", timeout=8)
+                        else:
+                            sess.get("https://www.vinted.es/", timeout=8)
                         sess._vinted_warmed = True
                     except Exception:
                         pass

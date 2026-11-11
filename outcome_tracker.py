@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from curl_cffi import requests
 
 from core_engine import get_db, touch_heartbeat, PROXY_URL, _ebay_mgr
+from http_client import PlatformClient, NATIVE_PROFILE_HEADERS
 
 SUPPORTED_PLATFORMS = ("WALLAPOP", "VINTED", "EBAY")
 CHECKPOINTS_MIN = [15, 60, 180, 360, 1440, 4320]
@@ -34,8 +35,7 @@ BACKFILL_DAYS = int(os.environ.get("OUTCOME_BACKFILL_DAYS", "14"))
 LOOP_SLEEP = 30
 BATCH = 25
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-      "Chrome/131.0.0.0 Safari/537.36")
+UA = NATIVE_PROFILE_HEADERS["chrome152"]["User-Agent"]
 _BS = chr(92)
 
 
@@ -186,11 +186,14 @@ def _wallapop():
     global _wallapop_session
     if _wallapop_session is None:
         proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-        _wallapop_session = requests.Session(impersonate="chrome", proxies=proxies)
-        _wallapop_session.headers.update({
-            "User-Agent": UA, "Accept": "application/json, text/plain, */*", "X-DeviceOS": "0",
-            "Accept-Language": "es-ES,es;q=0.9", "Origin": "https://es.wallapop.com", "Referer": "https://es.wallapop.com/",
-        })
+        _wallapop_session = PlatformClient(
+            "WALLAPOP",
+            impersonate="chrome152",
+            origin="https://es.wallapop.com",
+            referer="https://es.wallapop.com/",
+            extra_headers={"X-DeviceOS": "0"},
+            proxies=proxies,
+        )
     return _wallapop_session
 
 
@@ -198,11 +201,18 @@ def _vinted(force=False):
     global _vinted_session, _vinted_session_at
     if force or _vinted_session is None or time.time() - _vinted_session_at > 1800:
         proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-        _vinted_session = requests.Session(impersonate="chrome", proxies=proxies)
-        _vinted_session.headers.update({"User-Agent": UA, "Accept-Language": "es-ES,es;q=0.9"})
+        if _vinted_session is None:
+            _vinted_session = PlatformClient(
+                "VINTED",
+                impersonate="chrome152",
+                referer="https://www.vinted.es/",
+                proxies=proxies,
+            )
+        else:
+            _vinted_session.rotate()
         _vinted_session_at = time.time()
         try:
-            _vinted_session.get("https://www.vinted.es/", timeout=15)
+            _vinted_session.get("https://www.vinted.es/", kind="document", timeout=15)
         except Exception:
             pass
     return _vinted_session
@@ -270,7 +280,7 @@ def parse_vinted_item_status(page_text, item_id):
 
 
 def check_vinted(item_id):
-    r = _vinted().get(f"https://www.vinted.es/items/{item_id}", timeout=15)
+    r = _vinted().get(f"https://www.vinted.es/items/{item_id}", kind="document", timeout=15)
     if r.status_code in (404, 410):
         return _result("gone", r.status_code)
     if r.status_code in (403, 429):

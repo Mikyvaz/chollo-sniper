@@ -16,6 +16,7 @@ import urllib.parse
 from curl_cffi import requests
 
 from antiban import BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker, default_rate_limiter
+from http_client import wallapop_client
 from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
     WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL, LOCAL_KEYWORDS,
@@ -161,6 +162,22 @@ def extract_image_urls(item):
     return urls
 
 
+_ORIG_REQUESTS_GET = requests.get
+
+
+def _wallapop_http_get(url, headers, proxies, impersonate, timeout):
+    if requests.get is not _ORIG_REQUESTS_GET:
+        return requests.get(url, headers=headers, proxies=proxies, impersonate=impersonate, timeout=timeout)
+    return wallapop_client.get(
+        url,
+        kind="xhr",
+        headers={"Host": "api.wallapop.com"},
+        proxies=proxies,
+        timeout=timeout,
+        record_metrics=False,
+    )
+
+
 def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=True):
     if health_monitor.is_in_cooldown():
         return []
@@ -193,12 +210,12 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
 
     t0 = time.time()
     try:
-        r = requests.get(url, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
+        r = _wallapop_http_get(url, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
         default_rate_limiter.record_request("WALLAPOP", time.time() - t0, r.status_code)
         if r.status_code in (400, 404, 410):
             url_fallback = f"https://api.wallapop.com/api/v3/general/search?{urllib.parse.urlencode(params)}"
             t0_fb = time.time()
-            r = requests.get(url_fallback, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
+            r = _wallapop_http_get(url_fallback, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
             default_rate_limiter.record_request("WALLAPOP", time.time() - t0_fb, r.status_code)
 
         if r.status_code in (401, 403, 429):
@@ -208,6 +225,7 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
             if should_cd:
                 print(f"[COOLDOWN ANTIBAN] Wallapop HTTP {r.status_code}. Registrado cooldown de {cd_secs // 60} min (estado no bloqueante)...")
                 rotator.rotate()
+                wallapop_client.rotate()
             return []
         elif r.status_code == 200:
             health_monitor.handle_http_response(200, query=keywords)
@@ -227,7 +245,7 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
         if fetch_second_page_if_sparse and len(items) < 8 and next_token:
             try:
                 url_p2 = f"https://api.wallapop.com/api/v3/search?next_page={urllib.parse.quote(next_token)}"
-                r2 = requests.get(url_p2, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=12)
+                r2 = _wallapop_http_get(url_p2, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=12)
                 if r2.status_code == 200:
                     d2 = r2.json()
                     items_p2 = d2.get("data", {}).get("section", {}).get("payload", {}).get("items") or []

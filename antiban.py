@@ -26,41 +26,25 @@ HEALTH_WEBHOOK_URL = os.environ.get(
 # ==================== POOL DE PERFILES DE NAVEGADOR (100% COHERENTES CON JA3/TLS) ====================
 BROWSER_PROFILES = [
     {
-        "name": "Chrome 131 (Win 11 x64)",
-        "impersonate": "chrome131",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "name": "Chrome 152 (Win 11 x64)",
+        "impersonate": "chrome152",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Not A(Brand";v="8", "Chromium";v="152", "Google Chrome";v="152"',
         "sec_ch_ua_platform": '"Windows"',
         "sec_ch_ua_mobile": "?0"
     },
     {
-        "name": "Chrome 124 (Win 11 x64)",
-        "impersonate": "chrome124",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec_ch_ua_platform": '"Windows"',
-        "sec_ch_ua_mobile": "?0"
-    },
-    {
-        "name": "Chrome 131 (macOS Sequoia)",
-        "impersonate": "chrome131",
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "name": "Chrome 152 (macOS Sequoia)",
+        "impersonate": "chrome152_macos",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Not A(Brand";v="8", "Chromium";v="152", "Google Chrome";v="152"',
         "sec_ch_ua_platform": '"macOS"',
         "sec_ch_ua_mobile": "?0"
     },
     {
-        "name": "Chrome 124 (macOS Sonoma M-Series)",
-        "impersonate": "chrome124",
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec_ch_ua_platform": '"macOS"',
-        "sec_ch_ua_mobile": "?0"
-    },
-    {
-        "name": "Safari 17.0 (macOS Sonoma)",
-        "impersonate": "safari17_0",
-        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        "name": "Safari 26.0 (macOS)",
+        "impersonate": "safari260",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
         "sec_ch_ua": None,
         "sec_ch_ua_platform": None,
         "sec_ch_ua_mobile": None
@@ -87,7 +71,7 @@ class BrowserProfileRotator:
 
     @staticmethod
     def get_safari_impersonation():
-        return "safari17_0"
+        return "safari260"
 
     def step_round(self):
         self.rounds_count += 1
