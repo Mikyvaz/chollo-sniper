@@ -53,6 +53,7 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 ALERTS_CHANNEL_ID = os.getenv("ALERTS_CHANNEL_ID", "1564559740434911366").strip()
 ALERT_USER_ID = os.getenv("ALERT_USER_ID", "").strip()
 NTFY_TOPIC_URL = os.getenv("NTFY_TOPIC_URL", "").strip()
+NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -1590,15 +1591,18 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         ]
         body = "\n".join(body_lines)
 
-        headers = {
-            "Title": title_header,
-            "Click": clean_url,
-            "Actions": f"view, Comprar Ahora, {clean_url}, clear=true",
-            "Priority": priority,
-            "Tags": "zap,moneybag"
+        base, topic = NTFY_TOPIC_URL.rstrip("/").rsplit("/", 1)
+        payload = {
+            "topic": topic,
+            "title": title_header[:250],
+            "message": body[:4000],
+            "click": clean_url,
+            "priority": int(priority),
+            "tags": ["moneybag"],
+            "actions": [{"action": "view", "label": "Abrir anuncio", "url": clean_url, "clear": True}],
         }
-
-        resp = HTTP_SESSION.post(NTFY_TOPIC_URL, data=body.encode("utf-8"), headers=headers, timeout=2.0)
+        headers = {"Authorization": f"Bearer {NTFY_TOKEN}"} if NTFY_TOKEN else {}
+        resp = HTTP_SESSION.post(base, json=payload, headers=headers, timeout=3)
         return resp.status_code in (200, 201)
     except Exception as e:
         print(f"[WARN] Error enviando ntfy alert: {_redact(e)}")
