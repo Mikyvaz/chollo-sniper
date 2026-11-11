@@ -195,14 +195,16 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
     try:
         r = requests.get(url, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
         default_rate_limiter.record_request("WALLAPOP", time.time() - t0, r.status_code)
-        if r.status_code != 200:
+        if r.status_code in (400, 404, 410):
             url_fallback = f"https://api.wallapop.com/api/v3/general/search?{urllib.parse.urlencode(params)}"
             t0_fb = time.time()
             r = requests.get(url_fallback, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=15)
             default_rate_limiter.record_request("WALLAPOP", time.time() - t0_fb, r.status_code)
 
-        if r.status_code in (403, 429):
-            should_cd, cd_secs = health_monitor.handle_http_response(r.status_code, url=url, query=keywords)
+        if r.status_code in (401, 403, 429):
+            retry_after = (getattr(r, "headers", None) or {}).get("Retry-After")
+            should_cd, cd_secs = health_monitor.handle_http_response(
+                r.status_code, url=url, query=keywords, retry_after=retry_after)
             if should_cd:
                 print(f"[COOLDOWN ANTIBAN] Wallapop HTTP {r.status_code}. Registrado cooldown de {cd_secs // 60} min (estado no bloqueante)...")
                 rotator.rotate()

@@ -359,7 +359,16 @@ class AntiBanHealthMonitor:
         except Exception as e:
             print(f"[HEALTH MONITOR ERROR] Fallo enviando a Discord: {_redact(e)}")
 
-    def handle_http_response(self, status_code, url="", query=""):
+    @staticmethod
+    def _parse_retry_after(value, cap=6 * 3600):
+        """Segundos de una cabecera Retry-After numérica; None si falta, es una fecha o no es válida."""
+        try:
+            secs = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return min(secs, cap) if secs > 0 else None
+
+    def handle_http_response(self, status_code, url="", query="", retry_after=None):
         if status_code in (429, 403, 401):
             self.consecutive_blocks += 1
             self.ok_streak_since_block = 0
@@ -373,7 +382,12 @@ class AntiBanHealthMonitor:
             else:
                 cooldown_secs = 1800  # 30 minutos
 
-            self.cooldown_until = time.time() + cooldown_secs
+            # Retry-After en segundos: solo puede alargar el cooldown, nunca acortarlo.
+            ra = self._parse_retry_after(retry_after)
+            if ra:
+                cooldown_secs = max(cooldown_secs, ra)
+
+            self.cooldown_until = max(self.cooldown_until, time.time() + cooldown_secs)
             mins = cooldown_secs // 60
             block_type = "Rate Limit (HTTP 429)" if status_code == 429 else f"Acceso Denegado / WAF (HTTP {status_code})"
 
