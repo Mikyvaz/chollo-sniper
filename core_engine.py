@@ -33,7 +33,7 @@ _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
 HTTP_SESSION.mount("https://", _adapter)
 HTTP_SESSION.mount("http://", _adapter)
 
-from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, classify_console_listing
+from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, classify_console_listing, redact_secrets as _redact_secrets
 from fraud_signals import (
     evaluate_fraud_risk, log_fraud_event, detect_phone_number,
     calculate_dhash, check_and_record_image_hash,
@@ -865,9 +865,10 @@ def ai_gateway_call(
                             "maxOutputTokens": model_max_tokens
                         }
                     }
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                    gemini_headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
                     try:
-                        resp = HTTP_SESSION.post(url, json=payload, timeout=timeout)
+                        resp = HTTP_SESSION.post(url, json=payload, headers=gemini_headers, timeout=timeout)
                         if resp.status_code == 200:
                             resp_json = resp.json()
                             usage = resp_json.get("usageMetadata", {})
@@ -897,9 +898,9 @@ def ai_gateway_call(
                         elif resp.status_code == 404:
                             continue
                         else:
-                            print(f"[WARN AI_GATEWAY] HTTP {resp.status_code} en {model}: {resp.text[:120]}")
+                            print(f"[WARN AI_GATEWAY] HTTP {resp.status_code} en {model}: {_redact(resp.text[:120])}")
                     except Exception as e:
-                        print(f"[WARN AI_GATEWAY] Excepción Gemini ({model}): {e}")
+                        print(f"[WARN AI_GATEWAY] Excepción Gemini ({model}): {_redact(e)}")
                         continue
 
             # 7. Intento con OpenRouter Fallback
@@ -941,7 +942,7 @@ def ai_gateway_call(
                                 used_model = fallback_model
                                 break
                     except Exception as e:
-                        print(f"[WARN AI_GATEWAY] Excepción OpenRouter ({fallback_model}): {e}")
+                        print(f"[WARN AI_GATEWAY] Excepción OpenRouter ({fallback_model}): {_redact(e)}")
                         continue
 
             # 8. Si obtuvimos resultado válido de una API real, guardar en ai_prompt_cache
@@ -1600,7 +1601,7 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         resp = HTTP_SESSION.post(NTFY_TOPIC_URL, data=body.encode("utf-8"), headers=headers, timeout=2.0)
         return resp.status_code in (200, 201)
     except Exception as e:
-        print(f"[WARN] Error enviando ntfy alert: {e}")
+        print(f"[WARN] Error enviando ntfy alert: {_redact(e)}")
         return False
 
 
@@ -3415,7 +3416,7 @@ def prescreen_item_text(platform, title, description, price, landed_cost, target
         print(f"[PRESCREEN] Cortafuegos IA diario activo: {e}. Fail-open.")
         return "proceed", "budget_exceeded_fail_open", "baja", False
     except Exception as e:
-        print(f"[PRESCREEN] Error en llamada ai_gateway_call ({platform}): {e}")
+        print(f"[PRESCREEN] Error en llamada ai_gateway_call ({platform}): {_redact(e)}")
 
     if not res_obtained:
         return "proceed", "ai_unavailable_fail_open", "baja", False
@@ -3889,7 +3890,7 @@ def analyze_and_generate_kit(
             health_monitor.send_health_embed("🚨 Cortafuegos Presupuesto IA", str(e), 0xE74C3C)
         return _budget_pause_verdict(clean_title_str)
     except Exception as e:
-        print(f"[ANALYZE] Excepción en llamada de visión ({platform}): {e}")
+        print(f"[ANALYZE] Excepción en llamada de visión ({platform}): {_redact(e)}")
 
     if parsed_result and isinstance(parsed_result, dict):
         parsed_result = repair_and_parse_json(json.dumps(parsed_result, ensure_ascii=False), schema_defaults=vision_schema_defaults)
@@ -5061,7 +5062,7 @@ def _redact(text):
     t = re.sub(r"(Bot\s+)[\w\-.]+", r"\1<redacted>", t)
     if BOT_TOKEN:
         t = t.replace(BOT_TOKEN, "<redacted>")
-    return t
+    return _redact_secrets(t)
 
 
 def _discord_retry_after(resp):
@@ -5296,7 +5297,7 @@ def resolve_flash_discord_alert(
                 payload={"content": stop_push_content, "components": dismiss_comp},
                 fallback_content=stop_push_content, timeout=6)
         except Exception as e:
-            print(f"[WARN] Error enviando notificación Push de rechazo (Bot): {e}")
+            print(f"[WARN] Error enviando notificación Push de rechazo (Bot): {_redact(e)}")
 
     elif via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
         base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
@@ -5306,7 +5307,7 @@ def resolve_flash_discord_alert(
             _discord_post_with_fallback(WEBHOOK_URL, payload={"content": stop_push_content},
                                         fallback_content=stop_push_content, timeout=6)
         except Exception as e:
-            print(f"[WARN] Error enviando notificación Push de rechazo (Webhook): {e}")
+            print(f"[WARN] Error enviando notificación Push de rechazo (Webhook): {_redact(e)}")
 
 
 def send_discord_alert(

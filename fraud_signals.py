@@ -26,6 +26,7 @@ except ImportError:
     import requests
 
 from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, _negated as _is_negated
+from text_rules import redact_secrets as _redact
 
 # ==================== TOKENS CATEGORIZADOS ====================
 
@@ -331,7 +332,7 @@ def migrate_seller_reputation(conn):
     except Exception as e:
         # Otro proceso pudo migrar a la vez (columna duplicada): no es un error
         if "duplicate column" not in str(e).lower():
-            print(f"[WARN] Migración seller_reputation: {e}")
+            print(f"[WARN] Migración seller_reputation: {_redact(e)}")
 
 
 def init_fraud_tables(conn):
@@ -1275,4 +1276,4 @@ def log_fraud_event(conn, platform, item_id, title, price, risk, hits):
         )
         conn.commit()
     except Exception as e:
-        print(f"[WARN] Error registrando en fraud_log: {e}")
+        print(f"[WARN] Error registrando en fraud_log: {_redact(e)}")

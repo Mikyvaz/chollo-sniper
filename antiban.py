@@ -16,6 +16,7 @@ import threading
 from collections import deque
 from datetime import datetime
 from curl_cffi import requests
+from text_rules import redact_secrets as _redact
 
 HEALTH_WEBHOOK_URL = os.environ.get(
     "DISCORD_HEALTH_WEBHOOK_URL",
@@ -356,7 +357,7 @@ class AntiBanHealthMonitor:
         try:
             requests.post(HEALTH_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
         except Exception as e:
-            print(f"[HEALTH MONITOR ERROR] Fallo enviando a Discord: {e}")
+            print(f"[HEALTH MONITOR ERROR] Fallo enviando a Discord: {_redact(e)}")
 
     def handle_http_response(self, status_code, url="", query=""):
         if status_code in (429, 403, 401):

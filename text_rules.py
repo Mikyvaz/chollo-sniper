@@ -129,3 +129,11 @@ def classify_console_listing(title: str, radar_id: str = "") -> str:
     if _CC_ACC_ANY.search(t) and not (strong or weak or bundle):
         return "accessory_only"
     return "console" if (strong or weak) else "unknown"
+
+
+_SECRET_RE = re.compile(r"(key=|Bearer\s+|Bot\s+|/webhooks/\d+/)[A-Za-z0-9._\-]+")
+
+
+def redact_secrets(s):
+    """Oculta API keys (`key=`), tokens Bearer/Bot y tokens de webhook de un texto antes de imprimirlo."""
+    return _SECRET_RE.sub(r"\1***", str(s))
