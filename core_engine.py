@@ -33,6 +33,7 @@ _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
 HTTP_SESSION.mount("https://", _adapter)
 HTTP_SESSION.mount("http://", _adapter)
 
+from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token
 from fraud_signals import (
     evaluate_fraud_risk, log_fraud_event, detect_phone_number,
     calculate_dhash, check_and_record_image_hash,
@@ -1762,7 +1763,7 @@ SPARE_PARTS_AND_COMPONENTS = (
     "placa base", "placa madre", "motherboard", "carte mere", "carte mère", "scheda madre",
     "mainboard", "placa logica", "placa lógica", "logic board",
     # Pantallas y recambios sueltos
-    "pantalla superior", "pantalla inferior", "pantalla repuesto", "pantalla de repuesto",
+    "pantalla repuesto", "pantalla de repuesto",
     "pantalla recambio", "pantalla de recambio", "display repuesto", "repuesto de pantalla",
     "ecran de remplacement", "schermo di ricambio", "replacement screen", "flex de pantalla",
     # Módulos, despiece y lectores
@@ -1831,13 +1832,11 @@ GAME_OR_ACC_STRONG_MARKERS = (
 )
 
 
-def _token_in_text(token, text):
-    token_l = token.lower().strip()
-    if not token_l:
+def _token_in_text(token, text, negatable=False):
+    """Coincidencia con límites de palabra (text_rules). `text` puede venir ya normalizado (norm) o no."""
+    if not (token or "").strip():
         return False
-    if len(token_l) <= 4 and " " not in token_l:
-        return re.search(rf"\b{re.escape(token_l)}\b", text) is not None
-    return token_l in text
+    return _has_token(_norm_text(text), token, negatable=negatable)
 
 
 def passes_filters(title, description, price, target, global_blacklist, extra_text="", seller=None):
@@ -1858,10 +1857,11 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
         return False
 
     text = f"{clean_title} {clean_desc} {extra_text}".lower()
+    text_n = _norm_text(text)  # una sola vez; los matchers con límites de palabra trabajan sobre él
     radar_id = target.get("id", "")
 
     # Descarte de componentes internos, placas base y despiece (P7-1)
-    if any(_token_in_text(comp, text) for comp in SPARE_PARTS_AND_COMPONENTS):
+    if _first_token(text_n, SPARE_PARTS_AND_COMPONENTS, negatable=False):
         return False
 
     # Descarte de mandos o docks sueltos en radares de consolas (P7-1)
@@ -1884,7 +1884,7 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
             if not any(k in title_l for k in ("new 3ds", "3ds xl", "2ds xl", "new 2ds")):
                 return False
 
-        if any(gt in text for gt in VIDEO_GAME_TITLES_AND_TOKENS):
+        if _first_token(text_n, VIDEO_GAME_TITLES_AND_TOKENS, negatable=False):
             has_console_hw = any(cw in title_l for cw in CONSOLE_HARDWARE_WORDS)
             if not has_console_hw:
                 return False
@@ -1904,15 +1904,14 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
             if any(imt in text for imt in intel_mac_tokens):
                 return False
             apple_silicon_tokens = ("m1", "m2", "m3", "m4", "a2348", "a2686", "apple silicon")
-            if not any(_token_in_text(ast, text) for ast in apple_silicon_tokens):
+            if not any(_has_token(text_n, ast, negatable=False) for ast in apple_silicon_tokens):
                 return False
 
-    for bad in global_blacklist + target.get("blacklist", []):
-        if _token_in_text(bad, text):
-            return False
+    if _first_token(text_n, list(global_blacklist) + list(target.get("blacklist", [])), negatable=True):
+        return False
 
     must_any = target.get("must_contain_any", [])
-    if must_any and not any(_token_in_text(word, text) for word in must_any):
+    if must_any and not _first_token(text_n, must_any, negatable=False, prefix=True):
         return False
 
     # Topes por submodelo (permitiendo hasta +30% para candidatos a Oferta/Regateo, salvo topes de bloqueo <= 5€)
@@ -1922,8 +1921,8 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
         if price > allowed_sub_max:
             match_tokens = cap_rule.get("match_any", [])
             unless_tokens = cap_rule.get("unless_any", [])
-            if any(_token_in_text(mt, text) for mt in match_tokens):
-                if not (unless_tokens and any(_token_in_text(ut, text) for ut in unless_tokens)):
+            if any(_has_token(text_n, mt, negatable=False, prefix=True) for mt in match_tokens):
+                if not (unless_tokens and any(_has_token(text_n, ut, negatable=False, prefix=True) for ut in unless_tokens)):
                     return False
 
     return True

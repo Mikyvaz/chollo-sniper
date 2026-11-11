@@ -25,6 +25,8 @@ try:
 except ImportError:
     import requests
 
+from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, _negated as _is_negated
+
 # ==================== TOKENS CATEGORIZADOS ====================
 
 GENERIC_SELLER_NAMES = {"particular", "particular milanuncios", "usuario wallapop", "vendedor", "vendedor ebay", "cash converters", "todocoleccion"}
@@ -56,7 +58,7 @@ CONTACT_EXTERNAL_PATTERNS = (
     r"(?:no\s+me\s+(?:va|funciona)\s+(?:el\s+)?chat)",
     r"regalo\s+de\s+comuni[oó]n",
     r"(?:escr[ií]beme|h[aá]blame|contacta(?:r|me)?|ll[aá]mame)\s+(?:al|por|a)?\s*[:\d\+]+",
-    r"(?:prima di acquistare|avant d['’]acheter|ne pas acheter directement|écrivez-moi|scrivimi)"
+    r"(?:prima di acquistare|avant d['’]?acheter|ne pas acheter directement|[eé]crivez-moi|scrivimi)"
 )
 
 # 3. Urgencia sospechosa y anzuelos clásicos de estafa
@@ -77,14 +79,14 @@ DEFECT_TOKENS = (
     "lector roto", "lector no funciona", "bisagra rota", "bisagra partida", "pantalla partida",
     "pantalla quebrada", "pantalla rota", "pantalla dañada", "pantalla en negro", "pantalla blanca",
     "mancha en pantalla", "lineas en pantalla", "líneas en pantalla", "cristal rajado", "cristal roto",
-    "error e18", "error e32", "luz roja", "luz azul", "joycon drift", "con drift", "sin consola",
+    "error e18", "error e32", "luz roja", "joycon drift", "con drift", "sin consola",
     "solo tablet", "solo la pantalla", "sin joycon", "sin joy-con", "sin joycons", "sin mandos",
     "cartucho vacio", "cartucho vacío", "falsificacion", "falsificación", "bloqueo icloud",
     "bloqueado icloud", "cuenta icloud", "para piezas", "para reparar", "a reparar", "averiado",
     "averiada", "defectuoso", "defectuosa", "tactil no funciona", "táctil no funciona",
     "solo la consola no", "pantalla superior a reemplazar", "placa base", "placa madre", "motherboard",
-    "carte mere", "carte mère", "scheda madre", "despiece", "repuesto de pantalla", "pantalla superior",
-    "pantalla inferior", "flex de pantalla", "pantalla de repuesto",
+    "carte mere", "carte mère", "scheda madre", "despiece", "repuesto de pantalla",
+    "flex de pantalla", "pantalla de repuesto",
     # Francés
     "hors service", "pour pieces", "pour pièces", "en panne", "ne fonctionne pas", "ne s'allume pas",
     "ne charge pas", "ecran hs", "écran hs", "ecran casse", "écran cassé", "ecran fissure",
@@ -102,6 +104,14 @@ DEFECT_TOKENS = (
     "for parts", "not working", "broken screen", "cracked screen", "faulty", "spares or repair",
     "no joycons", "tablet only"
 )
+
+# Reglas contextuales de defecto (regex sobre texto normalizado; no negables, peso 4)
+DEFECT_CONTEXT_PATTERNS = tuple(re.compile(p) for p in (
+    r"(?<!\w)(?:pantalla|ecran|schermo)(?: (?:superior|inferior|de arriba|de abajo))? "
+    r"(?:rota|partida|rajada|quebrada|danada|con (?:lineas|manchas))(?!\w)",
+    r"(?<!\w)luz azul (?:de la muerte|parpade\w*|intermitente)(?!\w)",
+    r"(?<!\w)icloud (?:bloqueado|activo|vinculado)(?!\w)|(?<!\w)bloqueado por icloud(?!\w)|(?<!\w)con cuenta icloud(?!\w)",
+))
 
 # 5. Prefijos y títulos que delatan accesorios o cajas vacías
 ACCESSORY_TITLE_PREFIXES = (
@@ -969,6 +979,7 @@ def evaluate_fraud_risk(
         seller_obj = seller
 
     text = f"{clean_title} {clean_desc}".lower()
+    text_n = _norm_text(text)
     hits = []
 
     # 1. Teléfono normal o camuflado
@@ -983,7 +994,7 @@ def evaluate_fraud_risk(
 
     # 2. Canales externos (WhatsApp, Telegram, email, etc.)
     for pat in CONTACT_EXTERNAL_PATTERNS:
-        if re.search(pat, text):
+        if any(not _is_negated(text_n, m.start()) for m in re.finditer(pat, text_n)):
             hits.append({
                 "code": "CONTACT_EXTERNAL",
                 "category": "contact",
@@ -993,44 +1004,37 @@ def evaluate_fraud_risk(
             break
 
     # 3. Pagos externos no protegidos con verificación de negación (P2-3)
-    for p_token in EXTERNAL_PAYMENT_TOKENS:
-        if p_token in text:
-            negation_re = re.compile(
-                rf"(?:no\s+(?:acepto|hago|uso|quiero|admito|recibo)|nada\s+de|ni\s+(?:hago|acepto|uso|quiero)?)\s*(?:[\w,]+\s+){{0,4}}{re.escape(p_token)}",
-                re.IGNORECASE,
-            )
-            if negation_re.search(text):
-                continue
-
-            hits.append({
-                "code": "PAYMENT_EXTERNAL",
-                "category": "payment",
-                "label": f"Pago externo no protegido detectado ('{p_token}')",
-                "weight": 4
-            })
-            break
+    p_token = _first_token(text_n, EXTERNAL_PAYMENT_TOKENS)
+    if p_token is not None:
+        hits.append({
+            "code": "PAYMENT_EXTERNAL",
+            "category": "payment",
+            "label": f"Pago externo no protegido detectado ('{p_token}')",
+            "weight": 4
+        })
 
     # 4. Urgencia sospechosa
-    for u_token in URGENCY_SCAM_TOKENS:
-        if u_token in text:
-            hits.append({
-                "code": "SCAM_URGENCY",
-                "category": "urgency",
-                "label": f"Patrón de urgencia/traslado ('{u_token}')",
-                "weight": 2
-            })
-            break
+    u_token = _first_token(text_n, URGENCY_SCAM_TOKENS)
+    if u_token is not None:
+        hits.append({
+            "code": "SCAM_URGENCY",
+            "category": "urgency",
+            "label": f"Patrón de urgencia/traslado ('{u_token}')",
+            "weight": 2
+        })
 
-    # 5. Defectos o averías de hardware
-    for d_token in DEFECT_TOKENS:
-        if d_token in text:
-            hits.append({
-                "code": "PRODUCT_DEFECT",
-                "category": "defect",
-                "label": f"Defecto o avería detectada ('{d_token}')",
-                "weight": 4
-            })
-            break
+    # 5. Defectos o averías de hardware (tokens con negación + reglas contextuales)
+    defect_hit = _first_token(text_n, DEFECT_TOKENS)
+    if defect_hit is None:
+        ctx_m = next((m for m in (p.search(text_n) for p in DEFECT_CONTEXT_PATTERNS) if m), None)
+        defect_hit = ctx_m.group(0) if ctx_m else None
+    if defect_hit is not None:
+        hits.append({
+            "code": "PRODUCT_DEFECT",
+            "category": "defect",
+            "label": f"Defecto o avería detectada ('{defect_hit}')",
+            "weight": 4
+        })
 
     # 6. Precio imposible respecto a CeX
     cex_val = float(cex_cash or 0.0)

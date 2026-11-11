@@ -31,7 +31,6 @@
     "averiada",
     "bloqueado",
     "bloqueada",
-    "icloud",
     "mdm",
     "bypass",
     "sin funcionar",
@@ -944,7 +943,6 @@
         "m2"
       ],
       "blacklist": [
-        "icloud",
         "bloqueado",
         "mdm",
         "bypass",
@@ -1063,12 +1061,9 @@
         "just dance",
         "fifa",
         "solo mando",
-        "mando switch",
-        "mando pro",
         "solo joycon",
         "mandos sueltos",
         "joycon suelto",
-        "joy-con",
         "solo dock",
         "dock suelto"
       ],
@@ -1589,7 +1584,6 @@
         "paypal",
         "bizum",
         "solo mando",
-        "mando ps5",
         "dualsense suelto",
         "solo lector",
         "lector de discos para",
@@ -1597,11 +1591,8 @@
         "carcasa ps5",
         "placas laterales",
         "soporte vertical",
-        "juego ps5",
-        "juegos ps5",
         "hdmi roto",
-        "baneada",
-        "ps4"
+        "baneada"
       ],
       "shipping_tier": "heavy"
     }
