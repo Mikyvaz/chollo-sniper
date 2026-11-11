@@ -452,7 +452,8 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                 cached_time, cached_profile = _SELLER_PROFILE_CACHE[cache_key]
                 if (now - cached_time) < 1800:
                     seller.update(cached_profile)
-                    item_data["seller_reviews_count"] = cached_profile.get("seller_reviews_count", 0)
+                    item_data["seller_reviews_count"] = cached_profile.get("seller_reviews_count")
+                    item_data["seller_profile_status"] = cached_profile.get("seller_profile_status", "ok")
                     item_data["seller_rating"] = cached_profile.get("seller_rating")
                     item_data["seller_trust_badge"] = cached_profile.get("seller_trust_badge", "")
                     return cached_profile
@@ -474,11 +475,13 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
             "seller_joined_days": 3650.0,
             "seller_verified": True,
             "seller_trust_badge": "🟢 Tienda Oficial Cash Converters (Garantía 3 años)",
+            "seller_profile_status": "ok",
             "platform": "CASHCONVERTERS"
         }
         _set_cached_seller_profile(cache_key, profile)
         seller.update(profile)
         item_data["seller_reviews_count"] = 999
+        item_data["seller_profile_status"] = "ok"
         item_data["seller_rating"] = 5.0
         item_data["seller_trust_badge"] = profile["seller_trust_badge"]
         return profile
@@ -625,10 +628,11 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                     print(f"[SELLER ENRICH] Vinted no devolvió el perfil de {seller_id}: valoraciones desconocidas")
 
     # Normalizar valores
+    # T1.4: None = «no se obtuvo el dato»; 0 solo si la plataforma lo confirmó.
     try:
-        reviews_count = int(reviews_count) if reviews_count is not None else 0
+        reviews_count = int(reviews_count) if reviews_count is not None else None
     except Exception:
-        reviews_count = 0
+        reviews_count = None
 
     try:
         rating = float(rating) if rating is not None else None
@@ -647,13 +651,22 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
         elif rating > 5.0:
             rating = round(rating / 20.0, 2)
 
-    if reviews_count == 0:
+    if not reviews_count:
         rating = None
 
+    # Estado del perfil: ok (dato obtenido), unavailable (error HTTP/red) o not_applicable (la tienda no expone reputación)
+    if reviews_count is not None:
+        profile_status = "ok"
+    elif platform in ("WALLAPOP", "VINTED"):
+        profile_status = "unavailable"
+        should_cache = False  # no fijar durante 30 min un perfil que no se pudo consultar
+    else:
+        profile_status = "not_applicable"
+
     badge = ""
-    if reviews_count >= 5 and rating is not None and rating >= 4.5:
+    if reviews_count is not None and reviews_count >= 5 and rating is not None and rating >= 4.5:
         badge = f"🟢 Vendedor Fiable ({reviews_count} val., {rating:.1f}⭐)"
-    elif reviews_count >= 2 and rating is not None and rating >= 4.0:
+    elif reviews_count is not None and reviews_count >= 2 and rating is not None and rating >= 4.0:
         badge = f"🟢 Vendedor Verificado ({reviews_count} val., {rating:.1f}⭐)"
 
     profile = {
@@ -666,6 +679,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
         "seller_joined_days": joined_days,
         "seller_verified": bool(verified),
         "seller_trust_badge": badge,
+        "seller_profile_status": profile_status,
         "platform": platform
     }
     profile.update(extra)
@@ -675,6 +689,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
 
     seller.update(profile)
     item_data["seller_reviews_count"] = reviews_count
+    item_data["seller_profile_status"] = profile_status
     item_data["seller_rating"] = rating
     item_data["seller_trust_badge"] = badge
 
@@ -748,8 +763,8 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
                 break
             except Exception:
                 pass
-    if reviews_count is None:
-        reviews_count = 0
+    # T1.4: reviews_count None = perfil no consultado (no es lo mismo que 0 valoraciones confirmadas)
+    profile_status = str(seller.get("seller_profile_status") or "").lower()
 
     rating = None
     for k in ("seller_rating", "rating", "scoring", "feedback_reputation"):
@@ -772,7 +787,7 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
     verified = bool(seller.get("seller_verified") or seller.get("verified", False))
 
     # La antigüedad estimada por la verificación (Vinted) es solo una cota: con historial real no se usa
-    if joined_days is not None and seller.get("seller_age_source") == "verification" and reviews_count >= 3:
+    if joined_days is not None and seller.get("seller_age_source") == "verification" and reviews_count is not None and reviews_count >= 3:
         joined_days = None
 
     def _int_or_none(v):
@@ -790,12 +805,17 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
         if rating > 5.0:
             rating = round(rating / 20.0, 2)
 
-    if reviews_count == 0:
+    if not reviews_count:
         rating = None
 
     hits = []
     block_flash = False
     seller_trust_badge = ""
+
+    if reviews_count is None and profile_status == "unavailable":
+        hits.append({"code": "SELLER_PROFILE_UNKNOWN", "category": "seller",
+                     "label": "Perfil del vendedor no verificado: la plataforma no respondió", "weight": 1})
+        block_flash = True
 
     if seller.get("seller_banned"):
         hits.append({"code": "SELLER_BANNED", "category": "seller",
@@ -856,7 +876,7 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
                 })
 
     # Regla C — Vendedor con Mala Reputación Real (Solo si reviews >= 2)
-    if reviews_count >= 2 and rating is not None and rating < 4.0:
+    if reviews_count is not None and reviews_count >= 2 and rating is not None and rating < 4.0:
         weight = 3 if rating < 3.5 else 2
         hits.append({
             "code": "SELLER_LOW_RATING",
@@ -868,10 +888,10 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
 
     # Regla D — Bonus de Vendedor Fiable ("Sello Verde")
     is_trusted = False
-    if reviews_count >= 5 and rating is not None and rating >= 4.5:
+    if reviews_count is not None and reviews_count >= 5 and rating is not None and rating >= 4.5:
         seller_trust_badge = f"🟢 Vendedor Fiable ({reviews_count} val., {rating:.1f}⭐)"
         is_trusted = True
-    elif reviews_count >= 2 and rating is not None and rating >= 4.0:
+    elif reviews_count is not None and reviews_count >= 2 and rating is not None and rating >= 4.0:
         seller_trust_badge = f"🟢 Vendedor Verificado ({reviews_count} val., {rating:.1f}⭐)"
         is_trusted = True
 
@@ -891,7 +911,7 @@ def evaluate_seller_risk(seller_or_item, price=None, platform=""):
             pass
 
     # Bloquear flash si tiene menos de 2 reviews en Wallapop o Vinted
-    if reviews_count < 2 and (not plat_str or plat_str in ("WALLAPOP", "VINTED")):
+    if (reviews_count is None or reviews_count < 2) and (not plat_str or plat_str in ("WALLAPOP", "VINTED")):
         block_flash = True
 
     return SellerRiskResult({
@@ -1049,10 +1069,16 @@ def evaluate_fraud_risk(
 
     # 6.5. Heurística Anti-Estafa Combinada (TASK-05)
     if cex_val >= 80.0 and price_val > 0.0 and price_val < (cex_val * 0.82):
-        s_revs = 0
+        s_revs = None  # None = perfil no consultado: no cuenta como «sin historial» (T1.4)
         s_joined = None
         if isinstance(seller_obj, dict):
-            s_revs = int(seller_obj.get("seller_reviews_count") or seller_obj.get("reviews_count") or seller_obj.get("sales") or seller_obj.get("feedback_count") or 0)
+            for _k in ("seller_reviews_count", "reviews_count", "sales", "feedback_count"):
+                if seller_obj.get(_k) is not None:
+                    try:
+                        s_revs = int(seller_obj[_k])
+                        break
+                    except Exception:
+                        pass
             s_joined = seller_obj.get("seller_joined_days") or seller_obj.get("joined_days") or seller_obj.get("age_days")
             if s_joined is not None:
                 try:

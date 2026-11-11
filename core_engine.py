@@ -4662,6 +4662,7 @@ def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", sell
     is_shop = "CASH" in plat
     if deal_type == "high_risk_opportunity" and not pol.get("push_high_risk"):
         return False, "alto riesgo / precio anómalo"
+    # T1.4: solo un 0 confirmado silencia; reviews None (perfil no consultado) no.
     if not is_shop and reviews == 0 and not pol.get("push_zero_review_sellers"):
         return False, "vendedor sin valoraciones"
     if deal_type == "offer_opportunity":
@@ -4708,6 +4709,8 @@ def format_seller_line(seller):
             parts.append(f"⭐ {r_val / 20.0 if r_val > 5.0 else r_val:.1f} ({reviews} val.)")
         else:
             parts.append(f"{reviews} val.")
+    else:
+        parts.append("valoraciones no disponibles")  # T1.4: perfil no consultado != 0 valoraciones
     if seller.get("seller_sold_count") is not None:
         parts.append(f"{seller['seller_sold_count']} vendidos")
     if seller.get("seller_bought_count") is not None:
@@ -4773,7 +4776,7 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
         a = ai_data if isinstance(ai_data, dict) else {}
         seller_keys = ("name", "seller_reviews_count", "seller_rating", "sales", "seller_joined_days", "seller_age_source",
                        "seller_sold_count", "seller_bought_count", "seller_listings", "seller_followers",
-                       "seller_reports", "seller_verified", "seller_banned", "age_days")
+                       "seller_reports", "seller_verified", "seller_banned", "age_days", "seller_profile_status")
         sel = {k: s.get(k) for k in seller_keys if s.get(k) is not None}
         # Nombres cortos y estables para el análisis
         if "seller_rating" in sel:

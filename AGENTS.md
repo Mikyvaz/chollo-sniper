@@ -103,6 +103,7 @@ Todas las tablas residen en `/opt/wallapop-sniper/sniper.db` bajo modo `WAL`:
 4. **Concurrencia SQLite:** Usar siempre `get_db()` (que configura `PRAGMA journal_mode=WAL;` y `busy_timeout=30000`). No compartir conexiones SQLite entre distintos hilos sin lock.
 5. **Normalización de Ratings:** Wallapop devuelve valoraciones en escala `0-100` en endpoints internos; normalizar siempre a `0.0-5.0` antes de evaluar `SELLER_LOW_RATING` y no confundir `0 valoraciones` con `mala puntuación`.
 6. **Thread-Safety en Clases Compartidas:** `AdaptiveRateLimiter`, `ParserHealthTracker` y administradores de sesión deben usar locks (`threading.Lock`) para evitar `RuntimeError: Set changed size during iteration`.
+7. **«Perfil no consultado» ≠ «0 valoraciones»:** `enrich_seller_profile` deja `seller_reviews_count = None` cuando la plataforma no responde y marca `seller_profile_status` (`ok` / `unavailable` / `not_applicable`). Solo un `0` confirmado dispara `SELLER_ZERO_REVIEWS`, `SELLER_GHOST_PROFILE`, `SELLER_NEW_ACCOUNT_ZERO_REVIEWS`, `HIGH_TICKET_ZERO_REP_SCAM_RISK` o silencia el aviso sonoro; `None` con `unavailable` suma solo `SELLER_PROFILE_UNKNOWN` (peso 1). Los escáneres leen `int(x or 0)`: con `None` no hay flash, que es lo correcto.
 
 ---
 
