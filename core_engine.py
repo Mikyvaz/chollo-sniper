@@ -33,7 +33,7 @@ _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=1)
 HTTP_SESSION.mount("https://", _adapter)
 HTTP_SESSION.mount("http://", _adapter)
 
-from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token
+from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, classify_console_listing
 from fraud_signals import (
     evaluate_fraud_risk, log_fraud_event, detect_phone_number,
     calculate_dhash, check_and_record_image_hash,
@@ -1884,14 +1884,10 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
             if not any(k in title_l for k in ("new 3ds", "3ds xl", "2ds xl", "new 2ds")):
                 return False
 
-        if _first_token(text_n, VIDEO_GAME_TITLES_AND_TOKENS, negatable=False):
-            has_console_hw = any(cw in title_l for cw in CONSOLE_HARDWARE_WORDS)
-            if not has_console_hw:
-                return False
-
-        if re.search(r"\b(r4|r4i|jeu|jeux|gioco|giochi|juego|juegos|videojuego|cartucho|cartouche|cartuccia|blister)\b", text):
-            if not any(cw in title_l for cw in CONSOLE_HARDWARE_WORDS):
-                return False
+        # T1.2: juego suelto / accesorio suelto / Switch 2 según el TÍTULO (sustituye a la lista de
+        # «hardware», que dejaba pasar cualquier juego que llevara la plataforma en el título).
+        if classify_console_listing(clean_title, radar_id) in ("game_only", "accessory_only", "out_of_scope"):
+            return False
 
     if radar_id == "apple_high_liquidity":
         if "mac mini" in text:
