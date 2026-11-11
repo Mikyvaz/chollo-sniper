@@ -38,8 +38,9 @@ from core_engine import (
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, WafBlockedError, is_ai_budget_paused,
-    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin
+    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, DB_PATH
 )
+from store_breaker import StoreBreaker, store_enabled
 
 SCAN_INTERVAL = int(os.getenv("MULTI_SCAN_INTERVAL_SECONDS", "45"))
 
@@ -48,6 +49,8 @@ timing = AntiBanTiming(night_start_hour=2, night_end_hour=7)
 health_monitor = AntiBanHealthMonitor("MULTI-MARKET SNIPER")
 parser_tracker = ParserHealthTracker("MULTI-MARKET SNIPER", default_threshold=3)
 logger = setup_logger("MULTI-SNIPER")
+# T1.10: circuit breaker exponencial por tienda (estado persistente junto a la BD)
+store_breaker = StoreBreaker(os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "store_breakers.json"))
 default_rate_limiter.register_platform("MULTI-MARKET", SCAN_INTERVAL)
 for _p in ("MILANUNCIOS", "CASHCONVERTERS", "TODOCOLECCION", "EBAY"):
     default_rate_limiter.register_platform(_p, SCAN_INTERVAL)
@@ -172,6 +175,13 @@ def main():
         for st in STORE_PIPELINE
     }
 
+    # T1.10: restaurar los breakers abiertos tras un reinicio
+    for st in STORE_PIPELINE:
+        _ou = store_breaker.open_until(st["key"])
+        if _ou > time.time():
+            st["cooldown_until"] = _ou
+            print(f"[{st['platform']} BREAKER] Abierto hasta {time.strftime('%H:%M:%S', time.localtime(_ou))} (estado restaurado).")
+
     active_cnt = sum(1 for t in config.get("targets", []) if t.get("enabled", True))
     print(
         f"[STARTUP] Multi-Market Sniper v4.2 activo | IA: {AI_ANALYST_MODEL} | "
@@ -217,6 +227,7 @@ def main():
         due_plats = {
             st["platform"] for st in STORE_PIPELINE
             if st.get("cooldown_until", 0) <= round_start and st.get("next_fetch_at", 0) <= round_start
+            and store_enabled(config, st["key"])
         }
         fetched_plats = set()
 
@@ -264,17 +275,27 @@ def main():
                     is_warmup = warmup_by_plat.get(plat, False)
 
                     if waf_err:
-                        cd_secs = 900  # 15 minutos de cooldown preventivo
-                        store["cooldown_until"] = time.time() + cd_secs
+                        cd_secs, notify = store_breaker.record_block(store["key"])
+                        store["cooldown_until"] = store_breaker.open_until(store["key"])
                         print(f"[{plat} COOLDOWN PREVENTIVO] WAF/DataDome bloqueo detectado ({waf_err}). Pausando {plat} durante {cd_secs // 60} minutos...")
-                        health_monitor.send_health_embed(
-                            f"🛡️ [COOLDOWN PREVENTIVO] {plat}: WAF / PerimeterX Detectado",
-                            f"Se ha detectado bloqueo o desafío anti-bot en **{plat}** ({waf_err}).\n\n"
-                            f"• Se activa cooldown preventivo de **{cd_secs // 60} minutos** para esta tienda.\n"
-                            f"• Las demás tiendas siguen operando con normalidad.",
-                            0xE67E22
-                        )
+                        if notify:
+                            health_monitor.send_health_embed(
+                                f"🛡️ [COOLDOWN PREVENTIVO] {plat}: WAF / PerimeterX Detectado",
+                                f"Se ha detectado bloqueo o desafío anti-bot en **{plat}** ({waf_err}).\n\n"
+                                f"• Breaker exponencial: cooldown de **{cd_secs // 60} minutos** "
+                                f"(se duplica en cada bloqueo seguido, tope {store_breaker.CAP // 3600} h).\n"
+                                f"• No se volverá a avisar hasta el tope o la recuperación.\n"
+                                f"• Las demás tiendas siguen operando con normalidad.",
+                                0xE67E22
+                            )
                         continue
+                    if store_breaker.record_success(store["key"]):
+                        print(f"[{plat} BREAKER] Tienda recuperada, breaker cerrado.")
+                        health_monitor.send_health_embed(
+                            f"✅ [RECUPERADA] {plat}",
+                            f"**{plat}** vuelve a responder sin bloqueo WAF; breaker cerrado.",
+                            0x2ECC71
+                        )
 
                     mode = target.get("mode", "resale")
 

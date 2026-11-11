@@ -82,6 +82,7 @@ services:
       - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./multi_sniper.py:/app/multi_sniper.py:ro
+      - ./store_breaker.py:/app/store_breaker.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
       - ./tools:/app/tools:ro
     healthcheck:

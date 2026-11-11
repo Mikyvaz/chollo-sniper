@@ -5,6 +5,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir curl_cffi pillow pillow-heif discord.py requests
 
-COPY core_engine.py antiban.py sniper.py vinted_sniper.py multi_sniper.py bot.py healthcheck.py fraud_signals.py text_rules.py logger.py outcome_tracker.py /app/
+COPY core_engine.py antiban.py sniper.py vinted_sniper.py multi_sniper.py bot.py healthcheck.py fraud_signals.py text_rules.py store_breaker.py logger.py outcome_tracker.py /app/
 COPY tools /app/tools
 

@@ -7,6 +7,12 @@
   "ai": {
     "pro_model_enabled": true
   },
+  "stores": {
+    "milanuncios": {"enabled": true},
+    "cashconverters": {"enabled": true},
+    "ebay": {"enabled": true},
+    "todocoleccion": {"enabled": true}
+  },
   "notifications": {
     "flash_mode": "off",
     "push_min_profit_eur": 40,
