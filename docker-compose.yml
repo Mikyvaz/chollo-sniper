@@ -18,6 +18,7 @@ services:
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
       - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./sniper.py:/app/sniper.py:ro
       - ./bot.py:/app/bot.py:ro
@@ -48,6 +49,7 @@ services:
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
       - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./vinted_sniper.py:/app/vinted_sniper.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
@@ -77,6 +79,7 @@ services:
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
       - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./multi_sniper.py:/app/multi_sniper.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro
@@ -107,6 +110,7 @@ services:
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
       - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./bot.py:/app/bot.py:ro
       - ./outcome_tracker.py:/app/outcome_tracker.py:ro
@@ -137,6 +141,7 @@ services:
       - ./antiban.py:/app/antiban.py:ro
       - ./core_engine.py:/app/core_engine.py:ro
       - ./fraud_signals.py:/app/fraud_signals.py:ro
+      - ./text_rules.py:/app/text_rules.py:ro
       - ./logger.py:/app/logger.py:ro
       - ./outcome_tracker.py:/app/outcome_tracker.py:ro
       - ./healthcheck.py:/app/healthcheck.py:ro

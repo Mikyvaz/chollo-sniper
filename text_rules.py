@@ -10,7 +10,7 @@ import unicodedata
 from functools import lru_cache
 
 NEG_CUE = re.compile(
-    r"\b(sin|no|ni|nunca|ningun[oa]?|cero|libre de|jamas|sans|pas de|aucune?|senza|nessun[oa]?|without|free of)\b"
+    r"\b(sin|no|ni|nunca|nada de|ningun[oa]?|cero|libre de|jamas|sans|pas de|aucune?|senza|nessun[oa]?|without|free of)\b"
 )
 CLAUSE_BREAK = ".,;:!?\n"
 
@@ -37,7 +37,7 @@ def norm(text: str) -> str:
     t = _FINAL_ACUTE.sub(_protect, t)
     t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
     t = re.sub(r"\ue000(\d+)\ue001", lambda m: keep[int(m.group(1))], t)
-    t = _ELISION.sub(" ", t)  # j'achète, l'écran, dell'iPad: la elisión no pega la palabra siguiente
+    t = _ELISION.sub(lambda m: m.group(0)[:-1] + " ", t)  # j'achète -> "j achete": la elisión no pega la palabra siguiente
     t = re.sub(r"[’'`´]", "", t)
     return re.sub(r"[ \t\r]+", " ", t)
 

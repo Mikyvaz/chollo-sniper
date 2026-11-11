@@ -108,6 +108,25 @@ class TestSiguenBloqueando(unittest.TestCase):
         r = evaluate_fraud_risk("New 3DS XL", "Pantalla superior e inferior sin rayadas", 95, radar_id="new_3ds_family")
         self.assertFalse(r["is_fraud"])
 
+    def test_contacto_frances_con_elision(self):
+        for txt in ("Avant d'acheter, écrivez-moi", "avant d’acheter contactez-moi", "Avant d acheter"):
+            with self.subTest(txt=txt):
+                r = evaluate_fraud_risk("Switch OLED", txt, 200, radar_id="switch_oled")
+                self.assertIn("CONTACT_EXTERNAL", [h["code"] for h in r["hits"]])
+        self.assertTrue(has_token(norm("J'achète des consoles"), "achète"))
+        self.assertTrue(has_token(norm("avant d'acheter"), "avant d'acheter"))
+
+    def test_negaciones_del_pago_antiguo(self):
+        """Todas las formas que cubría el negation_re anterior siguen negando el pago."""
+        for txt in ("Nada de bizum, solo envío por la app", "No acepto bizum", "No hago bizum", "no uso bizum",
+                    "No quiero transferencias", "no admito bizum", "no recibo bizum",
+                    "Ni bizum ni transferencia", "ni hago bizum", "Nada de transferencias"):
+            with self.subTest(txt=txt):
+                r = evaluate_fraud_risk("PS5 Slim", txt, 280, radar_id="ps5_consoles_gta6")
+                self.assertNotIn("PAYMENT_EXTERNAL", [h["code"] for h in r["hits"]])
+        r = evaluate_fraud_risk("PS5 Slim", "Solo bizum, nada de envíos", 280, radar_id="ps5_consoles_gta6")
+        self.assertIn("PAYMENT_EXTERNAL", [h["code"] for h in r["hits"]])
+
     def test_contacto_negado(self):
         r = evaluate_fraud_risk("PS5 Slim", "No tengo whatsapp, solo por la app", 280, radar_id="ps5_consoles_gta6")
         self.assertNotIn("CONTACT_EXTERNAL", [h["code"] for h in r["hits"]])

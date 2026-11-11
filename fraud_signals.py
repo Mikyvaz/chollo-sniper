@@ -58,7 +58,7 @@ CONTACT_EXTERNAL_PATTERNS = (
     r"(?:no\s+me\s+(?:va|funciona)\s+(?:el\s+)?chat)",
     r"regalo\s+de\s+comuni[oó]n",
     r"(?:escr[ií]beme|h[aá]blame|contacta(?:r|me)?|ll[aá]mame)\s+(?:al|por|a)?\s*[:\d\+]+",
-    r"(?:prima di acquistare|avant d['’]?acheter|ne pas acheter directement|[eé]crivez-moi|scrivimi)"
+    r"(?:prima di acquistare|avant d(?:['’]| )?acheter|ne pas acheter directement|[eé]crivez-moi|scrivimi)"
 )
 
 # 3. Urgencia sospechosa y anzuelos clásicos de estafa
