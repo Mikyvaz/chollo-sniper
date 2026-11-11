@@ -632,20 +632,55 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
                 (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd)
             )
         conn.commit()
+        try:  # mantiene al día el gasto memorizado de este proceso
+            key = _cost_cache_key(conn)
+            with _today_cost_lock:
+                if key in _today_cost_cache:
+                    ts, total = _today_cost_cache[key]
+                    _today_cost_cache[key] = (ts, total + float(usd or 0.0))
+        except Exception:
+            pass
     except Exception as e:
         print(f"[WARN] Error registrando coste IA: {e}")
 
 
+_TODAY_COST_TTL_S = 60.0
+_today_cost_cache = {}  # clave de BD -> (monotonic, gasto del día local)
+_today_cost_lock = threading.Lock()
+
+
+def _cost_cache_key(conn):
+    """Ruta del fichero de la BD (las conexiones son por hilo); en memoria, la propia conexión."""
+    try:
+        for _seq, name, path in conn.execute("PRAGMA database_list").fetchall():
+            if name == "main" and path:
+                return path
+    except Exception:
+        pass
+    return id(conn)
+
+
 def get_today_ai_cost(conn):
+    """Gasto de IA del día LOCAL (T1.8), memorizado 60 s para no ejecutar un SUM en cada llamada."""
     if not conn:
         return 0.0
+    key = _cost_cache_key(conn)
+    now = time.monotonic()
+    with _today_cost_lock:
+        hit = _today_cost_cache.get(key)
+        if hit and now - hit[0] < _TODAY_COST_TTL_S:
+            return hit[1]
     try:
         c = conn.cursor()
-        c.execute("SELECT COALESCE(SUM(usd), 0.0) FROM ai_cost_log WHERE created_at >= date('now', 'start of day')")
+        c.execute("SELECT COALESCE(SUM(usd), 0.0) FROM ai_cost_log "
+                  "WHERE created_at >= datetime('now', 'localtime', 'start of day', 'utc')")
         row = c.fetchone()
-        return float(row[0]) if row and row[0] is not None else 0.0
+        total = float(row[0]) if row and row[0] is not None else 0.0
     except Exception:
         return 0.0
+    with _today_cost_lock:
+        _today_cost_cache[key] = (now, total)
+    return total
 
 
 AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
@@ -1898,11 +1933,12 @@ GAME_OR_ACC_STRONG_MARKERS = (
 )
 
 
-def _token_in_text(token, text, negatable=False):
-    """Coincidencia con límites de palabra (text_rules). `text` puede venir ya normalizado (norm) o no."""
+def _token_in_text(token, text, negatable=False, prefix=False):
+    """Coincidencia con límites de palabra (text_rules). `text` puede venir ya normalizado (norm) o no.
+    prefix=True: identificación de modelo ("ipad 9" en "ipad 9th gen"), como en passes_filters."""
     if not (token or "").strip():
         return False
-    return _has_token(_norm_text(text), token, negatable=negatable)
+    return _has_token(_norm_text(text), token, negatable=negatable, prefix=prefix)
 
 
 def passes_filters(title, description, price, target, global_blacklist, extra_text="", seller=None):
@@ -2639,6 +2675,8 @@ def fetch_cex_live(
     if not search_query:
         return None
 
+    if target is None and radar_id:
+        target = {"id": radar_id}
     clean_q = re.sub(r"\(.*?\)", "", search_query).strip()
     if (target or {}).get("id") == "simracing_wheels" or any(w in clean_q.lower() for w in ("g29", "g920", "g923", "t300")):
         clean_q = re.sub(r"\b(volante|pedales|y|con)\b", "", clean_q, flags=re.IGNORECASE)
@@ -2646,8 +2684,6 @@ def fetch_cex_live(
     if not clean_q:
         return None
 
-    if target is None and radar_id:
-        target = {"id": radar_id}
     rid = (target or {}).get("id", "generic") if isinstance(target, dict) else (radar_id or "generic")
     full_ctx = f"{title_context} {desc_context}".strip()
     pick_args = dict(
@@ -4117,8 +4153,8 @@ def evaluate_deal_math_and_score(
         max_sub_p = float(cap_rule.get("max_price", 9999))
         match_tokens = cap_rule.get("match_any", [])
         unless_tokens = cap_rule.get("unless_any", [])
-        if any(_token_in_text(mt, id_text) for mt in match_tokens):
-            if not (unless_tokens and any(_token_in_text(ut, id_text) for ut in unless_tokens)):
+        if any(_token_in_text(mt, id_text, prefix=True) for mt in match_tokens):
+            if not (unless_tokens and any(_token_in_text(ut, id_text, prefix=True) for ut in unless_tokens)):
                 if max_sub_p <= 5:
                     return False, 1, 0.0, 0.0, 0.0, f"Submodelo '{identified}' bloqueado por configuración"
                 direct_max_cap = min(direct_max_cap, max_sub_p)
@@ -5145,18 +5181,25 @@ def _discord_retry_after(resp):
     return 1.0
 
 
-def _discord_send(method, url, *, headers=None, json_payload=None, multipart=None, timeout=10, attempts=3):
+def _discord_send(method, url, *, headers=None, json_payload=None, multipart=None, timeout=10, attempts=3,
+                  state=None):
     """Envía una petición a Discord sin perder la alerta en silencio.
 
     Devuelve (ok: bool, status: int|None, message_id: str|None).
     2xx -> ok. 429 -> duerme min(retry_after, 5) y reintenta. 5xx/red -> backoff 0.5 s, 1.5 s.
     4xx != 429 -> sin reintento: imprime `[DISCORD ERROR]` (redactado) y emite la métrica `discord_error`.
     `multipart` es un callable que devuelve un CurlMime nuevo (un CurlMime no se puede reutilizar).
+    `state` (dict) se comparte entre envíos de una misma alerta (bot -> webhook): recuerda si hubo un fallo
+    ambiguo (timeout/red) previo, para avisar de posible duplicado aunque el 2xx llegue por otra vía.
     """
+    if state is None:
+        state = {}
     method = str(method or "POST").upper()
     backoffs = (0.5, 1.5)
     status, last_err = None, ""
-    ambiguous = False  # un intento previo falló por red/timeout: Discord pudo haber publicado el mensaje
+    ambiguous = bool(state.get("ambiguous"))  # un intento previo falló por red/timeout: Discord pudo haber publicado el mensaje
+    if ambiguous:
+        last_err = state.get("err", "")
     for attempt in range(max(1, attempts)):
         last = attempt >= attempts - 1
         try:
@@ -5170,6 +5213,7 @@ def _discord_send(method, url, *, headers=None, json_payload=None, multipart=Non
         except Exception as e:
             status, last_err = None, f"{type(e).__name__}: {e}"
             ambiguous = True
+            state["ambiguous"], state["err"] = True, last_err
             if not last:
                 time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
             continue
@@ -5212,13 +5256,13 @@ def _discord_send(method, url, *, headers=None, json_payload=None, multipart=Non
 
 
 def _discord_post_with_fallback(url, *, headers=None, payload=None, fallback_content="", multipart=None,
-                                flags=None, timeout=10):
+                                flags=None, timeout=10, state=None):
     """POST con el payload completo; si Discord responde 400, reintenta una vez solo con `content`."""
     ok, status, mid = _discord_send("POST", url, headers=headers, json_payload=None if multipart else payload,
-                                    multipart=multipart, timeout=timeout)
+                                    multipart=multipart, timeout=timeout, state=state)
     if not ok and status == 400 and fallback_content:
         fb = {"content": str(fallback_content)[:1900], **(flags or {})}
-        ok, status, mid = _discord_send("POST", url, headers=headers, json_payload=fb, timeout=timeout)
+        ok, status, mid = _discord_send("POST", url, headers=headers, json_payload=fb, timeout=timeout, state=state)
     return ok, status, mid
 
 
@@ -5281,13 +5325,14 @@ def send_flash_discord_alert(
 
     flash_components = [{"type": 1, "components": btn_row}]
 
+    send_state = {}
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"}
         ok, _status, msg_id = _discord_post_with_fallback(
             bot_api_url, headers=bot_headers,
             payload={"content": flash_content, "components": flash_components, **flash_flags},
-            fallback_content=flash_content, flags=flash_flags, timeout=6)
+            fallback_content=flash_content, flags=flash_flags, timeout=6, state=send_state)
         if ok and msg_id:
             return {"via": "bot", "message_id": msg_id, "silent": silent}
 
@@ -5296,7 +5341,7 @@ def send_flash_discord_alert(
         wh_wait_url = f"{WEBHOOK_URL}{sep}wait=true"
         ok, _status, msg_id = _discord_post_with_fallback(
             wh_wait_url, payload={"content": flash_content, **flash_flags},
-            fallback_content=flash_content, flags=flash_flags, timeout=6)
+            fallback_content=flash_content, flags=flash_flags, timeout=6, state=send_state)
         if ok and msg_id:
             return {"via": "webhook", "message_id": msg_id, "silent": silent}
 
@@ -5688,6 +5733,7 @@ def send_discord_alert(
         embed["image"] = {"url": "attachment://portada_chollo.jpg"}
 
     delivered = False
+    send_state = {}  # compartido bot -> webhook (posible duplicado tras timeout del bot)
     if BOT_TOKEN and ALERTS_CHANNEL_ID:
         bot_api_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages"
         bot_headers = {"Authorization": f"Bot {BOT_TOKEN}"}
@@ -5697,7 +5743,7 @@ def send_discord_alert(
             headers=bot_headers if enhanced_cover_bytes else {**bot_headers, "Content-Type": "application/json"},
             payload=bot_payload, fallback_content=push_notification_content, flags=msg_flags,
             multipart=_cover_multipart(bot_payload, "files[0]") if enhanced_cover_bytes else None,
-            timeout=15 if enhanced_cover_bytes else 10)
+            timeout=15 if enhanced_cover_bytes else 10, state=send_state)
         if ok:
             delivered = True
             _save_discord_message_id(conn, deal_id, msg_id, ALERTS_CHANNEL_ID, "bot")
@@ -5709,7 +5755,7 @@ def send_discord_alert(
             f"{WEBHOOK_URL}{sep}wait=true", payload=wh_payload,
             fallback_content=push_notification_content, flags=msg_flags,
             multipart=_cover_multipart(wh_payload, "file") if enhanced_cover_bytes else None,
-            timeout=15 if enhanced_cover_bytes else 10)
+            timeout=15 if enhanced_cover_bytes else 10, state=send_state)
         if ok:
             delivered = True
             _save_discord_message_id(conn, deal_id, msg_id, "", "webhook")
