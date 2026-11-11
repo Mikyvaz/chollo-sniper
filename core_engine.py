@@ -449,6 +449,13 @@ def init_db(conn=None):
             except sqlite3.OperationalError:
                 pass  # columna ya existente (o añadida a la vez por otro contenedor)
 
+        # T1.13: tokens de entrada por modalidad (imagen/texto) para decidir la resolución de imagen
+        for col_name, col_def in (("tokens_img", "INTEGER DEFAULT 0"), ("tokens_text", "INTEGER DEFAULT 0")):
+            try:
+                c.execute(f"ALTER TABLE ai_cost_log ADD COLUMN {col_name} {col_def};")
+            except sqlite3.OperationalError:
+                pass
+
         embed_cols = [col[1] for col in c.execute("PRAGMA table_info(item_embeddings)").fetchall()]
         if "seller_id" not in embed_cols:
             c.execute("ALTER TABLE item_embeddings ADD COLUMN seller_id TEXT DEFAULT '';")
@@ -585,7 +592,24 @@ def calculate_ai_cost_usd(model, tokens_in, tokens_out, thoughts_tokens=0):
     return round(in_cost + out_cost, 6)
 
 
-def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_out, thoughts_tokens=0, finish_reason=None):
+def _prompt_tokens_by_modality(usage):
+    """T1.13: (tokens_img, tokens_text) de usageMetadata.promptTokensDetails ([{modality, tokenCount}])."""
+    img = text = 0
+    try:
+        for d in (usage or {}).get("promptTokensDetails") or []:
+            mod = str(d.get("modality", "")).upper()
+            n = int(d.get("tokenCount") or 0)
+            if mod == "IMAGE":
+                img += n
+            elif mod == "TEXT":
+                text += n
+    except Exception:
+        return 0, 0
+    return img, text
+
+
+def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_out, thoughts_tokens=0, finish_reason=None,
+                tokens_img=0, tokens_text=0):
     if not conn:
         return
     try:
@@ -595,10 +619,10 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
         try:
             c.execute(
                 """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd,
-                                            finish_reason, tokens_thoughts, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                                            finish_reason, tokens_thoughts, tokens_img, tokens_text, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd,
-                 finish_reason, int(thoughts_tokens or 0))
+                 finish_reason, int(thoughts_tokens or 0), int(tokens_img or 0), int(tokens_text or 0))
             )
         except sqlite3.OperationalError:
             # BD sin migrar (columnas nuevas ausentes): registrar al menos el coste
@@ -878,8 +902,9 @@ def ai_gateway_call(
                             thoughts_tokens = usage.get("thoughtsTokenCount", 0)
                             candidates = resp_json.get("candidates", [])
                             finish = (candidates[0].get("finishReason") if candidates else None)
+                            t_img, t_text = _prompt_tokens_by_modality(usage)
                             log_ai_cost(active_conn, platform, radar_id, model, call_type, p_tokens, c_tokens,
-                                        thoughts_tokens, finish_reason=finish)
+                                        thoughts_tokens, finish_reason=finish, tokens_img=t_img, tokens_text=t_text)
 
                             if finish == "MAX_TOKENS":
                                 # Respuesta truncada: no se parsea la parte parcial, se pasa al siguiente modelo
@@ -3779,8 +3804,8 @@ def analyze_and_generate_kit(
     if raw_images and len(raw_images) > 0 and raw_images[0]:
         img_sig = hashlib.sha256(raw_images[0][:4096]).hexdigest()[:16]
 
-    # v45: invalida veredictos cacheados con el prompt que anclaba la reventa a la mediana de compra (A-003)
-    cache_key = build_robust_cache_key(radar_id, clean_title_str, clean_desc, price, img_sig=img_sig, prefix="v45")
+    # v46: prompt de salida mínima (T1.13); v45 invalidó el prompt que anclaba la reventa a la mediana de compra (A-003)
+    cache_key = build_robust_cache_key(radar_id, clean_title_str, clean_desc, price, img_sig=img_sig, prefix="v46")
 
     if conn:
         try:
@@ -3834,11 +3859,14 @@ def analyze_and_generate_kit(
             f"Desc: {clean_desc or 'Sin descripción'}\n"
             f"Fotos: {num_imgs} | Guía: {valuation_rules}\n\n"
             f"INSTRUCCIONES: Verifica SMART sano y >1TB. is_valid_deal=true si es funcional.\n"
+            f"SALIDA MÍNIMA: Si is_valid_deal=false, rellena solo is_valid_deal, has_defect_or_missing_parts, "
+            f"visual_confidence, identified_model y reject_reason (15 palabras como máximo) y deja vacío el resto. "
+            f"visual_notes: 25 palabras como máximo. value_add_tip solo si is_valid_deal=true.\n"
             f"IMPORTANTE: Cero texto conversacional. Responde SOLO un JSON válido:\n"
             f'{{"is_valid_deal": bool, "is_pro_seller": bool, "has_defect_or_missing_parts": bool, '
             f'"visual_confidence": "alta"|"media"|"baja", "identified_model": "", "cex_search_query": "", '
             f'"visual_notes": "", "reject_reason": "", "estimated_resale_price": int, '
-            f'"value_add_tip": "", "fast_buy_message": ""}}'
+            f'"value_add_tip": ""}}'
         )
     else:
         prompt = (
@@ -3851,14 +3879,18 @@ def analyze_and_generate_kit(
             f"2. DEFECTOS/ESTAFAS: Pago externo (bizum, virement, wasap), iCloud, drift, avería -> is_valid_deal=false.\n"
             f"3. 3 NIVELES: Pon is_valid_deal=true si es auténtico, funcional y completo (Nivel 1 CeX, Nivel 2 Colchón CeX o Nivel 3 P2P).\n"
             f"4. CEX: 'cex_search_query' con nombre canónico del modelo en fotos.\n"
-            f"5. EXTRAS: 'bundled_games_queries' con juegos/mandos extra (máx 4) o [].\n\n"
+            f"5. EXTRAS: 'bundled_games_queries' con juegos/mandos extra (máx 4) o [].\n"
+            f"SALIDA MÍNIMA: Si is_valid_deal=false, rellena solo is_valid_deal, has_defect_or_missing_parts, "
+            f"visual_confidence, identified_model y reject_reason (15 palabras como máximo) y deja vacío el resto. "
+            f"visual_notes: 25 palabras como máximo. value_add_tip solo si is_valid_deal=true.\n"
+            f"\n"
             f"IMPORTANTE: Cero texto conversacional ni saludos. Responde ÚNICAMENTE un JSON válido con estas claves exactas:\n"
             f'{{"is_valid_deal": bool, "is_pro_seller": bool, "has_defect_or_missing_parts": bool, '
             f'"missing_original_charger": bool, "includes_original_box": bool, "includes_kit_lens": bool, '
             f'"visual_confidence": "alta"|"media"|"baja", "identified_model": "", "cex_search_query": "", '
             f'"bundled_games_queries": ["juego o accesorio extra en español, máx 4, o []"], '
             f'"visual_notes": "", "reject_reason": "", "estimated_resale_price": int, '
-            f'"value_add_tip": "", "fast_buy_message": ""}}'
+            f'"value_add_tip": ""}}'
         )
 
     # H3 (A-003): price_history guarda precios PEDIDOS, no de venta, y mezcla submodelos.
@@ -5455,9 +5487,8 @@ def send_discord_alert(
         f"💡 **Tip:** {ai_data.get('value_add_tip', 'Oportunidad rápida')}{charger_warn}{case_warn}"
     )
 
-    fast_msg = ai_data.get("fast_buy_message") or (
-        "Hola! Me interesa, funciona todo bien? Si está disponible te lo compro ahora mismo por la aplicación."
-    )
+    # T1.13: ya no se pide a la IA; el mensaje rápido sale siempre de la plantilla
+    fast_msg = "Hola! Me interesa, funciona todo bien? Si está disponible te lo compro ahora mismo por la aplicación."
 
     # Si es un 10/10, el enlace principal lleva directo al Checkout 1-Tap; en caso contrario lleva directo al anuncio
     primary_action_url = clean_checkout_url if (score == 10 and deal_type not in ("offer_opportunity", "high_risk_opportunity")) else clean_item_url
