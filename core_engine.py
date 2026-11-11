@@ -209,6 +209,7 @@ def run_db_maintenance(conn=None):
         c.execute("DELETE FROM seen_items WHERE seen_at < datetime('now', '-45 days')")
         c.execute("DELETE FROM vinted_seen_items WHERE seen_at < datetime('now', '-45 days')")
         c.execute("DELETE FROM cex_cache WHERE updated_at < datetime('now', '-3 days')")
+        c.execute("DELETE FROM cex_query_hits WHERE fetched_at < datetime('now', '-2 days')")
         c.execute("DELETE FROM ai_eval_cache WHERE evaluated_at < datetime('now', '-7 days')")
         c.execute("DELETE FROM ai_prescreen_cache WHERE evaluated_at < datetime('now', '-7 days')")
         c.execute("DELETE FROM ai_prompt_cache WHERE created_at < datetime('now', '-7 days')")
@@ -276,6 +277,13 @@ def init_db(conn=None):
             sell_price REAL,
             box_id TEXT DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cex_query_hits (
+            query TEXT PRIMARY KEY,
+            hits_json TEXT NOT NULL,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     c.execute("""
@@ -2362,6 +2370,12 @@ def sync_cex_catalog_mirror(conn=None, force=False, master_queries=None) -> int:
             except Exception as e:
                 print(f"[WARN] Error sincronizando CeX mirror para '{q}': {e}")
 
+        try:
+            c.execute("DELETE FROM cex_catalog_mirror WHERE last_synced < datetime('now', '-7 days')")
+            conn.commit()
+        except Exception as e:
+            print(f"[WARN] Purga del espejo CeX: {e}")
+
         return total_synced
     except Exception as e:
         print(f"[WARN] sync_cex_catalog_mirror general error: {e}")
@@ -2374,169 +2388,94 @@ def sync_cex_catalog_mirror(conn=None, force=False, master_queries=None) -> int:
                 pass
 
 
-def lookup_cex_catalog_mirror(
-    conn, clean_q, target=None, title_context="", desc_context="",
-    includes_box=False, includes_lens=True, return_all_variants=False,
-    radar_id=""
-):
+CEX_MIRROR_MAX_AGE_HOURS = 36
+CEX_QUERY_HITS_TTL_HOURS = 24
+CEX_QUERY_HITS_NEGATIVE_TTL_HOURS = 6
+_CEX_SQL_STOP_WORDS = {
+    "de", "la", "el", "los", "las", "un", "una", "uno", "del", "con", "sin", "para", "por", "en",
+    "consola", "tarjeta", "grafica", "videojuego", "reproductor", "volante", "portatil", "ordenador",
+    "cargador", "funda", "cables", "caja"
+}
+
+
+def _mirror_candidates(conn, clean_q):
     """
-    Busca en el espejo local SQLite (cex_catalog_mirror) con latencia <1ms.
-    Aplica _box_matches_query_and_radar y _score_cex_candidate en memoria.
-    Devuelve dict con la mejor ficha de CeX (o list si return_all_variants=True), o None si no hay match.
+    Fichas del espejo local (cex_catalog_mirror) que contienen los tokens de la consulta
+    (AND; si no hay ninguna, los 2 tokens más largos). Solo filas sincronizadas en las últimas
+    36 h. Devuelve dicts normalizados SIN filtrar por contexto del anuncio (eso se hace en cada llamada).
     """
     if not conn or not clean_q:
-        return None
+        return []
+    q_norm = _normalize_cex_text(clean_q)
+    q_tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 2 and w not in _CEX_SQL_STOP_WORDS]
+    if not q_tokens:
+        return []
+    tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 3 and w not in _CEX_SQL_STOP_WORDS]
+    if not tokens:
+        tokens = q_tokens
+
+    def _run(toks):
+        where = " AND ".join("box_name LIKE ?" for _ in toks)
+        return conn.execute(
+            f"""SELECT box_id, box_name, category_name, cash_price, voucher_price, sell_price
+                FROM cex_catalog_mirror
+                WHERE cash_price > 0 AND sell_price > 0
+                  AND last_synced >= datetime('now', '-{int(CEX_MIRROR_MAX_AGE_HOURS)} hours')
+                  AND ({where})""",
+            [f"%{w}%" for w in toks]
+        ).fetchall()
 
     try:
-        rid = (target or {}).get("id", "") if isinstance(target, dict) else (radar_id or "generic")
-        q_norm = _normalize_cex_text(clean_q)
-        cex_stop_words = {
-            "de", "la", "el", "los", "las", "un", "una", "uno", "del", "con", "sin", "para", "por", "en",
-            "consola", "tarjeta", "grafica", "videojuego", "reproductor", "volante", "portatil", "ordenador",
-            "cargador", "funda", "cables", "caja"
-        }
-        q_tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 2 and w not in cex_stop_words]
-        if not q_tokens:
-            return None
-
-        # Filtrar candidatos en SQLite con AND de los tokens principales para acotar a <1ms
-        tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 3 and w not in cex_stop_words]
-        if not tokens:
-            tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 2 and w not in cex_stop_words]
-        if not tokens:
-            tokens = [w for w in re.split(r"[^\w]+", q_norm) if len(w) >= 2]
-
-        c = conn.cursor()
-        where_clauses = ["box_name LIKE ?" for _ in tokens]
-        params = [f"%{w}%" for w in tokens]
-        sql = f"""
-            SELECT box_id, box_name, category_name, cash_price, voucher_price, sell_price
-            FROM cex_catalog_mirror
-            WHERE cash_price > 0 AND sell_price > 0 AND ({" AND ".join(where_clauses)})
-        """
-        c.execute(sql, params)
-        rows = c.fetchall()
-
+        rows = _run(tokens)
         if not rows and len(tokens) > 1:
-            best_tokens = sorted(tokens, key=len, reverse=True)[:2]
-            where_clauses = ["box_name LIKE ?" for _ in best_tokens]
-            params = [f"%{w}%" for w in best_tokens]
-            sql = f"""
-                SELECT box_id, box_name, category_name, cash_price, voucher_price, sell_price
-                FROM cex_catalog_mirror
-                WHERE cash_price > 0 AND sell_price > 0 AND ({" AND ".join(where_clauses)})
-            """
-            c.execute(sql, params)
-            rows = c.fetchall()
-
-        if not rows:
-            return None
-
-        full_ctx = f"{title_context} {desc_context}".strip()
-        t = target if target is not None else ({"id": rid} if rid else None)
-
-        valid_boxes = []
-        for r in rows:
-            box_id, bname, cat, cash, voucher, sell = r[0], r[1], r[2], float(r[3]), float(r[4]), float(r[5])
-            if not _box_matches_query_and_radar(
-                bname, cat, clean_q, target=t, context_text=full_ctx, includes_lens=includes_lens
-            ):
-                continue
-
-            valid_boxes.append({
-                "box_name": bname,
-                "cash": cash,
-                "voucher": voucher,
-                "sell": sell,
-                "box_id": str(box_id or ""),
-                "category": cat or "",
-                "from_cache": True,
-                "from_mirror": True
-            })
-
-        if not valid_boxes:
-            return None
-
-        if return_all_variants:
-            valid_boxes.sort(
-                key=lambda b: _score_cex_candidate(b, clean_q, radar_id=rid, full_ctx=full_ctx, includes_box=includes_box),
-                reverse=True
-            )
-            return valid_boxes[:8]
-
-        best_box = _score_cex_candidate(
-            valid_boxes, clean_q, radar_id=rid, full_ctx=full_ctx, includes_box=includes_box
-        )
-        return best_box
+            rows = _run(sorted(tokens, key=len, reverse=True)[:2])
     except Exception as e:
-        print(f"[DEBUG] lookup_cex_catalog_mirror error: {e}")
-        return None
+        print(f"[DEBUG] _mirror_candidates error: {e}")
+        return []
+    return [
+        {
+            "box_name": r[1], "category": r[2] or "", "cash": float(r[3]), "voucher": float(r[4] or 0.0),
+            "sell": float(r[5]), "box_id": str(r[0] or ""), "from_cache": True, "from_mirror": True
+        }
+        for r in rows
+    ]
 
 
-def fetch_cex_live(
-    conn, search_query, reference_price=0, return_all_variants=False,
-    target=None, title_context="", desc_context="", includes_box=False, includes_lens=True
-):
-    if not search_query:
-        return None
+def _normalize_algolia_hit(h):
+    return {
+        "box_name": str(h.get("boxName") or ""),
+        "category": str(h.get("categoryFriendlyName") or ""),
+        "cash": float(h.get("cashPriceCalculated") or h.get("cashBuyPrice") or h.get("cashPrice") or 0),
+        "voucher": float(h.get("exchangePriceCalculated") or h.get("exchangePrice") or 0),
+        "sell": float(h.get("sellPrice") or 0),
+        "box_id": str(h.get("boxId") or ""),
+        "in_stock_online": bool(h.get("inStockOnline")),
+    }
 
-    clean_q = re.sub(r"\(.*?\)", "", search_query).strip()
-    if (target or {}).get("id") == "simracing_wheels" or any(w in clean_q.lower() for w in ("g29", "g920", "g923", "t300")):
-        clean_q = re.sub(r"\b(volante|pedales|y|con)\b", "", clean_q, flags=re.IGNORECASE)
-        clean_q = re.sub(r"\s+", " ", clean_q).strip()
-    if not clean_q:
-        return None
 
-    radar_id = (target or {}).get("id", "generic") if isinstance(target, dict) else "generic"
-    cache_lookup_key = f"v43:{radar_id}:{clean_q.lower()}:b{int(bool(includes_box))}:l{int(bool(includes_lens))}"
-
-    if conn and not return_all_variants:
+def _algolia_hits_cached(conn, clean_q):
+    """
+    Hits crudos normalizados de Algolia para la consulta, cacheados en cex_query_hits
+    (24 h con hits, 6 h si la respuesta fue vacía = caché negativa). El contexto del anuncio NO
+    forma parte de la clave. Los errores de red/HTTP devuelven None y no se cachean.
+    """
+    key = (clean_q or "").lower().strip()
+    if conn:
         try:
-            c = conn.cursor()
-            c.execute(
-                "SELECT box_name, cash_price, voucher_price, sell_price, box_id FROM cex_cache WHERE search_query = ?",
-                (cache_lookup_key,)
-            )
-            row = c.fetchone()
-            if row and row[1] > 0:
-                return {
-                    "box_name": row[0],
-                    "cash": float(row[1]),
-                    "voucher": float(row[2]),
-                    "sell": float(row[3]),
-                    "box_id": row[4] or "",
-                    "from_cache": True
-                }
+            row = conn.execute(
+                f"""SELECT hits_json FROM cex_query_hits
+                    WHERE query = ? AND fetched_at >= datetime('now',
+                        CASE WHEN hits_json = '[]' THEN '-{int(CEX_QUERY_HITS_NEGATIVE_TTL_HOURS)} hours'
+                             ELSE '-{int(CEX_QUERY_HITS_TTL_HOURS)} hours' END)""",
+                (key,)
+            ).fetchone()
+            if row:
+                hits = json.loads(row[0])
+                for h in hits:
+                    h["from_cache"] = True
+                return hits
         except Exception:
             pass
-
-    # 1.5. Consultar espejo local cex_catalog_mirror en SQLite (<1ms)
-    if conn:
-        mirror_res = lookup_cex_catalog_mirror(
-            conn=conn,
-            clean_q=clean_q,
-            target=target,
-            title_context=title_context,
-            desc_context=desc_context,
-            includes_box=includes_box,
-            includes_lens=includes_lens,
-            return_all_variants=return_all_variants,
-            radar_id=radar_id
-        )
-        if mirror_res:
-            if not return_all_variants and isinstance(mirror_res, dict) and mirror_res.get("cash", 0) > 0:
-                try:
-                    c = conn.cursor()
-                    c.execute(
-                        """INSERT OR REPLACE INTO cex_cache
-                           (search_query, box_name, cash_price, voucher_price, sell_price, box_id, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                        (cache_lookup_key, mirror_res["box_name"], mirror_res["cash"], mirror_res["voucher"], mirror_res["sell"], mirror_res.get("box_id", ""))
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
-            return mirror_res
 
     url = "https://search.webuy.io/1/indexes/prod_cex_es/query"
     headers = {
@@ -2546,7 +2485,6 @@ def fetch_cex_live(
         "Referer": "https://es.webuy.com/"
     }
     proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-
     try:
         r = requests.post(
             url,
@@ -2558,78 +2496,123 @@ def fetch_cex_live(
         )
         if r.status_code != 200:
             return None
-
-        hits = r.json().get("hits", [])
-        if not hits:
-            return None
-
-        q_lower = clean_q.lower()
-        q_wants_accessory = any(ak in q_lower for ak in ACCESSORY_KEYWORDS_CEX) and radar_id != "simracing_wheels"
-        full_ctx = f"{title_context} {desc_context}"
-
-        valid_boxes = []
-        for h in hits:
-            cash = float(h.get("cashPriceCalculated") or h.get("cashBuyPrice") or h.get("cashPrice") or 0)
-            voucher = float(h.get("exchangePriceCalculated") or h.get("exchangePrice") or 0)
-            sell = float(h.get("sellPrice") or 0)
-            bname = str(h.get("boxName") or "")
-            cat = str(h.get("categoryFriendlyName") or "")
-            if cash <= 0 or sell <= 0:
-                continue
-
-            bname_l = bname.lower()
-            if not q_wants_accessory and radar_id != "simracing_wheels":
-                bname_without_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock|lector)", "", bname_l)
-                if any(ak in bname_without_sin for ak in ACCESSORY_KEYWORDS_CEX) and "accesorio" in cat.lower():
-                    continue
-                if reference_price >= 30 and sell < 25:
-                    continue
-
-            if not _box_matches_query_and_radar(
-                bname, cat, clean_q, target=target, context_text=full_ctx, includes_lens=includes_lens
-            ):
-                continue
-
-            valid_boxes.append({
-                "box_name": bname,
-                "cash": cash,
-                "voucher": voucher,
-                "sell": sell,
-                "box_id": str(h.get("boxId") or ""),
-                "category": cat,
-                "in_stock_online": bool(h.get("inStockOnline"))
-            })
-
-        if not valid_boxes:
-            return None
-
-        if return_all_variants:
-            return valid_boxes[:8]
-
-        top_relevant = valid_boxes[:10]
-        best_box = _score_cex_candidate(
-            top_relevant, clean_q, radar_id=radar_id, full_ctx=full_ctx, includes_box=includes_box
-        )
-        if not best_box:
-            best_box = top_relevant[0]
-
-        if conn:
-            try:
-                c = conn.cursor()
-                c.execute(
-                    """INSERT OR REPLACE INTO cex_cache
-                       (search_query, box_name, cash_price, voucher_price, sell_price, box_id, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                    (cache_lookup_key, best_box["box_name"], best_box["cash"], best_box["voucher"], best_box["sell"], best_box["box_id"])
-                )
-                conn.commit()
-            except Exception:
-                pass
-
-        best_box["from_cache"] = False
-        return best_box
+        hits = [_normalize_algolia_hit(h) for h in r.json().get("hits", [])]
     except Exception:
         return None
+
+    if conn:
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO cex_query_hits (query, hits_json, fetched_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (key, json.dumps(hits, ensure_ascii=False))
+            )
+            conn.commit()
+        except Exception:
+            pass
+    return hits
+
+
+def _pick_cex_boxes(
+    candidates, clean_q, radar_id, target, full_ctx, includes_box, includes_lens,
+    reference_price=0, return_all_variants=False, filter_accessories=True
+):
+    """Filtra y puntúa en memoria (cada llamada, con el contexto real del anuncio)."""
+    q_wants_accessory = any(ak in clean_q.lower() for ak in ACCESSORY_KEYWORDS_CEX) and radar_id != "simracing_wheels"
+    valid = []
+    for b in candidates:
+        if b["cash"] <= 0 or b["sell"] <= 0:
+            continue
+        if filter_accessories and not q_wants_accessory and radar_id != "simracing_wheels":
+            bname_without_sin = re.sub(r"sin\s+(cargador|caja|lapiz|manual|dock|lector)", "", b["box_name"].lower())
+            if any(ak in bname_without_sin for ak in ACCESSORY_KEYWORDS_CEX) and "accesorio" in b["category"].lower():
+                continue
+            if reference_price >= 30 and b["sell"] < 25:
+                continue
+        if not _box_matches_query_and_radar(
+            b["box_name"], b["category"], clean_q, target=target, context_text=full_ctx, includes_lens=includes_lens
+        ):
+            continue
+        valid.append(dict(b))
+    if not valid:
+        return None
+    if return_all_variants:
+        valid.sort(
+            key=lambda b: _score_cex_candidate(b, clean_q, radar_id=radar_id, full_ctx=full_ctx, includes_box=includes_box),
+            reverse=True
+        )
+        return valid[:8]
+    return _score_cex_candidate(valid, clean_q, radar_id=radar_id, full_ctx=full_ctx, includes_box=includes_box) or valid[0]
+
+
+def lookup_cex_catalog_mirror(
+    conn, clean_q, target=None, title_context="", desc_context="",
+    includes_box=False, includes_lens=True, return_all_variants=False,
+    radar_id=""
+):
+    """
+    Busca en el espejo local SQLite (solo filas de las últimas 36 h) con latencia <1ms.
+    Devuelve dict con la mejor ficha de CeX (o list si return_all_variants=True), o None si no hay match.
+    """
+    if not conn or not clean_q:
+        return None
+    try:
+        rid = (target or {}).get("id", "") if isinstance(target, dict) else (radar_id or "generic")
+        t = target if target is not None else ({"id": rid} if rid else None)
+        full_ctx = f"{title_context} {desc_context}".strip()
+        return _pick_cex_boxes(
+            _mirror_candidates(conn, clean_q), clean_q, rid, t, full_ctx, includes_box, includes_lens,
+            return_all_variants=return_all_variants, filter_accessories=False
+        )
+    except Exception as e:
+        print(f"[DEBUG] lookup_cex_catalog_mirror error: {e}")
+        return None
+
+
+def fetch_cex_live(
+    conn, search_query, reference_price=0, return_all_variants=False,
+    target=None, title_context="", desc_context="", includes_box=False, includes_lens=True,
+    radar_id=""
+):
+    """
+    Único camino de consulta a CeX: espejo local fresco (36 h) y, si no hay ficha válida, hits de Algolia
+    cacheados por consulta (24 h; 6 h si vacíos). La ficha se elige en cada llamada con el contexto
+    del anuncio; ya no se lee ni escribe cex_cache.
+    """
+    if not search_query:
+        return None
+
+    clean_q = re.sub(r"\(.*?\)", "", search_query).strip()
+    if (target or {}).get("id") == "simracing_wheels" or any(w in clean_q.lower() for w in ("g29", "g920", "g923", "t300")):
+        clean_q = re.sub(r"\b(volante|pedales|y|con)\b", "", clean_q, flags=re.IGNORECASE)
+        clean_q = re.sub(r"\s+", " ", clean_q).strip()
+    if not clean_q:
+        return None
+
+    if target is None and radar_id:
+        target = {"id": radar_id}
+    rid = (target or {}).get("id", "generic") if isinstance(target, dict) else (radar_id or "generic")
+    full_ctx = f"{title_context} {desc_context}".strip()
+    pick_args = dict(
+        clean_q=clean_q, radar_id=rid, target=target, full_ctx=full_ctx, includes_box=includes_box,
+        includes_lens=includes_lens, reference_price=reference_price, return_all_variants=return_all_variants
+    )
+
+    if conn:
+        res = _pick_cex_boxes(_mirror_candidates(conn, clean_q), **pick_args)
+        if res:
+            return res
+
+    hits = _algolia_hits_cached(conn, clean_q)
+    if not hits:
+        return None
+    from_cache = bool(hits[0].get("from_cache"))
+    res = _pick_cex_boxes(hits, **pick_args)
+    if isinstance(res, dict):
+        res["from_cache"] = from_cache
+    elif isinstance(res, list):
+        for b in res:
+            b["from_cache"] = from_cache
+    return res
 
 
 def get_cex_Cached_or_live(
@@ -2637,88 +2620,11 @@ def get_cex_Cached_or_live(
     target=None, title_context="", desc_context="", includes_box=False, includes_lens=True,
     radar_id=""
 ):
-    """
-    Alias unificado y retrocompatible para consultar CeX con:
-    1) Hit exacto en cex_cache (0ms)
-    2) Búsqueda en espejo local cex_catalog_mirror con _box_matches_query_and_radar y _score_cex_candidate (0ms)
-    3) Fallback a red en vivo con fetch_cex_live (~150ms)
-    """
-    t = target if target is not None else ({"id": radar_id} if radar_id else None)
-    rid = (t or {}).get("id", "generic") if isinstance(t, dict) else (radar_id or "generic")
-
-    if not search_query:
-        return None
-
-    clean_q = re.sub(r"\(.*?\)", "", search_query).strip()
-    if rid == "simracing_wheels" or any(w in clean_q.lower() for w in ("g29", "g920", "g923", "t300")):
-        clean_q = re.sub(r"\b(volante|pedales|y|con)\b", "", clean_q, flags=re.IGNORECASE)
-        clean_q = re.sub(r"\s+", " ", clean_q).strip()
-
-    if not clean_q:
-        return None
-
-    cache_lookup_key = f"v43:{rid}:{clean_q.lower()}:b{int(bool(includes_box))}:l{int(bool(includes_lens))}"
-
-    # 1. Comprobar si ya existe en cex_cache exacta
-    if conn and not return_all_variants:
-        try:
-            c = conn.cursor()
-            c.execute(
-                "SELECT box_name, cash_price, voucher_price, sell_price, box_id FROM cex_cache WHERE search_query = ?",
-                (cache_lookup_key,)
-            )
-            row = c.fetchone()
-            if row and row[1] > 0:
-                return {
-                    "box_name": row[0],
-                    "cash": float(row[1]),
-                    "voucher": float(row[2]),
-                    "sell": float(row[3]),
-                    "box_id": row[4] or "",
-                    "from_cache": True
-                }
-        except Exception:
-            pass
-
-    # 2. Buscar primero en espejo local cex_catalog_mirror (<1ms)
-    if conn:
-        mirror_box = lookup_cex_catalog_mirror(
-            conn=conn,
-            clean_q=clean_q,
-            target=t,
-            title_context=title_context,
-            desc_context=desc_context,
-            includes_box=includes_box,
-            includes_lens=includes_lens,
-            return_all_variants=return_all_variants,
-            radar_id=rid
-        )
-        if mirror_box:
-            if not return_all_variants and isinstance(mirror_box, dict) and mirror_box.get("cash", 0) > 0:
-                try:
-                    c = conn.cursor()
-                    c.execute(
-                        """INSERT OR REPLACE INTO cex_cache
-                           (search_query, box_name, cash_price, voucher_price, sell_price, box_id, updated_at)
-                           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-                        (cache_lookup_key, mirror_box["box_name"], mirror_box["cash"], mirror_box["voucher"], mirror_box["sell"], mirror_box.get("box_id", ""))
-                    )
-                    conn.commit()
-                except Exception:
-                    pass
-            return mirror_box
-
-    # 3. Fallback a fetch_cex_live en vivo
+    """Alias retrocompatible de fetch_cex_live (acepta radar_id)."""
     return fetch_cex_live(
-        conn=conn,
-        search_query=search_query,
-        reference_price=reference_price,
-        return_all_variants=return_all_variants,
-        target=t,
-        title_context=title_context,
-        desc_context=desc_context,
-        includes_box=includes_box,
-        includes_lens=includes_lens
+        conn, search_query, reference_price=reference_price, return_all_variants=return_all_variants,
+        target=target, title_context=title_context, desc_context=desc_context,
+        includes_box=includes_box, includes_lens=includes_lens, radar_id=radar_id
     )
 
 

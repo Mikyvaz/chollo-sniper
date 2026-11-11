@@ -2547,7 +2547,7 @@ def _fetch_estado_data():
             c.execute("SELECT COUNT(*) FROM market_seen_items WHERE platform = ?", (p,))
             counts[p] = c.fetchone()[0]
 
-        c.execute("SELECT COUNT(*) FROM cex_cache")
+        c.execute("SELECT COUNT(*) FROM cex_query_hits")
         cex_cnt = c.fetchone()[0]
 
         c.execute("SELECT COUNT(*) FROM cex_catalog_mirror")
