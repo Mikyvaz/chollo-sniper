@@ -28,6 +28,7 @@ except ImportError:
 from text_rules import norm as _norm_text, has_token as _has_token, first_token as _first_token, _negated as _is_negated
 from text_rules import redact_secrets as _redact
 from http_client import wallapop_client, vinted_doc_client, PlatformClient
+from antiban import get_platform_bucket
 
 # ==================== TOKENS CATEGORIZADOS ====================
 
@@ -487,8 +488,11 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
     if platform == "WALLAPOP":
         if seller_id and (reviews_count is None or rating is None):
             sess = http_session or _get_thread_local_session()
+            bkt = get_platform_bucket("WALLAPOP") if http_session is None else None
             wallapop_http_ok = False
             try:
+                if bkt is not None:
+                    bkt.acquire()
                 url = f"https://api.wallapop.com/api/v3/users/{seller_id}"
                 r = sess.get(url, timeout=2.5)
                 if r.status_code == 200:
@@ -526,6 +530,8 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
 
             if reviews_count is None or rating is None:
                 try:
+                    if bkt is not None:
+                        bkt.acquire()
                     stats_url = f"https://api.wallapop.com/api/v3/users/{seller_id}/stats"
                     st_r = sess.get(stats_url, timeout=2.5)
                     if st_r.status_code == 200:
@@ -579,13 +585,18 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                 sess = _get_thread_local_session()
             else:
                 sess = vinted_doc_client
+            bkt = get_platform_bucket("VINTED") if http_session is None else None
             vinted_ok = False
             try:
+                if bkt is not None:
+                    bkt.acquire()
                 url = f"https://www.vinted.es/api/v2/users/{seller_id}"
                 r = sess.get(url, timeout=4)
                 if r.status_code in (401, 403) and not getattr(sess, "_vinted_warmed", False):
                     # Sin cookies de vinted.es la API rechaza la petición: visitar la portada una vez y reintentar
                     try:
+                        if bkt is not None:
+                            bkt.acquire()
                         if isinstance(sess, PlatformClient):
                             sess.get("https://www.vinted.es/", kind="document", timeout=8)
                         else:
@@ -593,6 +604,8 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                         sess._vinted_warmed = True
                     except Exception:
                         pass
+                    if bkt is not None:
+                        bkt.acquire()
                     r = sess.get(url, timeout=4)
                 if r.status_code == 200:
                     vinted_ok = True

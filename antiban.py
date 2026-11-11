@@ -10,10 +10,13 @@ Incluye:
 """
 
 import os
+import json
+import heapq
 import random
 import time
 import threading
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from curl_cffi import requests
 from text_rules import redact_secrets as _redact
@@ -598,3 +601,402 @@ class ParserHealthTracker:
             health_monitor.send_health_embed(title, desc, 0xE74C3C)
 
 default_parser_tracker = ParserHealthTracker("DEFAULT")
+
+
+# ==================== TOKEN BUCKET Y PLANIFICADOR POR CONSULTA (T2.3) ====================
+
+class TokenBucket:
+    """Limitador de tasa thread-safe con penalización por bloqueo y recuperación gradual."""
+
+    def __init__(self, rate_per_s: float, burst: int = 2, *, clock=time.monotonic, sleeper=time.sleep):
+        self._lock = threading.Lock()
+        self.base = max(0.01, float(rate_per_s))
+        self.base_rate = self.base
+        self.rate = self.base
+        self.burst = max(1, int(burst))
+        self._clock = clock
+        self._sleeper = sleeper
+        self._tokens = float(self.burst)
+        self._last = float(self._clock())
+        self._success_streak = 0
+        self._recent = deque()
+
+    def set_base_rate(self, rate_per_s: float):
+        with self._lock:
+            new_base = max(0.01, float(rate_per_s))
+            if abs(new_base - self.base) > 1e-9:
+                ratio = self.rate / self.base if self.base > 0 else 1.0
+                self.base = new_base
+                self.base_rate = new_base
+                self.rate = max(new_base * 0.25, min(new_base, new_base * ratio))
+
+    def acquire(self) -> float:
+        """Bloquea hasta disponer de 1 token; devuelve los segundos esperados."""
+        with self._lock:
+            now = float(self._clock())
+            if now > self._last:
+                elapsed = now - self._last
+                self._tokens = min(float(self.burst), self._tokens + elapsed * self.rate)
+                self._last = now
+
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                token_ready = self._last
+            else:
+                needed = 1.0 - self._tokens
+                wait_token = needed / self.rate
+                self._tokens = 0.0
+                token_ready = self._last + wait_token
+                self._last = token_ready
+
+            # Garantizar que en ninguna ventana deslizante de 60 s se supere round(rate * 60)
+            max_per_min = max(1, int(round(self.rate * 60.0)))
+            while self._recent and (token_ready - self._recent[0]) >= 60.0:
+                self._recent.popleft()
+            if len(self._recent) >= max_per_min:
+                min_allowed = self._recent[0] + 60.0
+                if min_allowed > token_ready:
+                    token_ready = min_allowed
+                    self._last = max(self._last, token_ready)
+                while self._recent and (token_ready - self._recent[0]) >= 60.0:
+                    self._recent.popleft()
+
+            self._recent.append(token_ready)
+            wait_s = max(0.0, token_ready - now)
+
+        if wait_s > 0.0:
+            self._sleeper(wait_s)
+        return wait_s
+
+    def penalize(self, factor: float = 0.5) -> float:
+        """Tras un 403/429: rate = max(rate * factor, base * 0.25)."""
+        with self._lock:
+            self._success_streak = 0
+            self.rate = max(self.rate * float(factor), self.base * 0.25)
+            return self.rate
+
+    def recover(self, immediate: bool = False) -> float:
+        """Cada 50 éxitos seguidos: rate = min(base, rate * 1.1)."""
+        with self._lock:
+            if immediate:
+                self._success_streak = 0
+                self.rate = min(self.base, self.rate * 1.1)
+                return self.rate
+            self._success_streak += 1
+            if self._success_streak >= 50:
+                self._success_streak = 0
+                self.rate = min(self.base, self.rate * 1.1)
+            return self.rate
+
+
+@dataclass(order=True)
+class QueryTask:
+    next_due: float
+    radar_id: str = field(default="", compare=False)
+    query: str = field(default="", compare=False)
+    min_price: float = field(default=0.0, compare=False)
+    max_price: float = field(default=9999.0, compare=False)
+    interval_s: float = field(default=20.0, compare=False)
+    tier: str = field(default="hot", compare=False)
+    target: dict = field(default_factory=dict, compare=False, repr=False)
+
+
+def _extract_queries_for_platform(target: dict, platform: str):
+    plat = (platform or "wallapop").lower()
+    if plat == "wallapop" and "wallapop_keywords" in target:
+        wk = target["wallapop_keywords"]
+        qs = wk if isinstance(wk, list) else [wk]
+    elif plat == "vinted" and "vinted_keywords" in target:
+        vk = target["vinted_keywords"]
+        qs = vk if isinstance(vk, list) else [vk]
+    else:
+        kw = target.get("keywords", "")
+        qs = kw if isinstance(kw, list) else [str(kw).strip()]
+    return [str(q).strip() for q in qs if str(q).strip()]
+
+
+def build_query_tasks_from_config(config: dict, platform: str = "wallapop", now: float = 0.0):
+    plat = (platform or "wallapop").lower()
+    sched_cfg = (config or {}).get("scheduling", {}) or {}
+    plat_cfg = sched_cfg.get(plat, {}) or {}
+    default_hot = 20.0 if plat == "wallapop" else 60.0
+    default_std = 80.0 if plat == "wallapop" else 240.0
+    hot_interval = float(plat_cfg.get("hot_interval_s", default_hot))
+    std_interval = float(plat_cfg.get("standard_interval_s", default_std))
+
+    tasks = []
+    targets = (config or {}).get("targets", (config or {}).get("searches", [])) or []
+    for t in targets:
+        if not isinstance(t, dict) or not t.get("enabled", True):
+            continue
+        platforms = [str(p).lower() for p in t.get("platforms", [plat])]
+        if plat not in platforms:
+            continue
+        tier = str(t.get("tier", "hot")).lower()
+        interval_s = hot_interval if tier == "hot" else std_interval
+        radar_id = str(t.get("id") or t.get("name") or "")
+        min_p = float(t.get("min_price", 0) or 0)
+        max_p = float(t.get("max_price", 9999) or 9999)
+        for q in _extract_queries_for_platform(t, plat):
+            tasks.append(
+                QueryTask(
+                    next_due=float(now),
+                    radar_id=radar_id,
+                    query=q,
+                    min_price=min_p,
+                    max_price=max_p,
+                    interval_s=interval_s,
+                    tier=tier,
+                    target=t,
+                )
+            )
+    return tasks
+
+
+class QueryScheduler:
+    """Planificador heapq por consulta con escalonamiento inicial, prioridad por cadencia y recarga en caliente."""
+
+    def __init__(
+        self,
+        tasks=None,
+        bucket: TokenBucket = None,
+        *,
+        platform: str = "wallapop",
+        config: dict = None,
+        config_path: str = None,
+        night_multiplier: float = 3.0,
+        night_start_hour: int = 2,
+        night_end_hour: int = 7,
+        clock=None,
+        sleeper=None,
+        now_fn=None,
+        heartbeat=None,
+        rng=None,
+        stagger_initial: bool = True,
+    ):
+        self._lock = threading.Lock()
+        self.platform = (platform or "wallapop").lower()
+        self.bucket = bucket
+        self._clock = clock or (bucket._clock if bucket is not None else time.monotonic)
+        self._sleeper = sleeper or (bucket._sleeper if bucket is not None else time.sleep)
+        self._now_fn = now_fn or datetime.now
+        self._heartbeat = heartbeat
+        self._rng = rng or random.Random()
+        self.night_multiplier = float(night_multiplier)
+        self.night_start_hour = int(night_start_hour)
+        self.night_end_hour = int(night_end_hour)
+        self.config_path = config_path
+        self.config = config or {}
+        self._last_mtime = None
+        if self.config_path and os.path.exists(self.config_path):
+            try:
+                self._last_mtime = os.path.getmtime(self.config_path)
+            except Exception:
+                self._last_mtime = None
+
+        raw_tasks = list(tasks) if tasks is not None else build_query_tasks_from_config(self.config, self.platform, self._clock())
+        if stagger_initial and len(raw_tasks) > 1:
+            self._stagger_tasks_in_place(raw_tasks)
+        self._heap = list(raw_tasks)
+        heapq.heapify(self._heap)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: dict,
+        *,
+        platform: str = "wallapop",
+        bucket: TokenBucket = None,
+        config_path: str = None,
+        clock=None,
+        sleeper=None,
+        now_fn=None,
+        heartbeat=None,
+        rng=None,
+    ):
+        plat = (platform or "wallapop").lower()
+        sched_cfg = (config or {}).get("scheduling", {}) or {}
+        plat_cfg = sched_cfg.get(plat, {}) or {}
+        default_rate = 1.0 if plat == "wallapop" else 0.30
+        rate_per_s = float(plat_cfg.get("rate_per_s", default_rate))
+        night_mult = float(sched_cfg.get("night_multiplier", 3.0))
+        clk = clock or (bucket._clock if bucket is not None else time.monotonic)
+        slp = sleeper or (bucket._sleeper if bucket is not None else time.sleep)
+        if bucket is None:
+            bucket = TokenBucket(rate_per_s=rate_per_s, burst=2, clock=clk, sleeper=slp)
+        else:
+            bucket.set_base_rate(rate_per_s)
+        tasks = build_query_tasks_from_config(config, plat, now=float(clk()))
+        return cls(
+            tasks,
+            bucket=bucket,
+            platform=plat,
+            config=config,
+            config_path=config_path,
+            night_multiplier=night_mult,
+            clock=clk,
+            sleeper=slp,
+            now_fn=now_fn,
+            heartbeat=heartbeat,
+            rng=rng,
+        )
+
+    @staticmethod
+    def _stagger_tasks_in_place(tasks):
+        by_interval = {}
+        for t in tasks:
+            by_interval.setdefault(float(t.interval_s), []).append(t)
+        for interval_s, group in by_interval.items():
+            if len(group) <= 1:
+                continue
+            dues = {round(float(t.next_due), 6) for t in group}
+            if len(dues) == 1:
+                base_due = float(group[0].next_due)
+                n = len(group)
+                for idx, t in enumerate(group):
+                    t.next_due = base_due + (idx * interval_s) / n
+
+    @property
+    def tasks(self):
+        with self._lock:
+            return list(self._heap)
+
+    def is_night_time(self) -> bool:
+        dt = self._now_fn()
+        h = dt.hour if hasattr(dt, "hour") else int(dt)
+        return self.night_start_hour <= h < self.night_end_hour
+
+    def _sleep_until(self, target_time: float):
+        while True:
+            now = float(self._clock())
+            rem = target_time - now
+            if rem <= 0.0:
+                break
+            step = min(15.0, rem)
+            self._sleeper(step)
+            if self._heartbeat is not None:
+                try:
+                    self._heartbeat()
+                except Exception:
+                    pass
+
+    def next(self) -> QueryTask:
+        """Espera hasta next_due (llamando a touch_heartbeat cada <= 15 s) y adquiere 1 token del bucket."""
+        with self._lock:
+            if not self._heap:
+                raise RuntimeError("QueryScheduler has no tasks")
+            earliest_due = self._heap[0].next_due
+
+        now = float(self._clock())
+        if earliest_due > now:
+            self._sleep_until(earliest_due)
+        elif self._heartbeat is not None:
+            try:
+                self._heartbeat()
+            except Exception:
+                pass
+
+        if self.bucket is not None:
+            self.bucket.acquire()
+
+        now_after = float(self._clock())
+        with self._lock:
+            due = []
+            while self._heap and self._heap[0].next_due <= now_after:
+                due.append(heapq.heappop(self._heap))
+            if not due:
+                task = heapq.heappop(self._heap)
+            else:
+                # Entre las tareas ya vencidas, priorizar menor interval_s (hot antes que standard)
+                due.sort(key=lambda t: (float(t.interval_s), float(t.next_due)))
+                task = due.pop(0)
+                for rem_t in due:
+                    heapq.heappush(self._heap, rem_t)
+            return task
+
+    def done(self, task: QueryTask) -> QueryTask:
+        """Reprograma task con next_due = now + interval_s * mult * uniform(0.85, 1.15)."""
+        now = float(self._clock())
+        mult = self.night_multiplier if self.is_night_time() else 1.0
+        jitter = self._rng.uniform(0.85, 1.15)
+        task.next_due = now + float(task.interval_s) * mult * jitter
+        with self._lock:
+            heapq.heappush(self._heap, task)
+        return task
+
+    def reload_if_changed(self, config_mtime_or_path=None) -> bool:
+        """Reconstruye las tareas si cambia el mtime de config.json, conservando next_due de las existentes."""
+        path = self.config_path
+        given_mtime = None
+        if isinstance(config_mtime_or_path, (int, float)):
+            given_mtime = float(config_mtime_or_path)
+        elif isinstance(config_mtime_or_path, str):
+            path = config_mtime_or_path
+
+        if given_mtime is None:
+            if not path or not os.path.exists(path):
+                return False
+            try:
+                given_mtime = float(os.path.getmtime(path))
+            except Exception:
+                return False
+
+        if self._last_mtime is not None and abs(given_mtime - self._last_mtime) < 1e-6:
+            return False
+
+        new_cfg = None
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    new_cfg = json.load(f)
+            except Exception:
+                return False
+        if not isinstance(new_cfg, dict):
+            return False
+
+        self._last_mtime = given_mtime
+        self.config = new_cfg
+        sched_cfg = new_cfg.get("scheduling", {}) or {}
+        plat_cfg = sched_cfg.get(self.platform, {}) or {}
+        if "night_multiplier" in sched_cfg:
+            self.night_multiplier = float(sched_cfg["night_multiplier"])
+        if self.bucket is not None and "rate_per_s" in plat_cfg:
+            self.bucket.set_base_rate(float(plat_cfg["rate_per_s"]))
+
+        now = float(self._clock())
+        fresh_tasks = build_query_tasks_from_config(new_cfg, self.platform, now=now)
+        with self._lock:
+            existing_by_key = {(t.radar_id, t.query): t for t in self._heap}
+            merged = []
+            new_only = []
+            for ft in fresh_tasks:
+                prev = existing_by_key.get((ft.radar_id, ft.query))
+                if prev is not None:
+                    ft.next_due = prev.next_due
+                    merged.append(ft)
+                else:
+                    new_only.append(ft)
+            if len(new_only) > 1:
+                self._stagger_tasks_in_place(new_only)
+            merged.extend(new_only)
+            self._heap = merged
+            heapq.heapify(self._heap)
+        return True
+
+
+_PLATFORM_BUCKETS = {}
+_PLATFORM_BUCKETS_LOCK = threading.Lock()
+
+
+def set_platform_bucket(platform: str, bucket: TokenBucket):
+    with _PLATFORM_BUCKETS_LOCK:
+        if bucket is None:
+            _PLATFORM_BUCKETS.pop(str(platform or "").upper(), None)
+        else:
+            _PLATFORM_BUCKETS[str(platform or "").upper()] = bucket
+
+
+def get_platform_bucket(platform: str) -> TokenBucket:
+    with _PLATFORM_BUCKETS_LOCK:
+        return _PLATFORM_BUCKETS.get(str(platform or "").upper())
+

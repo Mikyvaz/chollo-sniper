@@ -7,6 +7,19 @@
   "ai": {
     "pro_model_enabled": true
   },
+  "scheduling": {
+    "wallapop": {
+      "hot_interval_s": 20,
+      "standard_interval_s": 80,
+      "rate_per_s": 1.0
+    },
+    "vinted": {
+      "hot_interval_s": 60,
+      "standard_interval_s": 240,
+      "rate_per_s": 0.30
+    },
+    "night_multiplier": 3
+  },
   "stores": {
     "milanuncios": {"enabled": true},
     "cashconverters": {"enabled": true},

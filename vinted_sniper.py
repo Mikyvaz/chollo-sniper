@@ -17,10 +17,13 @@ import random
 import urllib.parse
 from curl_cffi import requests
 
-from antiban import BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker, default_rate_limiter
+from antiban import (
+    BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker,
+    default_rate_limiter, TokenBucket, QueryScheduler, set_platform_bucket, get_platform_bucket
+)
 from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
-    WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL,
+    WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL, CONFIG_PATH,
     init_db, load_config, run_db_maintenance,
     check_item_seen_or_dropped, is_duplicate_recent_deal, mark_item_seen, count_platform_seen,
     passes_filters, fetch_cex_live, download_item_images,
@@ -130,6 +133,9 @@ class VintedClient:
             default_rate_limiter.record_request("VINTED", time.time() - t0, r.status_code)
 
             if r.status_code in (401, 403, 429):
+                bkt = get_platform_bucket("VINTED")
+                if bkt is not None:
+                    bkt.penalize()
                 should_cd, cd_secs = self.health_monitor.handle_http_response(r.status_code, url=url, query=query_text)
                 if should_cd:
                     print(f"[VINTED COOLDOWN] HTTP {r.status_code}. Registrado cooldown de {cd_secs // 60} min (estado no bloqueante)...")
@@ -142,6 +148,9 @@ class VintedClient:
 
             if r.status_code == 200:
                 self.health_monitor.handle_http_response(200, query=query_text)
+                bkt = get_platform_bucket("VINTED")
+                if bkt is not None:
+                    bkt.recover()
             else:
                 print(f"[WARN] Vinted HTTP {r.status_code} buscando '{query_text}'")
                 parser_tracker.record_empty("VINTED", query_text, self.health_monitor, reason=f"HTTP {r.status_code}")
@@ -339,15 +348,22 @@ class VintedClient:
             return []
 
     def fetch_item_details(self, item_url):
+        bkt = get_platform_bucket("VINTED")
+        if bkt is not None:
+            bkt.acquire()
         t0 = time.time()
         try:
             r = self.session.get(item_url, timeout=12)
             default_rate_limiter.record_request("VINTED", time.time() - t0, r.status_code)
             if r.status_code in (403, 429):
+                if bkt is not None:
+                    bkt.penalize()
                 self.health_monitor.handle_http_response(r.status_code, url=item_url)
                 return "", [], "", None
             if r.status_code != 200:
                 return "", [], "", None
+            if bkt is not None:
+                bkt.recover()
 
             m_desc = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', r.text)
             desc = html.unescape(m_desc.group(1)).strip() if m_desc else ""
@@ -549,7 +565,25 @@ def main():
     engine_name = f"Google Gemini ({AI_ANALYST_MODEL} Multimodal)" if GEMINI_API_KEY else f"OpenRouter ({AI_MODEL})"
     print(f"[STARTUP] Vinted Sniper v4.2 activo | {len(targets)} radares | {seen_cnt} en BD | IA: {engine_name}")
     send_startup_ping(len(targets), min_profit, min_score)
+
+    scheduler = QueryScheduler.from_config(
+        config, platform="vinted", config_path=CONFIG_PATH, heartbeat=touch_heartbeat
+    )
+    bucket = scheduler.bucket
+    set_platform_bucket("VINTED", bucket)
+
+    global_blacklist = config.get("global_blacklist", [])
+    min_personal_savings = float(config.get("min_personal_savings_eur", 25))
+    drop_pct = float(config.get("price_drop_threshold_pct", 15))
+    drop_eur = float(config.get("price_drop_min_eur", 10))
+
     last_maintenance = time.time()
+    round_start = time.time()
+    round_new = 0
+    round_evaluated = 0
+    round_total_fetched = 0
+    queries_in_round = 0
+    last_is_night = None
     touch_heartbeat()
 
     while True:
@@ -558,57 +592,53 @@ def main():
             run_db_maintenance(conn)
             item_eval_fails.clear()
             last_maintenance = time.time()
-        try:
-            config = load_config()
-        except Exception as e:
-            print(f"[WARN] Error transitorio leyendo config.json ({e}). Reteniendo configuración en memoria.")
-        all_targets = config.get("targets", [])
-        targets = [t for t in all_targets if t.get("enabled", True) and "vinted" in t.get("platforms", ["vinted"])]
-        global_blacklist = config.get("global_blacklist", [])
-        min_profit = float(config.get("min_net_profit_eur", 35))
-        min_personal_savings = float(config.get("min_personal_savings_eur", 25))
-        min_score = int(config.get("min_deal_score", 8))
-        drop_pct = float(config.get("price_drop_threshold_pct", 15))
-        drop_eur = float(config.get("price_drop_min_eur", 10))
 
-        round_start = time.time()
-        round_new = 0
-        round_evaluated = 0
-        round_total_fetched = 0
+        if scheduler.reload_if_changed():
+            config = scheduler.config
+            all_targets = config.get("targets", [])
+            targets = [t for t in all_targets if t.get("enabled", True) and "vinted" in t.get("platforms", ["vinted"])]
+            global_blacklist = config.get("global_blacklist", [])
+            min_profit = float(config.get("min_net_profit_eur", 35))
+            min_personal_savings = float(config.get("min_personal_savings_eur", 25))
+            min_score = int(config.get("min_deal_score", 8))
+            drop_pct = float(config.get("price_drop_threshold_pct", 15))
+            drop_eur = float(config.get("price_drop_min_eur", 10))
 
         # Cooldown no bloqueante (P3-3): Si Vinted está en pausa, saltar escaneo manteniendo vivo el contenedor
         if vinted.health_monitor.is_in_cooldown():
             rem = vinted.health_monitor.get_remaining_cooldown()
-            print(f"[VINTED EN COOLDOWN] Restan {rem // 60}m {rem % 60}s. Saltando ronda sin bloquear proceso...")
+            print(f"[VINTED EN COOLDOWN] Restan {rem // 60}m {rem % 60}s. Saltando consulta sin bloquear proceso...")
             sleep_with_heartbeat(min(SCAN_INTERVAL, max(5, rem)))
-            round_num += 1
             continue
 
-        for target in targets:
-            touch_heartbeat()
-            if not timing.should_scan_target(target, round_num, warmup=warmup):
-                continue
+        is_night_now = scheduler.is_night_time()
+        if last_is_night is not None and last_is_night != is_night_now:
+            health_monitor.notify_transition("ENTER_NIGHT" if is_night_now else "ENTER_DAY")
+        last_is_night = is_night_now
 
-            queries = get_vinted_queries_for_target(target)
-            target_items_count = 0
-            target_new_count = 0
-            mode = target.get("mode", "resale")
+        task = scheduler.next()
+        target = task.target or {}
+        q = task.query
+        mode = target.get("mode", "resale")
+        q_start = time.time()
+        target_items_count = 0
+        target_new_count = 0
+        eval_before = round_evaluated
 
+        for _ in (0,):
             raw_items = []
             seen_target_ids = set()
-            for q in queries:
-                items = vinted.search_items(q, target["min_price"], target["max_price"])
-                _t_fetch = time.perf_counter()
-                target_items_count += len(items)
-                round_total_fetched += len(items)
-                for itm in items:
-                    iid = itm.get("id")
-                    if iid and iid not in seen_target_ids:
-                        if isinstance(itm, dict):
-                            itm.setdefault("_t_fetch", _t_fetch)
-                        seen_target_ids.add(iid)
-                        raw_items.append(itm)
-                timing.inter_query_sleep(1.0, 2.0)
+            items = vinted.search_items(q, task.min_price, task.max_price)
+            _t_fetch = time.perf_counter()
+            target_items_count += len(items)
+            round_total_fetched += len(items)
+            for itm in items:
+                iid = itm.get("id")
+                if iid and iid not in seen_target_ids:
+                    if isinstance(itm, dict):
+                        itm.setdefault("_t_fetch", _t_fetch)
+                    seen_target_ids.add(iid)
+                    raw_items.append(itm)
 
             tgt_max = max(1.0, float(target.get("max_price", 9999)))
             direct_max = float(target.get("direct_buy_max_price") or tgt_max)
@@ -674,7 +704,6 @@ def main():
                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
                         continue
 
-                    time.sleep(random.uniform(1.2, 2.3))
                     desc, extra_photos, upload_date, seller_info = vinted.fetch_item_details(item["url"])
                     _age_min = parse_relative_age_minutes(upload_date)
                     vinted_published_ts = (time.time() - _age_min * 60.0) if _age_min is not None else None
@@ -1027,46 +1056,65 @@ def main():
                     except Exception:
                         pass
 
-                    timing.item_processing_sleep()
+            print(f"[RADAR VINTED] {target.get('name', task.radar_id)} ('{q}'): {target_items_count} items ({target_new_count} nuevos)")
 
-            print(f"[RADAR VINTED] {target['name']}: {target_items_count} items ({target_new_count} nuevos)")
-
-        if round_total_fetched > 0:
-            parser_tracker.record_platform_success("VINTED", round_total_fetched, health_monitor)
-        elif not warmup and targets:
-            parser_tracker.record_platform_empty("VINTED", health_monitor, threshold=6, reason="0 anuncios en toda la ronda de Vinted")
-
-        if round_total_fetched == 0:
-            print("[VINTED SESSION] Renovando cookies de sesión preventivamente...")
-            rotator.rotate()
-            vinted._init_session()
-        elif rotator.step_round():
-            vinted._init_session()
-
-        if warmup:
-            print(f"[INFO] Warm-up Vinted completado ({count_platform_seen(conn, 'VINTED')} items). Escaneo activo.")
-            warmup = False
-
-        round_num += 1
-        duration = round(time.time() - round_start, 1)
-        sleep_secs, is_night, transition, reason = timing.calculate_round_sleep(SCAN_INTERVAL, "VINTED")
-        if transition:
-            health_monitor.notify_transition(transition)
-
+        scheduler.done(task)
+        q_dur = round(time.time() - q_start, 3)
         log_metric(
-            event="round_completed",
+            event="query_completed",
             service="vinted",
             platform="VINTED",
-            round=round_num,
-            duration_s=duration,
-            items_new=round_new,
-            items_evaluated=round_evaluated,
-            interval_s=sleep_secs,
-            reason=reason
+            radar_id=task.radar_id,
+            query=q,
+            tier=task.tier,
+            duration_s=q_dur,
+            items_fetched=target_items_count,
+            items_new=target_new_count,
+            items_evaluated=round_evaluated - eval_before,
+            rate_per_s=round(bucket.rate, 3),
         )
 
-        print(f"[VINTED] Ronda #{round_num} en {duration}s ({round_new} nuevos, {round_evaluated} IA). {reason}. Próximo en {sleep_secs}s.\n")
-        sleep_with_heartbeat(sleep_secs)
+        queries_in_round += 1
+        cycle_size = max(1, len(scheduler.tasks))
+        if queries_in_round >= cycle_size:
+            if round_total_fetched > 0:
+                parser_tracker.record_platform_success("VINTED", round_total_fetched, health_monitor)
+            elif not warmup and targets:
+                parser_tracker.record_platform_empty("VINTED", health_monitor, threshold=6, reason="0 anuncios en toda la ronda de Vinted")
+
+            if round_total_fetched == 0:
+                print("[VINTED SESSION] Renovando cookies de sesión preventivamente...")
+                rotator.rotate()
+                vinted._init_session()
+            elif rotator.step_round():
+                vinted._init_session()
+
+            if warmup:
+                print(f"[INFO] Warm-up Vinted completado ({count_platform_seen(conn, 'VINTED')} items). Escaneo activo.")
+                warmup = False
+
+            round_num += 1
+            duration = round(time.time() - round_start, 1)
+            reason = f"TokenBucket {bucket.rate:.2f} req/s ({'nocturno x' + str(int(scheduler.night_multiplier)) if scheduler.is_night_time() else 'diurno'})"
+
+            log_metric(
+                event="round_completed",
+                service="vinted",
+                platform="VINTED",
+                round=round_num,
+                duration_s=duration,
+                items_new=round_new,
+                items_evaluated=round_evaluated,
+                interval_s=0,
+                reason=reason
+            )
+
+            print(f"[VINTED] Ciclo #{round_num} ({queries_in_round} consultas) en {duration}s ({round_new} nuevos, {round_evaluated} IA). {reason}.\n")
+            round_start = time.time()
+            round_new = 0
+            round_evaluated = 0
+            round_total_fetched = 0
+            queries_in_round = 0
 
 
 if __name__ == "__main__":

@@ -15,11 +15,14 @@ import threading
 import urllib.parse
 from curl_cffi import requests
 
-from antiban import BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker, default_rate_limiter
+from antiban import (
+    BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker,
+    default_rate_limiter, TokenBucket, QueryScheduler, set_platform_bucket, get_platform_bucket
+)
 from http_client import wallapop_client
 from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
-    WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL, LOCAL_KEYWORDS,
+    WEBHOOK_URL, GEMINI_API_KEY, AI_MODEL, AI_ANALYST_MODEL, PROXY_URL, LOCAL_KEYWORDS, CONFIG_PATH,
     init_db, load_config, purge_old_kits, run_db_maintenance, sync_cex_catalog_mirror,
     check_item_seen_or_dropped, is_duplicate_recent_deal, mark_item_seen, count_platform_seen,
     passes_filters, fetch_cex_live, download_item_images,
@@ -219,6 +222,9 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
             default_rate_limiter.record_request("WALLAPOP", time.time() - t0_fb, r.status_code)
 
         if r.status_code in (401, 403, 429):
+            bkt = get_platform_bucket("WALLAPOP")
+            if bkt is not None:
+                bkt.penalize()
             retry_after = (getattr(r, "headers", None) or {}).get("Retry-After")
             should_cd, cd_secs = health_monitor.handle_http_response(
                 r.status_code, url=url, query=keywords, retry_after=retry_after)
@@ -229,6 +235,9 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
             return []
         elif r.status_code == 200:
             health_monitor.handle_http_response(200, query=keywords)
+            bkt = get_platform_bucket("WALLAPOP")
+            if bkt is not None:
+                bkt.recover()
         else:
             print(f"[WARN] Wallapop HTTP {r.status_code} buscando '{keywords}'")
             parser_tracker.record_empty("WALLAPOP", keywords, health_monitor, reason=f"HTTP {r.status_code}")
@@ -244,6 +253,9 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
         next_token = data.get("meta", {}).get("next_page")
         if fetch_second_page_if_sparse and len(items) < 8 and next_token:
             try:
+                bkt = get_platform_bucket("WALLAPOP")
+                if bkt is not None:
+                    bkt.acquire()
                 url_p2 = f"https://api.wallapop.com/api/v3/search?next_page={urllib.parse.quote(next_token)}"
                 r2 = _wallapop_http_get(url_p2, headers=headers, proxies=proxies, impersonate=profile["impersonate"], timeout=12)
                 if r2.status_code == 200:
@@ -330,7 +342,24 @@ def main():
     print(f"[STARTUP] Wallapop Sniper v4.2 activo | {len(targets)} radares | {seen_cnt} en BD | IA: {engine_name}")
     send_startup_ping(len(targets), min_profit, min_score)
 
+    scheduler = QueryScheduler.from_config(
+        config, platform="wallapop", config_path=CONFIG_PATH, heartbeat=touch_heartbeat
+    )
+    bucket = scheduler.bucket
+    set_platform_bucket("WALLAPOP", bucket)
+
+    global_blacklist = config.get("global_blacklist", [])
+    min_personal_savings = float(config.get("min_personal_savings_eur", 25))
+    drop_pct = float(config.get("price_drop_threshold_pct", 15))
+    drop_eur = float(config.get("price_drop_min_eur", 10))
+
     last_kit_purge = time.time()
+    round_start = time.time()
+    round_new = 0
+    round_evaluated = 0
+    round_total_items = 0
+    queries_in_round = 0
+    last_is_night = None
     touch_heartbeat()
 
     while True:
@@ -342,57 +371,52 @@ def main():
             item_eval_fails.clear()
             last_kit_purge = time.time()
 
-        try:
-            config = load_config()
-        except Exception as e:
-            print(f"[WARN] Error transitorio leyendo config.json ({e}). Reteniendo configuración en memoria.")
-        all_targets = config.get("targets", [])
-        targets = [t for t in all_targets if t.get("enabled", True) and "wallapop" in t.get("platforms", ["wallapop"])]
-        global_blacklist = config.get("global_blacklist", [])
-        min_profit = float(config.get("min_net_profit_eur", 35))
-        min_personal_savings = float(config.get("min_personal_savings_eur", 25))
-        min_score = int(config.get("min_deal_score", 8))
-        drop_pct = float(config.get("price_drop_threshold_pct", 15))
-        drop_eur = float(config.get("price_drop_min_eur", 10))
-
-        round_start = time.time()
-        round_new = 0
-        round_evaluated = 0
-        round_total_items = 0
+        if scheduler.reload_if_changed():
+            config = scheduler.config
+            all_targets = config.get("targets", [])
+            targets = [t for t in all_targets if t.get("enabled", True) and "wallapop" in t.get("platforms", ["wallapop"])]
+            global_blacklist = config.get("global_blacklist", [])
+            min_profit = float(config.get("min_net_profit_eur", 35))
+            min_personal_savings = float(config.get("min_personal_savings_eur", 25))
+            min_score = int(config.get("min_deal_score", 8))
+            drop_pct = float(config.get("price_drop_threshold_pct", 15))
+            drop_eur = float(config.get("price_drop_min_eur", 10))
 
         # Cooldown no bloqueante (P3-3): Si Wallapop está en cooldown, saltar escaneo manteniendo vivo el contenedor
         if health_monitor.is_in_cooldown():
             rem = health_monitor.get_remaining_cooldown()
-            print(f"[WALLAPOP EN COOLDOWN] Restan {rem // 60}m {rem % 60}s. Saltando ronda sin bloquear proceso...")
+            print(f"[WALLAPOP EN COOLDOWN] Restan {rem // 60}m {rem % 60}s. Saltando consulta sin bloquear proceso...")
             sleep_with_heartbeat(min(SCAN_INTERVAL, max(5, rem)))
-            round_num += 1
             continue
 
-        for target in targets:
-            touch_heartbeat()
-            if not timing.should_scan_target(target, round_num, warmup=warmup):
-                continue
+        is_night_now = scheduler.is_night_time()
+        if last_is_night is not None and last_is_night != is_night_now:
+            health_monitor.notify_transition("ENTER_NIGHT" if is_night_now else "ENTER_DAY")
+        last_is_night = is_night_now
 
-            queries = get_wallapop_queries_for_target(target)
-            target_items_count = 0
-            target_new_count = 0
-            mode = target.get("mode", "resale")
+        task = scheduler.next()
+        target = task.target or {}
+        q = task.query
+        mode = target.get("mode", "resale")
+        q_start = time.time()
+        target_items_count = 0
+        target_new_count = 0
+        eval_before = round_evaluated
 
+        for _ in (0,):
             raw_items = []
             seen_target_ids = set()
-            for q in queries:
-                items = fetch_wallapop(q, target["min_price"], target["max_price"])
-                _t_fetch = time.perf_counter()
-                target_items_count += len(items)
-                round_total_items += len(items)
-                for itm in items:
-                    iid = itm.get("id")
-                    if iid and iid not in seen_target_ids:
-                        if isinstance(itm, dict):
-                            itm.setdefault("_t_fetch", _t_fetch)
-                        seen_target_ids.add(iid)
-                        raw_items.append(itm)
-                timing.inter_query_sleep()
+            items = fetch_wallapop(q, task.min_price, task.max_price)
+            _t_fetch = time.perf_counter()
+            target_items_count += len(items)
+            round_total_items += len(items)
+            for itm in items:
+                iid = itm.get("id")
+                if iid and iid not in seen_target_ids:
+                    if isinstance(itm, dict):
+                        itm.setdefault("_t_fetch", _t_fetch)
+                    seen_target_ids.add(iid)
+                    raw_items.append(itm)
 
             tgt_max = max(1.0, float(target.get("max_price", 9999)))
             direct_max = float(target.get("direct_buy_max_price") or tgt_max)
@@ -825,40 +849,59 @@ def main():
                     except Exception:
                         pass
 
-                    timing.item_processing_sleep()
+            print(f"[RADAR WALLAPOP] {target.get('name', task.radar_id)} ('{q}'): {target_items_count} items ({target_new_count} nuevos)")
 
-            print(f"[RADAR WALLAPOP] {target['name']}: {target_items_count} items ({target_new_count} nuevos)")
-
-        if round_total_items > 0:
-            parser_tracker.record_platform_success("WALLAPOP", round_total_items, health_monitor)
-        elif not warmup and targets:
-            parser_tracker.record_platform_empty("WALLAPOP", health_monitor, threshold=6, reason="0 anuncios en toda la ronda de Wallapop")
-
-        if warmup:
-            print(f"[INFO] Warm-up Wallapop completado ({count_platform_seen(conn, 'WALLAPOP')} items). Escaneo activo.")
-            warmup = False
-
-        round_num += 1
-        duration = round(time.time() - round_start, 1)
-        rotator.step_round()
-        sleep_secs, is_night, transition, reason = timing.calculate_round_sleep(SCAN_INTERVAL, "WALLAPOP")
-        if transition:
-            health_monitor.notify_transition(transition)
-
+        scheduler.done(task)
+        q_dur = round(time.time() - q_start, 3)
         log_metric(
-            event="round_completed",
+            event="query_completed",
             service="wallapop",
             platform="WALLAPOP",
-            round=round_num,
-            duration_s=duration,
-            items_new=round_new,
-            items_evaluated=round_evaluated,
-            interval_s=sleep_secs,
-            reason=reason
+            radar_id=task.radar_id,
+            query=q,
+            tier=task.tier,
+            duration_s=q_dur,
+            items_fetched=target_items_count,
+            items_new=target_new_count,
+            items_evaluated=round_evaluated - eval_before,
+            rate_per_s=round(bucket.rate, 3),
         )
 
-        print(f"[WALLAPOP] Ronda #{round_num} en {duration}s ({round_new} nuevos, {round_evaluated} IA). {reason}. Próximo en {sleep_secs}s.\n")
-        sleep_with_heartbeat(sleep_secs)
+        queries_in_round += 1
+        cycle_size = max(1, len(scheduler.tasks))
+        if queries_in_round >= cycle_size:
+            if round_total_items > 0:
+                parser_tracker.record_platform_success("WALLAPOP", round_total_items, health_monitor)
+            elif not warmup and targets:
+                parser_tracker.record_platform_empty("WALLAPOP", health_monitor, threshold=6, reason="0 anuncios en toda la ronda de Wallapop")
+
+            if warmup:
+                print(f"[INFO] Warm-up Wallapop completado ({count_platform_seen(conn, 'WALLAPOP')} items). Escaneo activo.")
+                warmup = False
+
+            round_num += 1
+            duration = round(time.time() - round_start, 1)
+            rotator.step_round()
+            reason = f"TokenBucket {bucket.rate:.2f} req/s ({'nocturno x' + str(int(scheduler.night_multiplier)) if scheduler.is_night_time() else 'diurno'})"
+
+            log_metric(
+                event="round_completed",
+                service="wallapop",
+                platform="WALLAPOP",
+                round=round_num,
+                duration_s=duration,
+                items_new=round_new,
+                items_evaluated=round_evaluated,
+                interval_s=0,
+                reason=reason
+            )
+
+            print(f"[WALLAPOP] Ciclo #{round_num} ({queries_in_round} consultas) en {duration}s ({round_new} nuevos, {round_evaluated} IA). {reason}.\n")
+            round_start = time.time()
+            round_new = 0
+            round_evaluated = 0
+            round_total_items = 0
+            queries_in_round = 0
 
 
 if __name__ == "__main__":
