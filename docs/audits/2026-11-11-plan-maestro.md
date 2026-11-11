@@ -117,42 +117,42 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 
 ## 3. Orden de ejecución
 
-| ID | Tarea | Impacto esperado | Esfuerzo | Depende de |
-|---|---|---|---|---|
-| T1.0 | Arnés aislado + `pipeline_version` | Habilita todas las verificaciones | S | — |
-| T1.1 | Matcher con límites de palabra y negación + limpieza de blacklists | Recupera los 9 de 9 legítimos de §1.3 | M | T1.0 |
-| T1.2 | Clasificador consola / juego / accesorio | Entre −25 y −35 % de llamadas a la Puerta 1, −20 % de visión en Vinted, −2 % de alertas basura | M | T1.1 |
-| T1.3 | CeX: caché por consulta, frescura y caché negativa | Niveles 1 y 2 correctos (65 € de error en la sonda) | M | T1.0 |
-| T1.4 | Perfil no consultado ≠ 0 valoraciones | Riesgo y aviso sonoro correctos | S | T1.0 |
-| T1.5 | Discord sin pérdidas + `message_id` | 0 alertas perdidas en silencio | M | T1.0 |
-| T1.6 | Gemini: detectar `MAX_TOKENS` y presupuesto de salida por modelo | Fin del pago doble | S | T1.0 |
-| T1.7 | API key en cabecera + redacción en logs | Seguridad | S | — |
-| T1.8 | Presupuesto de IA: tope y día local | Sin pausas del embudo | S | Decisión del usuario |
-| T1.9 | Wallapop: sin segunda petición en 403/429 + `Retry-After` | Menos bloqueos | S | T1.0 |
-| T1.10 | *Circuit breaker* exponencial por tienda | −90 % de sondeo al WAF y de spam de salud | S | T1.0 |
-| T1.11 | eBay: precios ≥ 1.000 € y precio tachado | Sin falsos candidatos | S | T1.0 |
-| T1.12 | ntfy mediante JSON | Canal *1-Tap* operativo | S | T1.0 |
-| T1.13 | Visión: salida mínima + tokens por modalidad | Entre −20 y −25 % de tokens de salida; aporta el dato que necesita T3.10 | S | T1.6 |
-| T2.1 | Latencia por etapa + métricas por proceso | Medir; 0 % de métricas perdidas | S | T1.0 |
-| T2.2 | Capa HTTP coherente (sesiones, huella, cabeceras) | Anti-detección y menos latencia por petición | M | T2.1 |
-| T2.3 | Cadencia por consulta + *token bucket* | Wallapop de 26 a 20 s; Vinted de 108 a 75 s o menos | M | T2.1, T2.2 |
-| T2.4 | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |
-| T2.5 | Vendedor Wallapop: identidad, límite y caché persistente | Menos peticiones y ningún falso «0 valoraciones» | S | T2.2, T1.4 |
-| T2.6 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
-| T2.7 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |
-| T2.8 | Embeds de salud asíncronos + locks | Sin pausas de 10 s en el bucle | S | T1.5 |
-| T2.9 | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
-| T3.1 | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
-| T3.2 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
-| T3.3 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
-| T3.4 | Vinted: envío según país | Margen real | S | — |
-| T3.5 | Re-chequeo de reservados | Recupera oportunidades | S | — |
-| T3.6 | Payload: primera línea útil y sin deeplinks rotos | Acción en un toque | S | T1.5, T1.12 |
-| T3.7 | Ciclo de vida de la alerta en Discord | No perseguir anuncios vendidos | S | T1.5 |
-| T3.8 | Resumen diario de alertas silenciosas | Menos ruido | S | — |
-| T3.9 | Muestreo de anuncios bloqueados | Medir los falsos positivos del antifraude | M | — |
-| T3.10 | A/B de resolución de imagen | Precisión visual a coste constante | S | T1.13 + aprobación |
-| T3.11 | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
+| ID | Estado | Modelo | Tarea | Impacto esperado | Esfuerzo | Depende de |
+|---|---|---|---|---|---|---|
+| T1.0 | [x] | — | Arnés aislado + `pipeline_version` | Habilita todas las verificaciones | S | — |
+| T1.1 | [x] | — | Matcher con límites de palabra y negación + limpieza de blacklists | Recupera los 9 de 9 legítimos de §1.3 | M | T1.0 |
+| T1.2 | [x] | — | Clasificador consola / juego / accesorio | Entre −25 y −35 % de llamadas a la Puerta 1, −20 % de visión en Vinted, −2 % de alertas basura | M | T1.1 |
+| T1.3 | [x] | — | CeX: caché por consulta, frescura y caché negativa | Niveles 1 y 2 correctos (65 € de error en la sonda) | M | T1.0 |
+| T1.4 | [x] | — | Perfil no consultado ≠ 0 valoraciones | Riesgo y aviso sonoro correctos | S | T1.0 |
+| T1.5 | [x] | — | Discord sin pérdidas + `message_id` | 0 alertas perdidas en silencio | M | T1.0 |
+| T1.6 | [x] | — | Gemini: detectar `MAX_TOKENS` y presupuesto de salida por modelo | Fin del pago doble | S | T1.0 |
+| T1.7 | [x] | — | API key en cabecera + redacción en logs | Seguridad | S | — |
+| T1.8 | [x] | — | Presupuesto de IA: tope y día local (código listo; tope en `.env` pendiente usuario) | Sin pausas del embudo | S | Decisión del usuario |
+| T1.9 | [x] | — | Wallapop: sin segunda petición en 403/429 + `Retry-After` | Menos bloqueos | S | T1.0 |
+| T1.10 | [x] | — | *Circuit breaker* exponencial por tienda | −90 % de sondeo al WAF y de spam de salud | S | T1.0 |
+| T1.11 | [x] | — | eBay: precios ≥ 1.000 € y precio tachado | Sin falsos candidatos | S | T1.0 |
+| T1.12 | [x] | — | ntfy mediante JSON | Canal *1-Tap* operativo | S | T1.0 |
+| T1.13 | [x] | — | Visión: salida mínima + tokens por modalidad | Entre −20 y −25 % de tokens de salida; aporta el dato que necesita T3.10 | S | T1.6 |
+| T2.1 | [ ] | Gemini 3.8 Max | Latencia por etapa + métricas por proceso | Medir; 0 % de métricas perdidas | S | T1.0 |
+| T2.2 | [ ] | Argon 4 | Capa HTTP coherente (sesiones, huella, cabeceras) | Anti-detección y menos latencia por petición | M | T2.1 |
+| T2.3 | [ ] | Argon 4 | Cadencia por consulta + *token bucket* | Wallapop de 26 a 20 s; Vinted de 108 a 75 s o menos | M | T2.1, T2.2 |
+| T2.4 | [ ] | Gemini 3.8 Max | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |
+| T2.5 | [ ] | Argon 4 | Vendedor Wallapop: identidad, límite y caché persistente | Menos peticiones y ningún falso «0 valoraciones» | S | T2.2, T1.4 |
+| T2.6 | [ ] | Argon 4 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
+| T2.7 | [ ] | Argon 4 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |
+| T2.8 | [ ] | Argon 4 | Embeds de salud asíncronos + locks | Sin pausas de 10 s en el bucle | S | T1.5 |
+| T2.9 | [ ] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
+| T3.1 | [ ] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
+| T3.2 | [ ] | Argon 4 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
+| T3.3 | [ ] | Argon 4 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
+| T3.4 | [ ] | Gemini 3.8 Max | Vinted: envío según país | Margen real | S | — |
+| T3.5 | [ ] | Gemini 3.8 Max | Re-chequeo de reservados | Recupera oportunidades | S | — |
+| T3.6 | [ ] | Gemini 3.8 Max | Payload: primera línea útil y sin deeplinks rotos | Acción en un toque | S | T1.5, T1.12 |
+| T3.7 | [ ] | Gemini 3.8 Max | Ciclo de vida de la alerta en Discord | No perseguir anuncios vendidos | S | T1.5 |
+| T3.8 | [ ] | Gemini 3.8 Max | Resumen diario de alertas silenciosas | Menos ruido | S | — |
+| T3.9 | [ ] | Gemini 3.8 Max | Muestreo de anuncios bloqueados | Medir los falsos positivos del antifraude | M | — |
+| T3.10 | [ ] | Gemini 3.8 Max | A/B de resolución de imagen | Precisión visual a coste constante | S | T1.13 + aprobación |
+| T3.11 | [ ] | Gemini 3.8 Max | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
 
 ---
 
