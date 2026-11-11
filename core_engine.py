@@ -3039,6 +3039,34 @@ class EbaySessionManager:
 _ebay_mgr = EbaySessionManager()
 
 
+_EUR_RE = re.compile(r"(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})\s*(?:EUR|€)")
+_EBAY_BAD_CLASS_RE = re.compile(r"strikethrough|previous|(?<![a-z])was(?![a-z])", re.IGNORECASE)
+_EBAY_BAD_ELEM_RE = re.compile(
+    r"<(?P<t>[a-zA-Z0-9]+)[^>]*class=[\"'][^\"']*(?:strikethrough|previous|(?<![a-zA-Z])was(?![a-zA-Z]))[^\"']*[\"'][^>]*>.*?</(?P=t)>",
+    re.IGNORECASE | re.DOTALL)
+_EBAY_PRICE_ELEM_RE = re.compile(
+    r"<(?P<t>[a-zA-Z0-9]+)[^>]*class=[\"'](?P<c>[^\"']*price[^\"']*)[\"'][^>]*>(?P<x>.*?)</(?P=t)>",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _parse_eur_amount(s):
+    s = s.strip()
+    return float(s.replace(".", "").replace(",", ".")) if "," in s else float(s)
+
+
+def _ebay_card_price(body):
+    """Precio de una tarjeta eBay: elemento 'price' no tachado; si no, primera cifra en EUR."""
+    clean = _EBAY_BAD_ELEM_RE.sub(" ", body)
+    for m in _EBAY_PRICE_ELEM_RE.finditer(clean):
+        if _EBAY_BAD_CLASS_RE.search(m.group("c")):
+            continue
+        mm = _EUR_RE.search(m.group("x"))
+        if mm:
+            return _parse_eur_amount(mm.group(1))
+    mm = _EUR_RE.search(clean)
+    return _parse_eur_amount(mm.group(1)) if mm else None
+
+
 def fetch_ebay_es(rotator, query_text, min_price, max_price):
     encoded_q = urllib.parse.quote_plus(query_text)
     url = f"https://www.ebay.es/sch/i.html?_nkw={encoded_q}&LH_BIN=1&_sop=10"
@@ -3094,12 +3122,11 @@ def fetch_ebay_es(rotator, query_text, min_price, max_price):
             if any(h in body.lower() for h in non_eu_hints):
                 continue
 
-            m_price = re.search(r'(\d{1,4}[\.,]\d{2})\s*(?:EUR|€)', body)
-            if not m_price:
-                continue
             try:
-                price = float(m_price.group(1).replace(".", "").replace(",", ".") if "," in m_price.group(1) else m_price.group(1))
+                price = _ebay_card_price(body)
             except Exception:
+                continue
+            if price is None:
                 continue
 
             if price < min_price or price > max_price:
@@ -3109,10 +3136,10 @@ def fetch_ebay_es(rotator, query_text, min_price, max_price):
             img_url = m_img.group(1) if m_img else ""
 
             fees = 0.0
-            m_ship = re.search(r'\+\s*(\d{1,3}[\.,]\d{2})\s*(?:EUR|€)', body)
+            m_ship = re.search(r'\+\s*' + _EUR_RE.pattern, body)
             if m_ship:
                 try:
-                    fees = float(m_ship.group(1).replace(",", "."))
+                    fees = _parse_eur_amount(m_ship.group(1))
                 except Exception:
                     fees = 4.95
 
