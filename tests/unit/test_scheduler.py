@@ -261,6 +261,64 @@ class TestScheduler(unittest.TestCase):
         finally:
             set_platform_bucket("WALLAPOP", None)
 
+    def test_enrich_seller_profile_consumes_bucket_tokens(self):
+        import fraud_signals
+        from antiban import TokenBucket, set_platform_bucket
+
+        class CountingBucket(TokenBucket):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.acquires = 0
+
+            def acquire(self) -> float:
+                self.acquires += 1
+                return super().acquire()
+
+        class FakeResp:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        class FakeSession:
+            def __init__(self, resp):
+                self.resp = resp
+                self.calls = 0
+
+            def get(self, url, **kw):
+                self.calls += 1
+                return self.resp
+
+        clock = FakeClock(start=0.0)
+        vinted_bucket = CountingBucket(rate_per_s=1.0, burst=2, clock=clock, sleeper=clock.sleep)
+        walla_bucket = CountingBucket(rate_per_s=1.0, burst=2, clock=clock, sleeper=clock.sleep)
+        fraud_signals._SELLER_PROFILE_CACHE.clear()
+        try:
+            set_platform_bucket("VINTED", vinted_bucket)
+            set_platform_bucket("WALLAPOP", walla_bucket)
+
+            v_sess = FakeSession(
+                FakeResp(200, {"user": {"feedback_count": 5, "feedback_reputation": 0.9, "created_at": "2024-01-01T00:00:00Z"}})
+            )
+            item_v = {"platform": "VINTED", "seller": {"id": "vin_seller_99"}}
+            fraud_signals.enrich_seller_profile(item_v, http_session=v_sess, platform="VINTED")
+            self.assertEqual(v_sess.calls, 1)
+            self.assertEqual(vinted_bucket.acquires, 1)
+
+            w_sess = FakeSession(
+                FakeResp(200, {"scoring": 90, "register_date": 1700000000000, "stats": {"reviews": {"total": 12}}})
+            )
+            item_w = {"platform": "WALLAPOP", "seller": {"id": "wal_seller_99"}}
+            fraud_signals.enrich_seller_profile(item_w, http_session=w_sess, platform="WALLAPOP")
+            self.assertEqual(w_sess.calls, 1)
+            self.assertEqual(walla_bucket.acquires, 1)
+        finally:
+            set_platform_bucket("VINTED", None)
+            set_platform_bucket("WALLAPOP", None)
+            fraud_signals._SELLER_PROFILE_CACHE.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

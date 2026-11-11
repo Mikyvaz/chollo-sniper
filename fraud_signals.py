@@ -488,7 +488,8 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
     if platform == "WALLAPOP":
         if seller_id and (reviews_count is None or rating is None):
             sess = http_session or _get_thread_local_session()
-            bkt = get_platform_bucket("WALLAPOP") if http_session is None else None
+            raw_bkt = get_platform_bucket("WALLAPOP")
+            bkt = raw_bkt if getattr(sess, "bucket", None) is not raw_bkt else None
             wallapop_http_ok = False
             try:
                 if bkt is not None:
@@ -585,7 +586,8 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                 sess = _get_thread_local_session()
             else:
                 sess = vinted_doc_client
-            bkt = get_platform_bucket("VINTED") if http_session is None else None
+            raw_bkt = get_platform_bucket("VINTED")
+            bkt = raw_bkt if getattr(sess, "bucket", None) is not raw_bkt else None
             vinted_ok = False
             try:
                 if bkt is not None:
