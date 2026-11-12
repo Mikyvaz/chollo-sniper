@@ -521,7 +521,7 @@ def main():
                     # EVALUACIÓN DE FRAUDE DETERMINISTA EN CAPAS (P2)
                     item["platform"] = "WALLAPOP"
                     t["enrich"] = time.perf_counter()
-                    enrich_seller_profile(item, http_session=None)
+                    enrich_seller_profile(item, http_session=None, conn=conn, health_monitor=health_monitor)
                     seller = item.get("seller")
                     current_seller_id = ""
                     if isinstance(seller, dict):

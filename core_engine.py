@@ -223,6 +223,10 @@ def run_db_maintenance(conn=None):
         c.execute("DELETE FROM item_embeddings WHERE created_at < datetime('now', '-30 days')")
         c.execute("DELETE FROM fraud_log WHERE created_at < datetime('now', '-60 days')")
         try:
+            c.execute("DELETE FROM seller_profile_cache WHERE fetched_at < datetime('now', '-7 days')")
+        except Exception:
+            pass
+        try:
             c.execute("DELETE FROM price_history WHERE recorded_at < datetime('now', '-90 days')")
         except Exception:
             pass
@@ -359,6 +363,15 @@ def init_db(conn=None):
             risk INTEGER,
             reasons_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS seller_profile_cache (
+            platform TEXT,
+            seller_id TEXT,
+            profile_json TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (platform, seller_id)
         )
     """)
     c.execute("""

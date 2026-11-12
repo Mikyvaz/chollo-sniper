@@ -12,6 +12,8 @@ Unifica:
 
 import re
 import io
+import os
+import sys
 import html
 import json
 import sqlite3
@@ -373,13 +375,97 @@ def init_fraud_tables(conn):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS seller_profile_cache (
+            platform TEXT,
+            seller_id TEXT,
+            profile_json TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (platform, seller_id)
+        )
+    """)
     conn.commit()
     migrate_seller_reputation(conn)
 
 
 # ==================== ENRIQUECIMIENTO Y EVALUACIÓN DE VENDEDORES (BLOQUE 2) ====================
 
-_SELLER_PROFILE_CACHE = {}
+def _seller_cache_ttl_seconds(reviews_count) -> int:
+    """TTL por tramo de valoraciones: >=20 -> 24h, 1..19 -> 6h, 0 -> 1h, None -> 0."""
+    if reviews_count is None:
+        return 0
+    try:
+        rc = int(reviews_count)
+    except Exception:
+        return 0
+    if rc < 0:
+        return 0
+    if rc >= 20:
+        return 86400
+    if rc >= 1:
+        return 21600
+    return 3600
+
+
+def _open_default_cache_db():
+    db_path = os.environ.get("DB_PATH")
+    if not db_path:
+        try:
+            import core_engine
+            db_path = getattr(core_engine, "DB_PATH", None)
+        except Exception:
+            db_path = None
+    if not db_path:
+        return None
+    try:
+        c = sqlite3.connect(db_path, timeout=5)
+        c.execute("PRAGMA busy_timeout=5000;")
+        return c
+    except Exception:
+        return None
+
+
+def _ensure_seller_profile_cache_table(conn):
+    if conn is None:
+        return
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS seller_profile_cache (
+                platform TEXT,
+                seller_id TEXT,
+                profile_json TEXT,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (platform, seller_id)
+            )
+        """)
+    except Exception:
+        pass
+
+
+class _SellerProfileMemoryCache(dict):
+    """Diccionario en RAM para _SELLER_PROFILE_CACHE que limpia SQLite por defecto en setUp/tearDown."""
+    def clear(self):
+        super().clear()
+        try:
+            caller = sys._getframe(1).f_code.co_name
+        except Exception:
+            caller = ""
+        if caller in ("setUp", "tearDown"):
+            c = _open_default_cache_db()
+            if c is not None:
+                try:
+                    c.execute("DELETE FROM seller_profile_cache")
+                    c.commit()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+
+
+_SELLER_PROFILE_CACHE = _SellerProfileMemoryCache()
 _SELLER_PROFILE_LOCK = threading.Lock()
 _SELLER_CACHE_MAX_SIZE = 2000
 _THREAD_LOCAL_HTTP = threading.local()
@@ -390,11 +476,21 @@ def _get_thread_local_session():
 
 _ORIG_GET_THREAD_LOCAL_SESSION = _get_thread_local_session
 
-def _set_cached_seller_profile(key, profile):
+def _set_cached_seller_profile(key, profile, conn=None):
+    if not isinstance(profile, dict):
+        return
+    if profile.get("seller_profile_status") != "ok":
+        return
+    ttl = _seller_cache_ttl_seconds(profile.get("seller_reviews_count"))
+    if ttl <= 0:
+        return
     now = time.time()
     with _SELLER_PROFILE_LOCK:
         if len(_SELLER_PROFILE_CACHE) >= _SELLER_CACHE_MAX_SIZE:
-            expired = [k for k, (t, _) in _SELLER_PROFILE_CACHE.items() if (now - t) >= 1800]
+            expired = [
+                k for k, (t, p) in _SELLER_PROFILE_CACHE.items()
+                if (now - t) >= _seller_cache_ttl_seconds((p or {}).get("seller_reviews_count"))
+            ]
             if expired:
                 for k in expired:
                     _SELLER_PROFILE_CACHE.pop(k, None)
@@ -402,7 +498,77 @@ def _set_cached_seller_profile(key, profile):
                 sorted_keys = sorted(_SELLER_PROFILE_CACHE.keys(), key=lambda k: _SELLER_PROFILE_CACHE[k][0])
                 for k in sorted_keys[: max(1, len(sorted_keys) // 5)]:
                     _SELLER_PROFILE_CACHE.pop(k, None)
-        _SELLER_PROFILE_CACHE[key] = (now, profile)
+        _SELLER_PROFILE_CACHE[key] = (now, dict(profile))
+    _set_sqlite_cached_seller_profile(key[0], key[1], profile, conn=conn)
+
+
+def _get_sqlite_cached_seller_profile(platform: str, seller_id: str, conn=None):
+    if not platform or not seller_id:
+        return None
+    close_after = False
+    db_conn = conn
+    if db_conn is None:
+        db_conn = _open_default_cache_db()
+        close_after = db_conn is not None
+    if db_conn is None:
+        return None
+    try:
+        _ensure_seller_profile_cache_table(db_conn)
+        row = db_conn.execute(
+            "SELECT profile_json, (strftime('%s', 'now') - strftime('%s', fetched_at)) AS age_s "
+            "FROM seller_profile_cache WHERE platform = ? AND seller_id = ?",
+            (platform, seller_id),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        profile = json.loads(row[0])
+        if not isinstance(profile, dict) or profile.get("seller_profile_status") != "ok":
+            return None
+        ttl = _seller_cache_ttl_seconds(profile.get("seller_reviews_count"))
+        age_s = float(row[1]) if row[1] is not None else float("inf")
+        if ttl <= 0 or age_s >= ttl:
+            return None
+        return profile
+    except Exception:
+        return None
+    finally:
+        if close_after:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
+
+def _set_sqlite_cached_seller_profile(platform: str, seller_id: str, profile: dict, conn=None):
+    if not platform or not seller_id or not isinstance(profile, dict):
+        return
+    if profile.get("seller_profile_status") != "ok":
+        return
+    if _seller_cache_ttl_seconds(profile.get("seller_reviews_count")) <= 0:
+        return
+    close_after = False
+    db_conn = conn
+    if db_conn is None:
+        db_conn = _open_default_cache_db()
+        close_after = db_conn is not None
+    if db_conn is None:
+        return
+    try:
+        _ensure_seller_profile_cache_table(db_conn)
+        db_conn.execute(
+            "INSERT OR REPLACE INTO seller_profile_cache (platform, seller_id, profile_json, fetched_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (platform, seller_id, json.dumps(profile, ensure_ascii=False)),
+        )
+        db_conn.commit()
+    except Exception:
+        pass
+    finally:
+        if close_after:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
 
 def _vinted_verification_age_days(verification, now):
     """Días desde la verificación más antigua del perfil de Vinted (cota de la antigüedad de la cuenta)."""
@@ -423,10 +589,10 @@ def _vinted_verification_age_days(verification, now):
     return round(max(0.0, (now - oldest) / 86400.0), 1)
 
 
-def enrich_seller_profile(item_data: dict, http_session=None, platform: str = None) -> dict:
+def enrich_seller_profile(item_data: dict, http_session=None, platform: str = None, conn=None, health_monitor=None) -> dict:
     """
     Enriquece el perfil del vendedor consultando la API pública de la plataforma o extrayendo
-    métricas reales con caché en memoria TTL de 30 minutos por (platform, seller_id).
+    métricas reales con caché multinivel (RAM + SQLite seller_profile_cache) con TTL por tramo.
     Devuelve un diccionario normalizado y actualiza item_data in-place.
     """
     if not isinstance(item_data, dict):
@@ -449,13 +615,27 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
         with _SELLER_PROFILE_LOCK:
             if cache_key in _SELLER_PROFILE_CACHE:
                 cached_time, cached_profile = _SELLER_PROFILE_CACHE[cache_key]
-                if (now - cached_time) < 1800:
+                ttl = _seller_cache_ttl_seconds((cached_profile or {}).get("seller_reviews_count"))
+                if ttl > 0 and (now - cached_time) < ttl and (cached_profile or {}).get("seller_profile_status") == "ok":
                     seller.update(cached_profile)
                     item_data["seller_reviews_count"] = cached_profile.get("seller_reviews_count")
                     item_data["seller_profile_status"] = cached_profile.get("seller_profile_status", "ok")
                     item_data["seller_rating"] = cached_profile.get("seller_rating")
                     item_data["seller_trust_badge"] = cached_profile.get("seller_trust_badge", "")
                     return cached_profile
+                else:
+                    _SELLER_PROFILE_CACHE.pop(cache_key, None)
+
+        sql_profile = _get_sqlite_cached_seller_profile(platform, seller_id, conn=conn)
+        if sql_profile is not None:
+            with _SELLER_PROFILE_LOCK:
+                _SELLER_PROFILE_CACHE[cache_key] = (now, dict(sql_profile))
+            seller.update(sql_profile)
+            item_data["seller_reviews_count"] = sql_profile.get("seller_reviews_count")
+            item_data["seller_profile_status"] = sql_profile.get("seller_profile_status", "ok")
+            item_data["seller_rating"] = sql_profile.get("seller_rating")
+            item_data["seller_trust_badge"] = sql_profile.get("seller_trust_badge", "")
+            return sql_profile
 
     # Valores existentes en item_data o seller (ignorando claves con valor None)
     def _pick(*keys):
@@ -497,7 +677,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
             "seller_profile_status": "ok",
             "platform": "CASHCONVERTERS"
         }
-        _set_cached_seller_profile(cache_key, profile)
+        _set_cached_seller_profile(cache_key, profile, conn=conn)
         seller.update(profile)
         item_data["seller_reviews_count"] = 999
         item_data["seller_profile_status"] = "ok"
@@ -511,6 +691,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
             raw_bkt = get_platform_bucket("WALLAPOP")
             bkt = raw_bkt if getattr(sess, "bucket", None) is not raw_bkt else None
             wallapop_http_ok = False
+            wallapop_blocked = False
             try:
                 if bkt is not None:
                     bkt.acquire()
@@ -546,10 +727,24 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                     verif = u_data.get("verification") or {}
                     if isinstance(verif, dict):
                         verified = any(bool(v) for v in verif.values())
+                elif r.status_code in (401, 403, 429):
+                    wallapop_blocked = True
+                    wallapop_http_ok = False
+                    if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
+                        try:
+                            raw_bkt.penalize(factor=0.5, duration_s=120)
+                        except Exception:
+                            pass
+                    if health_monitor is not None:
+                        try:
+                            retry_after = (r.headers or {}).get("Retry-After") if hasattr(r, "headers") else None
+                            health_monitor.handle_http_response(r.status_code, url=url, query=f"user:{seller_id}", retry_after=retry_after)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
-            if reviews_count is None or rating is None:
+            if not wallapop_blocked and (reviews_count is None or rating is None):
                 try:
                     if bkt is not None:
                         bkt.acquire()
@@ -587,11 +782,30 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                                     if val is not None:
                                         rating = float(val)
                                         break
+                    elif st_r.status_code in (401, 403, 429):
+                        wallapop_blocked = True
+                        wallapop_http_ok = False
+                        reviews_count = None
+                        rating = None
+                        if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
+                            try:
+                                raw_bkt.penalize(factor=0.5, duration_s=120)
+                            except Exception:
+                                pass
+                        if health_monitor is not None:
+                            try:
+                                retry_after = (st_r.headers or {}).get("Retry-After") if hasattr(st_r, "headers") else None
+                                health_monitor.handle_http_response(st_r.status_code, url=stats_url, query=f"user_stats:{seller_id}", retry_after=retry_after)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
-            if not wallapop_http_ok:
+            if not wallapop_http_ok or wallapop_blocked:
                 should_cache = False
+                if wallapop_blocked:
+                    reviews_count = None
+                    rating = None
 
     elif platform == "VINTED":
         try:
@@ -725,7 +939,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
     profile.update(extra)
 
     if seller_id and should_cache:
-        _set_cached_seller_profile(cache_key, profile)
+        _set_cached_seller_profile(cache_key, profile, conn=conn)
 
     seller.update(profile)
     item_data["seller_reviews_count"] = reviews_count
