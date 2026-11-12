@@ -5,7 +5,8 @@
   "price_drop_threshold_pct": 15,
   "price_drop_min_eur": 10,
   "ai": {
-    "pro_model_enabled": true
+    "pro_model_enabled": true,
+    "image_max_dim": 384
   },
   "scheduling": {
     "wallapop": {

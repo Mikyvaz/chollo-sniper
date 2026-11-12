@@ -3690,7 +3690,25 @@ def compress_image_to_jpeg_640(img_bytes, max_dim=384, quality=76, max_side=None
         return img_bytes
 
 
-def download_item_images(image_urls, rotator=None, max_images=3, force_safari=False):
+def resolve_image_max_dim(config=None, is_lite=True, budget_status="OK") -> int:
+    """Devuelve max_dim de imagen desde config['ai']['image_max_dim'] con fallback seguro."""
+    if str(budget_status or "").upper() == "DEGRADED":
+        return 384
+    default_dim = 384 if is_lite else 512
+    cfg = config if isinstance(config, dict) else load_raw_config()
+    ai_cfg = cfg.get("ai") if isinstance(cfg, dict) and isinstance(cfg.get("ai"), dict) else {}
+    raw_dim = ai_cfg.get("image_max_dim")
+    if raw_dim is not None:
+        try:
+            dim = int(raw_dim)
+            if dim >= 128:
+                return dim
+        except (TypeError, ValueError):
+            pass
+    return default_dim
+
+
+def download_item_images(image_urls, rotator=None, max_images=3, force_safari=False, max_dim=None):
     if not image_urls:
         return []
     urls = [u for u in image_urls[:max_images] if u]
@@ -3721,10 +3739,11 @@ def download_item_images(image_urls, rotator=None, max_images=3, force_safari=Fa
                 except Exception:
                     pass
 
+    eff_dim = int(max_dim) if max_dim is not None else max(512, resolve_image_max_dim(is_lite=False))
     compressed_results = []
     for b in raw_results:
         if b is not None:
-            comp = compress_image_to_jpeg_640(b)
+            comp = compress_image_to_jpeg_640(b, max_dim=eff_dim)
             if comp:
                 compressed_results.append(comp)
 
@@ -3737,7 +3756,12 @@ def prepare_image_for_ai(img_bytes, max_dim=384, quality=76):
     if isinstance(img_bytes, CompressedImageBytes) or getattr(img_bytes, "mime_type", None) == "image/jpeg":
         raw = bytes(img_bytes)
         if len(raw) > 0:
-            return base64.b64encode(raw).decode("ascii")
+            try:
+                with Image.open(io.BytesIO(raw)) as im:
+                    if max(im.size) <= max_dim:
+                        return base64.b64encode(raw).decode("ascii")
+            except Exception:
+                return base64.b64encode(raw).decode("ascii")
     try:
         with Image.open(io.BytesIO(img_bytes)) as img:
             try:
@@ -4215,14 +4239,12 @@ def analyze_and_generate_kit(
     text_low = f"{clean_title_str} {clean_desc}".lower()
     has_bundle_words = any(w in text_low for w in ("lote", "pack", "bundle", "juegos", "mandos", "+"))
 
+    target_img_dim = resolve_image_max_dim(is_lite=is_lite, budget_status=budget_status)
     if budget_status == "DEGRADED":
         max_imgs_allowed = 1
-        target_img_dim = 384
     elif is_lite:
-        target_img_dim = 384
         max_imgs_allowed = 1 if (not has_bundle_words and price < 60.0) else 2
     else:
-        target_img_dim = 512
         max_imgs_allowed = 3
 
     b64_images = []
