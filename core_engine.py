@@ -2536,7 +2536,18 @@ def _box_matches_query_and_radar(bname=None, cat="", clean_q=None, target=None, 
     if radar_id == "ps5_consoles_gta6" or "playstation 5" in q_norm or "ps5" in q_norm:
         if "pro" in bname_norm.split() and "pro" not in ctx_norm.split():
             return False
-        if ("digital" in bname_norm) != ("digital" in q_norm or "sin lector" in ctx_norm):
+        has_disc_drive_hint = (
+            ("con lector" in ctx_norm)
+            or ("lector de disco" in ctx_norm)
+            or ("edition standard" in ctx_norm)
+            or ("edicion disco" in ctx_norm)
+        )
+        ctx_is_digital = (
+            ("digital" in q_norm)
+            or ("sin lector" in ctx_norm)
+            or (_has_token(ctx_norm, "digital", negatable=True) and not has_disc_drive_hint)
+        )
+        if ("digital" in bname_norm) != ctx_is_digital:
             return False
         if "slim" in bname_norm and "slim" not in ctx_norm and "1tb" not in ctx_norm:
             return False

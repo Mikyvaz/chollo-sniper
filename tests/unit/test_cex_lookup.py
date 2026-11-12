@@ -133,6 +133,23 @@ class TestCexLookup(unittest.TestCase):
         ids = [r[0] for r in self.conn.execute("SELECT box_id FROM cex_catalog_mirror")]
         self.assertEqual(ids, ["NEW"])
 
+    def test_ps5_digital_en_contexto_sin_frase_sin_lector(self):
+        self._mirror("A1", DIGITAL, 372, 429)
+        self._mirror("B1", LECTOR, 437, 489)
+        with mock.patch("core_engine.requests.post", side_effect=AssertionError("sin red")):
+            dig = ce.fetch_cex_live(
+                self.conn, Q, reference_price=280, target=TARGET,
+                title_context="PlayStation 5 Slim digital", desc_context="Edicion digital como nueva",
+            )
+            disc_with_code = ce.fetch_cex_live(
+                self.conn, Q, reference_price=300, target=TARGET,
+                title_context="PlayStation 5 Slim con lector", desc_context="Incluye FIFA codigo digital",
+            )
+        self.assertEqual(dig["box_name"], DIGITAL)
+        self.assertEqual(dig["cash"], 372)
+        self.assertEqual(disc_with_code["box_name"], LECTOR)
+        self.assertEqual(disc_with_code["cash"], 437)
+
 
 if __name__ == "__main__":
     unittest.main()
