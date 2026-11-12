@@ -5706,12 +5706,10 @@ def _discord_edit_message(conn, deal_id, new_state, age_min=None):
         edit_url = f"{WEBHOOK_URL.split('?')[0].rstrip('/')}/messages/{msg_id}"
         headers = {"Content-Type": "application/json"}
     else:
-        if not ch_id:
+        if not (ch_id and BOT_TOKEN):
             return False
         edit_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
-        headers = {"Content-Type": "application/json"}
-        if BOT_TOKEN:
-            headers["Authorization"] = f"Bot {BOT_TOKEN}"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bot {BOT_TOKEN}"}
 
     raw_content = str(ctx.get("discord_content") or "")
     item_url = sanitize_item_url(deal.get("item_url") or "", deal.get("platform") or "") or str(deal.get("item_url") or "")

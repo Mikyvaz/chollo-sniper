@@ -167,6 +167,36 @@ class TestAlertLifecycle(unittest.TestCase):
         cids = _all_custom_ids(calls[0].get("components"))
         self.assertFalse(any(c.startswith("deal:buy") for c in cids))
 
+    def test_missing_bot_token_returns_false_and_skips_patch(self):
+        self._seed_deal("WAL_105")
+        with mock.patch.object(ce, "BOT_TOKEN", ""), \
+             mock.patch.object(ce.HTTP_SESSION, "patch") as patch_mock:
+            ok = ce._discord_edit_message(self.conn, "WAL_105", "sold")
+        self.assertFalse(ok)
+        patch_mock.assert_not_called()
+
+    def test_webhook_via_patches_webhook_url_without_components(self):
+        row = self._seed_deal(
+            "WAL_106",
+            ctx={
+                "discord_message_id": "wh-msg-9",
+                "discord_channel_id": "",
+                "discord_via": "webhook",
+                "discord_content": "🔥 Switch · 80 € → +40 € · WALLAPOP\nhttps://es.wallapop.com/item/106",
+            },
+        )
+        calls = []
+        with mock.patch.object(ce, "WEBHOOK_URL", "https://discord.com/api/webhooks/123/tok?wait=true"), \
+             mock.patch.object(ce.HTTP_SESSION, "patch", side_effect=lambda u, **kw: calls.append((u, kw["json"])) or _FakeResp(200)):
+            ot.record_check(self.conn, row, self._res("sold"), self.alert_at + timedelta(minutes=15))
+        self.assertEqual(len(calls), 1)
+        url, payload = calls[0]
+        self.assertEqual(url, "https://discord.com/api/webhooks/123/tok/messages/wh-msg-9")
+        self.assertTrue(payload["content"].startswith("❌ VENDIDO"))
+        self.assertNotIn("components", payload)
+        state = self.conn.execute("SELECT discord_state FROM alert_outcomes WHERE deal_id='WAL_106'").fetchone()[0]
+        self.assertEqual(state, "sold")
+
 
 if __name__ == "__main__":
     unittest.main()
