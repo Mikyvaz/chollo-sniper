@@ -152,7 +152,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T3.8 | [x] | Gemini 3.8 Max | Resumen diario de alertas silenciosas | Menos ruido | S | — |
 | T3.9 | [x] | Gemini 3.8 Max | Muestreo de anuncios bloqueados | Medir los falsos positivos del antifraude | M | — |
 | T3.10 | [ ] | Gemini 3.8 Max | A/B de resolución de imagen (código listo; A/B real pendiente aprobación) | Precisión visual a coste constante | S | T1.13 + aprobación |
-| T3.11 | [ ] | Gemini 3.8 Max | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
+| T3.11 | [x] | Gemini 3.8 Max | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
 
 ---
 

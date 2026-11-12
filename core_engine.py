@@ -1784,6 +1784,7 @@ def load_config(expand_for_offers=True):
     for t in cfg.get("targets", []):
         base_max = int(t.get("direct_buy_max_price") or t.get("max_price", 100))
         t["direct_buy_max_price"] = base_max
+        t["offer_scan_multiplier"] = mult if (expand_for_offers and t.get("offer_sniping", True)) else 1.0
         if expand_for_offers and t.get("offer_sniping", True):
             t["max_price"] = int(round(base_max * mult))
         else:
@@ -2271,9 +2272,18 @@ def passes_filters(title, description, price, target, global_blacklist, extra_te
     if not target.get("enabled", True):
         return False
 
-    offer_mult = 1.30 if target.get("offer_sniping", True) else 1.0
-    base_max = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))
-    effective_max = max(float(target.get("max_price", 9999)), round(base_max * offer_mult))
+    effective_max = float(target.get("max_price") or target.get("direct_buy_max_price", 9999))
+    if not target.get("offer_sniping", True) and target.get("direct_buy_max_price"):
+        effective_max = min(effective_max, float(target["direct_buy_max_price"]))
+    if target.get("offer_sniping", True):
+        if "offer_scan_multiplier" in target:
+            offer_mult = float(target["offer_scan_multiplier"])
+        elif target.get("direct_buy_max_price") and effective_max > float(target["direct_buy_max_price"]):
+            offer_mult = effective_max / float(target["direct_buy_max_price"])
+        else:
+            offer_mult = 1.0
+    else:
+        offer_mult = 1.0
 
     if price < target["min_price"] or price > effective_max:
         return False
@@ -3904,6 +3914,37 @@ def prescreen_item_text(platform, title, description, price, landed_cost, target
     return decision, reject_reason, confidence, False
 
 
+def resolve_min_profit(target, config=None, default=35.0):
+    """
+    Fuente única de verdad para el beneficio mínimo exigido (€).
+    Prioridad: override por radar (target) -> configuración global (config / config.json) -> default (35.0).
+    """
+    keys = ("min_net_profit_eur", "min_profit_eur", "min_profit")
+    if isinstance(target, dict):
+        for k in keys:
+            if target.get(k) is not None:
+                try:
+                    return float(target[k])
+                except (TypeError, ValueError):
+                    pass
+
+    cfg = config
+    if cfg is None:
+        try:
+            cfg = load_raw_config(CONFIG_PATH)
+        except Exception:
+            cfg = {}
+    if isinstance(cfg, dict):
+        for k in keys:
+            if cfg.get(k) is not None:
+                try:
+                    return float(cfg[k])
+                except (TypeError, ValueError):
+                    pass
+
+    return float(default)
+
+
 def pre_gate_cex_offer_margin(conn, item, target, config=None):
     """
     Pre-Gating Matemático CeX (TASK-03) antes de Puerta 1 / Puerta 2.
@@ -3957,7 +3998,7 @@ def pre_gate_cex_offer_margin(conn, item, target, config=None):
 
         # 5. Techo de salida: CeX cash (o reventa rápida si no hay precio en efectivo)
         max_exit = cex_cash if cex_cash > 0.0 else (cex_sell * 0.85)
-        min_profit = float(target.get("min_profit", 15.0))
+        min_profit = resolve_min_profit(target, config=config, default=35.0)
 
         if (max_exit - min_achievable_landed) < (min_profit * 0.70):
             return False, f"pre_gate_margin_impossible (ask={price:.1f}€, min_haggle={min_achievable_landed:.1f}€, cex_cash={cex_cash:.1f}€, max_exit={max_exit:.1f}€)"
@@ -4487,7 +4528,8 @@ def classify_deal_tier(
 
 def evaluate_deal_math_and_score(
     price, landed_cost, target, ai_data, cex_data,
-    min_profit=35.0, min_personal_savings=25.0, min_score=8, filter_pro_seller=True
+    min_profit=None, min_personal_savings=25.0, min_score=8, filter_pro_seller=True,
+    config=None
 ):
     """
     Motor Matemático Dual v4.3 (Compra Directa >=8/10 + Oportunidad de Chollo mediante Oferta 6-7/10):
@@ -4656,7 +4698,12 @@ def evaluate_deal_math_and_score(
         return True, score, optimal_price, best_profit, charger_penalty, f"OK_{tier_res['tier_code']}"
 
     # 2. Evaluación como OPORTUNIDAD DE CHOLLO (HACER OFERTA)
-    req_margin = float(target.get("min_profit_eur", min_profit))
+    if config is not None:
+        req_margin = resolve_min_profit(target, config=config, default=(35.0 if min_profit is None else float(min_profit)))
+    elif min_profit is not None:
+        req_margin = resolve_min_profit(target, config={"min_net_profit_eur": float(min_profit)}, default=float(min_profit))
+    else:
+        req_margin = resolve_min_profit(target, config=None, default=35.0)
     net_optimal_p2p = optimal_price * 0.92
     if allow_offers and net_optimal_p2p > (req_margin + est_fees + 10):
         target_offer = int(min(direct_max_cap, math.floor(net_optimal_p2p - req_margin - est_fees)))
