@@ -5614,18 +5614,171 @@ def _discord_post_with_fallback(url, *, headers=None, payload=None, fallback_con
     return ok, status, mid
 
 
-def _save_discord_message_id(conn, deal_id, message_id, channel_id="", via="bot"):
+def _save_discord_message_id(conn, deal_id, message_id, channel_id="", via="bot",
+                             content=None, components=None):
     """Guarda en deals.alert_context_json el mensaje de Discord de la alerta (lo usa el ciclo de vida, T3.7)."""
     if not (conn is not None and deal_id and message_id):
         return
     try:
+        row = conn.execute("SELECT alert_context_json FROM deals WHERE deal_id = ?", (str(deal_id),)).fetchone()
+        ctx = {}
+        if row and row[0]:
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, dict):
+                    ctx = parsed
+            except Exception:
+                ctx = {}
+        ctx["discord_message_id"] = str(message_id)
+        ctx["discord_channel_id"] = str(channel_id or "")
+        ctx["discord_via"] = str(via)
+        if content is not None:
+            ctx["discord_content"] = str(content)
+        if components is not None:
+            ctx["discord_components"] = components
         conn.execute(
-            "UPDATE deals SET alert_context_json = json_set(COALESCE(NULLIF(alert_context_json,''),'{}'), "
-            "'$.discord_message_id', ?, '$.discord_channel_id', ?, '$.discord_via', ?) WHERE deal_id = ?",
-            (str(message_id), str(channel_id or ""), str(via), str(deal_id)))
+            "UPDATE deals SET alert_context_json = ? WHERE deal_id = ?",
+            (json.dumps(ctx, ensure_ascii=False), str(deal_id)),
+        )
         conn.commit()
     except Exception as e:
         print(f"[WARN] No se pudo guardar el message_id de Discord de {deal_id}: {e}")
+
+
+def _strip_buy_button_components(components):
+    """Elimina cualquier botón con custom_id 'deal:buy*' y descarta filas vacías."""
+    cleaned = []
+    for row in components or []:
+        if not isinstance(row, dict):
+            continue
+        btns = [
+            b for b in (row.get("components") or [])
+            if isinstance(b, dict) and not str(b.get("custom_id") or "").startswith("deal:buy")
+        ]
+        if btns:
+            cleaned.append({**row, "components": btns})
+    return cleaned
+
+
+def _discord_edit_message(conn, deal_id, new_state, age_min=None):
+    """Edita el mensaje original de Discord al cambiar el estado del anuncio (T3.7).
+
+    No genera notificación en Discord (PATCH). Devuelve True si la edición tuvo éxito.
+    """
+    if conn is None or not deal_id:
+        return False
+    state_norm = str(new_state or "").strip().lower()
+    if state_norm in ("sold", "gone"):
+        prefix = "❌ VENDIDO"
+    elif state_norm == "reserved":
+        prefix = f"⏸️ RESERVADO (hace {int(round(float(age_min)))} min)" if age_min is not None else "⏸️ RESERVADO"
+    else:
+        return False
+
+    try:
+        cur = conn.execute("SELECT * FROM deals WHERE deal_id = ?", (str(deal_id),))
+        row = cur.fetchone()
+    except Exception:
+        return False
+    if not row:
+        return False
+    cols = [d[0] for d in (cur.description or [])]
+    deal = dict(zip(cols, row))
+
+    ctx = {}
+    if deal.get("alert_context_json"):
+        try:
+            parsed = json.loads(deal["alert_context_json"])
+            if isinstance(parsed, dict):
+                ctx = parsed
+        except Exception:
+            ctx = {}
+
+    msg_id = str(ctx.get("discord_message_id") or "").strip()
+    ch_id = str(ctx.get("discord_channel_id") or "").strip()
+    via = str(ctx.get("discord_via") or "bot").strip().lower()
+    if not msg_id:
+        return False
+
+    if via == "webhook":
+        if not (WEBHOOK_URL and "http" in WEBHOOK_URL):
+            return False
+        edit_url = f"{WEBHOOK_URL.split('?')[0].rstrip('/')}/messages/{msg_id}"
+        headers = {"Content-Type": "application/json"}
+    else:
+        if not ch_id:
+            return False
+        edit_url = f"https://discord.com/api/v10/channels/{ch_id}/messages/{msg_id}"
+        headers = {"Content-Type": "application/json"}
+        if BOT_TOKEN:
+            headers["Authorization"] = f"Bot {BOT_TOKEN}"
+
+    raw_content = str(ctx.get("discord_content") or "")
+    item_url = sanitize_item_url(deal.get("item_url") or "", deal.get("platform") or "") or str(deal.get("item_url") or "")
+    if not raw_content:
+        model = deal.get("identified_model") or deal.get("title") or ""
+        if model:
+            headline = format_alert_headline(
+                model=model,
+                price=float(deal.get("price") or 0.0),
+                net_profit=float(deal.get("net_profit") or 0.0),
+                platform=deal.get("platform") or "",
+                location=deal.get("seller_city") or "",
+            )
+            raw_content = f"{headline}\n{item_url}" if _valid_http(item_url) else headline
+        elif _valid_http(item_url):
+            raw_content = item_url
+
+    base_content = re.sub(r"^(?:❌\s*VENDIDO[^\n]*|⏸️\s*RESERVADO[^\n]*)\n?", "", raw_content).strip()
+    new_content = f"{prefix}\n{base_content}" if base_content else prefix
+    new_content = new_content[:1950]
+
+    patch_payload = {"content": new_content}
+    new_components = None
+    if via != "webhook":
+        raw_components = ctx.get("discord_components")
+        if isinstance(raw_components, list):
+            new_components = _strip_buy_button_components(raw_components)
+        else:
+            fallback_rows = []
+            if _valid_http(item_url):
+                fallback_rows.append({"type": 1, "components": [{"type": 2, "style": 5, "label": "Abrir anuncio", "url": item_url}]})
+            fallback_rows.append({
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 1, "label": "Mensajes / Regateo 1-Clic", "emoji": {"name": "📋"}, "custom_id": f"deal:msg:{deal_id}"},
+                    {"type": 2, "style": 2, "label": "Grados CeX", "emoji": {"name": "📊"}, "custom_id": f"deal:cex:{deal_id}"},
+                    {"type": 2, "style": 2, "label": "Calificar", "emoji": {"name": "📝"}, "custom_id": f"deal:rate:{deal_id}"},
+                    {"type": 2, "style": 4, "label": "Descartar", "emoji": {"name": "🚫"}, "custom_id": f"deal:hide:{deal_id}"},
+                ],
+            })
+            new_components = _strip_buy_button_components(fallback_rows)
+        patch_payload["components"] = new_components
+
+    ok, _status, _mid = _discord_send("PATCH", edit_url, headers=headers, json_payload=patch_payload, timeout=6, attempts=2)
+    if ok:
+        ctx["discord_content"] = new_content
+        if new_components is not None:
+            ctx["discord_components"] = new_components
+        try:
+            conn.execute(
+                "UPDATE deals SET alert_context_json = ? WHERE deal_id = ?",
+                (json.dumps(ctx, ensure_ascii=False), str(deal_id)),
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "UPDATE alert_outcomes SET discord_state = ? WHERE deal_id = ?",
+                (state_norm, str(deal_id)),
+            )
+        except Exception:
+            pass
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    return ok
 
 
 def send_flash_discord_alert(
@@ -6073,7 +6226,8 @@ def send_discord_alert(
             timeout=15 if enhanced_cover_bytes else 10, state=send_state)
         if ok:
             delivered = True
-            _save_discord_message_id(conn, deal_id, msg_id, ALERTS_CHANNEL_ID, "bot")
+            _save_discord_message_id(conn, deal_id, msg_id, ALERTS_CHANNEL_ID, "bot",
+                                     content=push_notification_content, components=components)
 
     if not delivered and WEBHOOK_URL and "http" in WEBHOOK_URL:
         sep = "&" if "?" in WEBHOOK_URL else "?"
@@ -6085,7 +6239,8 @@ def send_discord_alert(
             timeout=15 if enhanced_cover_bytes else 10, state=send_state)
         if ok:
             delivered = True
-            _save_discord_message_id(conn, deal_id, msg_id, "", "webhook")
+            _save_discord_message_id(conn, deal_id, msg_id, "", "webhook",
+                                     content=push_notification_content)
 
     if not delivered:
         print(f"[DISCORD ERROR] Alerta {deal_id} NO entregada por bot ni webhook")

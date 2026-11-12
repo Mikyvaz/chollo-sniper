@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 
 from curl_cffi import requests
 
+import core_engine
 from core_engine import get_db, touch_heartbeat, PROXY_URL, _ebay_mgr
 from http_client import PlatformClient, NATIVE_PROFILE_HEADERS
 
@@ -97,11 +98,17 @@ def ensure_outcome_tables(conn):
             backfill INTEGER DEFAULT 0,
             next_check_at DATETIME,
             last_check_at DATETIME,
-            done INTEGER DEFAULT 0
+            done INTEGER DEFAULT 0,
+            discord_state TEXT
         )
     """)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(alert_outcomes)").fetchall()]
-    for col, ddl in (("seller_id", "TEXT DEFAULT ''"), ("seller_status", "TEXT"), ("seller_checked_at", "DATETIME")):
+    for col, ddl in (
+        ("seller_id", "TEXT DEFAULT ''"),
+        ("seller_status", "TEXT"),
+        ("seller_checked_at", "DATETIME"),
+        ("discord_state", "TEXT"),
+    ):
         if col not in cols:
             try:
                 conn.execute(f"ALTER TABLE alert_outcomes ADD COLUMN {col} {ddl}")
@@ -411,6 +418,16 @@ def record_check(conn, row, res, now):
           res["views"], res["favorites"], res["conversations"], (checks_done or 0) + 1, unknown_checks,
           _fmt(now), _fmt(nxt), done, deal_id))
     conn.commit()
+    if status in ("reserved", "sold", "gone"):
+        cur_state_row = conn.execute(
+            "SELECT discord_state FROM alert_outcomes WHERE deal_id = ?", (deal_id,)
+        ).fetchone()
+        cur_discord_state = cur_state_row[0] if cur_state_row else None
+        if cur_discord_state != status:
+            try:
+                core_engine._discord_edit_message(conn, deal_id, status, age_min=_minutes(alert_at, now))
+            except Exception as e:
+                print(f"[WARN] Error editando alerta Discord {deal_id} ({status}): {e}")
 
 
 _last_request = {}
