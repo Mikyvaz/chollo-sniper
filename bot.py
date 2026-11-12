@@ -22,7 +22,8 @@ import time
 import asyncio
 import threading
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo
 from PIL import Image, ImageOps, ImageEnhance
 
 import discord
@@ -42,7 +43,9 @@ from core_engine import (
     mark_deal_sold, update_deal_fields, delete_deal, undo_last_deal_change, get_portfolio_summary,
     search_deals, count_stale_alerts, purge_stale_alerts, export_deals_csv,
     FEEDBACK_VERDICTS, FEEDBACK_REASONS, FEEDBACK_REASON_LABELS,
-    save_alert_feedback, get_latest_feedback, get_feedback_summary, export_feedback_csv
+    save_alert_feedback, get_latest_feedback, get_feedback_summary, export_feedback_csv,
+    ALERTS_CHANNEL_ID as CORE_ALERTS_CHANNEL_ID,
+    get_daily_silent_digest_deals, format_silent_digest_message,
 )
 from outcome_tracker import get_outcome_summary, export_outcomes_csv
 
@@ -55,6 +58,7 @@ if GEMINI_API_KEY and len(GEMINI_API_KEY) < 8:
 AI_MODEL = os.environ.get("AI_MODEL", "gemini-3.5-flash-lite").strip()
 GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "1564559739960959036"))
 RELISTER_CHANNEL_ID = int(os.environ.get("RELISTER_CHANNEL_ID", "1565139139949764708"))
+ALERTS_CHANNEL_ID = int(os.environ.get("DISCORD_ALERTS_CHANNEL_ID") or CORE_ALERTS_CHANNEL_ID or 0)
 SELLER_CITY = os.environ.get("SELLER_CITY", "Sevilla").strip()
 
 intents = discord.Intents.default()
@@ -1939,11 +1943,40 @@ async def _handle_deal_action(interaction: discord.Interaction, action, deal_id)
 async def bot_heartbeat():
     touch_heartbeat()
 
+
+@tasks.loop(time=dt_time(hour=21, minute=0, tzinfo=ZoneInfo("Europe/Madrid")))
+async def daily_silent_digest_loop():
+    if not ALERTS_CHANNEL_ID:
+        return
+
+    def _query_digest():
+        conn = get_db()
+        try:
+            rows = get_daily_silent_digest_deals(conn, hours=24, limit=10)
+            return rows, format_silent_digest_message(rows)
+        finally:
+            conn.close()
+
+    try:
+        rows, msg = await asyncio.to_thread(_query_digest)
+        if not rows or not msg:
+            return
+        ch = bot.get_channel(ALERTS_CHANNEL_ID)
+        if ch is None:
+            ch = await bot.fetch_channel(ALERTS_CHANNEL_ID)
+        if ch is not None:
+            await ch.send(msg)
+    except Exception as e:
+        print(f"[WARN] Error enviando resumen diario silencioso: {e}")
+
+
 @bot.event
 async def on_ready():
     init_db()
     if not bot_heartbeat.is_running():
         bot_heartbeat.start()
+    if not daily_silent_digest_loop.is_running():
+        daily_silent_digest_loop.start()
     print(f"[BOT ONLINE] Conectado como {bot.user} (ID: {bot.user.id})")
     try:
         guild = discord.Object(id=GUILD_ID)

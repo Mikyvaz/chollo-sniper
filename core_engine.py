@@ -5095,6 +5095,7 @@ def ensure_alert_feedback_table(conn):
 
 NOTIFICATION_DEFAULTS = {
     "flash_mode": "off",               # off | silent | on  (alerta previa a la IA)
+    "silent_mode": "individual",       # individual | digest (resumen diario a las 21:00)
     "push_min_profit_eur": 40,         # compra directa: beneficio mínimo para sonar
     "push_offer_min_profit_eur": 80,   # oportunidad de regateo: beneficio mínimo para sonar
     "push_max_per_hour": 4,            # tope de avisos sonoros por hora (entre todos los escáneres)
@@ -5156,6 +5157,66 @@ def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", sell
     except Exception:
         pass
     return True, ""
+
+
+def get_daily_silent_digest_deals(conn, hours: int = 24, limit: int = 10) -> list:
+    """Devuelve las mejores alertas silenciosas (push=0) de las últimas `hours` horas aún disponibles."""
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT d.deal_id, d.platform, d.title, d.identified_model, d.price, d.net_profit,
+                   d.item_url, d.seller_city, d.created_at
+            FROM deals d
+            JOIN alert_outcomes ao ON ao.deal_id = d.deal_id
+            WHERE d.created_at >= datetime('now', ?)
+              AND json_extract(d.alert_context_json, '$.push') = 0
+              AND ao.last_status = 'available'
+            ORDER BY COALESCE(d.net_profit, 0) DESC, d.created_at DESC
+            LIMIT ?
+            """,
+            (f"-{int(hours)} hours", int(limit)),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for deal_id, plat, title, model, price, net_profit, item_url, seller_city, created_at in rows:
+        plat_u = str(plat or "").upper()
+        clean_url = sanitize_item_url(item_url or "", plat_u) or str(item_url or "")
+        out.append({
+            "deal_id": deal_id,
+            "platform": plat_u,
+            "title": title or "",
+            "model": model or title or "Producto",
+            "price": float(price or 0.0),
+            "net_profit": float(net_profit or 0.0),
+            "item_url": clean_url,
+            "seller_city": seller_city or "",
+            "created_at": created_at or "",
+        })
+    return out
+
+
+def format_silent_digest_message(rows: list) -> str:
+    """Formatea el resumen diario (<=1950 chars) con enlace por cada chollo silencioso disponible."""
+    if not rows:
+        return ""
+    lines = [f"🌙 **Resumen diario de alertas silenciosas ({len(rows)} mejores disponibles)**"]
+    for idx, r in enumerate(rows, 1):
+        model = _compact_text(r.get("model") or r.get("title") or "Producto", 42)
+        price_f = float(r.get("price") or 0.0)
+        profit_f = float(r.get("net_profit") or 0.0)
+        plat = str(r.get("platform") or "").upper()
+        url = r.get("item_url") or ""
+        entry = f"{idx}. **{model}** · {price_f:.0f} € → **+{profit_f:.0f} €** ({plat})"
+        if url:
+            entry = f"{entry} — {url}"
+        candidate = "\n".join(lines + [entry])
+        if len(candidate) > 1950:
+            break
+        lines.append(entry)
+    return "\n".join(lines)
 
 
 def _fmt_account_age(days):
@@ -5965,6 +6026,11 @@ def send_discord_alert(
                        extra={"seller_id": s_id, "listing_age_text": str(listing_age_text or "")[:60],
                               "published_at_utc": _to_utc_iso(listing_published_at),
                               "push": should_push, "quiet_reason": quiet_reason})
+
+    silent_mode = str(get_notification_policy().get("silent_mode", "individual")).strip().lower()
+    if not should_push and silent_mode == "digest":
+        print(f"[SILENT DIGEST] {deal_id} ({plat}) guardado para resumen diario ({quiet_reason})")
+        return False
 
     if deal_type == "high_risk_opportunity":
         score_badge = "⚠️ 7/10 • ALTO RIESGO / PRECIO ANÓMALO (REVISAR CON CAUTELA)"

@@ -37,6 +37,7 @@
   },
   "notifications": {
     "flash_mode": "off",
+    "silent_mode": "individual",
     "push_min_profit_eur": 40,
     "push_offer_min_profit_eur": 80,
     "push_max_per_hour": 4,
