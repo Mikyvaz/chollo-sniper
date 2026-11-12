@@ -274,6 +274,7 @@ def init_db(conn=None):
             item_id TEXT,
             title TEXT,
             price REAL,
+            state TEXT DEFAULT 'seen',
             seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (platform, item_id)
         )
@@ -477,6 +478,12 @@ def init_db(conn=None):
         embed_cols = [col[1] for col in c.execute("PRAGMA table_info(item_embeddings)").fetchall()]
         if "seller_id" not in embed_cols:
             c.execute("ALTER TABLE item_embeddings ADD COLUMN seller_id TEXT DEFAULT '';")
+
+        # T3.5: estado de visto vs reservado en market_seen_items para re-chequeo al caer la reserva
+        try:
+            c.execute("ALTER TABLE market_seen_items ADD COLUMN state TEXT DEFAULT 'seen';")
+        except sqlite3.OperationalError:
+            pass  # columna ya existente (o añadida a la vez por otro contenedor)
 
         run_db_maintenance(conn)
 
@@ -1144,14 +1151,25 @@ def build_robust_cache_key(radar_id, title, desc, price, img_sig=None, prefix="v
 
 
 
-def check_item_seen_or_dropped(conn, platform, item_id, current_price, min_drop_pct=15, min_drop_eur=10):
+def check_item_seen_or_dropped(conn, platform, item_id, current_price, min_drop_pct=15, min_drop_eur=10, is_reserved_now=False):
     plat = platform.upper()
     sid = str(item_id)
     c = conn.cursor()
-    c.execute("SELECT price FROM market_seen_items WHERE platform = ? AND item_id = ?", (plat, sid))
-    row = c.fetchone()
+    try:
+        c.execute("SELECT price, state FROM market_seen_items WHERE platform = ? AND item_id = ?", (plat, sid))
+        row = c.fetchone()
+    except sqlite3.OperationalError:
+        c.execute("SELECT price, 'seen' FROM market_seen_items WHERE platform = ? AND item_id = ?", (plat, sid))
+        row = c.fetchone()
 
     if row is None:
+        return False, None
+
+    row_state = str(row[1] or "seen").strip().lower()
+    if row_state == "reserved":
+        # Mientras siga reservado se omite; al caer la reserva re-entra en el embudo
+        if is_reserved_now:
+            return True, None
         return False, None
 
     old_price = float(row[0] or 0)
@@ -1626,15 +1644,22 @@ def is_duplicate_recent_deal(conn, platform, title, price, hours=48, radar_id=""
     return False
 
 
-def mark_item_seen(conn, platform, item_id, title, price):
+def mark_item_seen(conn, platform, item_id, title, price, state="seen"):
     plat = platform.upper()
     sid = str(item_id)
     p = float(price or 0)
+    st = str(state or "seen").strip().lower() or "seen"
     c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO market_seen_items (platform, item_id, title, price, seen_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-        (plat, sid, title, p)
-    )
+    try:
+        c.execute(
+            "INSERT OR REPLACE INTO market_seen_items (platform, item_id, title, price, state, seen_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (plat, sid, title, p, st)
+        )
+    except sqlite3.OperationalError:
+        c.execute(
+            "INSERT OR REPLACE INTO market_seen_items (platform, item_id, title, price, seen_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (plat, sid, title, p)
+        )
     conn.commit()
 
 

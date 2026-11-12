@@ -324,6 +324,21 @@ def send_startup_ping(total_targets, min_profit, min_score):
         pass
 
 
+def handle_seen_and_reserved(conn, item_id, title, price, is_reserved_now, drop_pct=15, drop_eur=10):
+    """Gestiona visto/rebaja y estado reservado en Wallapop; devuelve (should_skip, price_drop_info)."""
+    already_seen, price_drop_info = check_item_seen_or_dropped(
+        conn, "WALLAPOP", item_id, price,
+        min_drop_pct=drop_pct, min_drop_eur=drop_eur,
+        is_reserved_now=bool(is_reserved_now),
+    )
+    if already_seen:
+        return True, None
+    if is_reserved_now:
+        mark_item_seen(conn, "WALLAPOP", item_id, title, price, state="reserved")
+        return True, None
+    return False, price_drop_info
+
+
 def main():
     conn = init_db()
     config = load_config()
@@ -452,10 +467,12 @@ def main():
                     title = item.get("title", "")
                     desc = item.get("description", "")
 
-                    already_seen, price_drop_info = check_item_seen_or_dropped(
-                        conn, "WALLAPOP", item_id, price, min_drop_pct=drop_pct, min_drop_eur=drop_eur
+                    is_reserved_now = bool((item.get("reserved") or {}).get("flag", False))
+                    should_skip_item, price_drop_info = handle_seen_and_reserved(
+                        conn, item_id, title, price, is_reserved_now,
+                        drop_pct=drop_pct, drop_eur=drop_eur,
                     )
-                    if already_seen:
+                    if should_skip_item:
                         continue
 
                     # Aplazado por presupuesto: esperar a que se reanude la IA sin repetir la alerta flash
@@ -467,10 +484,6 @@ def main():
 
                     target_new_count += 1
                     round_new += 1
-
-                    if item.get("reserved", {}).get("flag", False):
-                        mark_item_seen(conn, "WALLAPOP", item_id, title, price)
-                        continue
 
                     if warmup:
                         mark_item_seen(conn, "WALLAPOP", item_id, title, price)
