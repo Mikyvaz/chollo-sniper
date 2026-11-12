@@ -32,6 +32,7 @@ from core_engine import (
     touch_heartbeat, sleep_with_heartbeat,
     prescreen_item_text, AI_PRESCREEN_SHADOW_MODE,
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
+    record_fraud_sample,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, is_ai_budget_paused,
     CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin
@@ -550,6 +551,11 @@ def main():
 
                     if fraud_eval.get("is_fraud") or fraud_eval.get("should_block") or fraud_eval.get("risk", 0) >= 4:
                         log_fraud_event(conn, "WALLAPOP", item_id, title, price, fraud_eval["risk"], fraud_eval["hits"])
+                        record_fraud_sample(
+                            conn, "WALLAPOP", item_id, seller_id=current_seller_id,
+                            risk=fraud_eval.get("risk", 0), codes=fraud_eval.get("hits"),
+                            item_url=item_url, seller=seller,
+                        )
                         print(f"[WALLAPOP FRAUDE BLOQUEADO] {title} ({price:.0f}€) -> {[h['label'] for h in fraud_eval['hits']]}")
                         mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                         continue

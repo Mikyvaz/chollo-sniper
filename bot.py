@@ -2458,12 +2458,77 @@ def _outcome_line(name, s):
             f"   Reservadas en algún momento: {s['reserved']} · Retraso mediano publicación→alerta: **{delay}** ({s['with_delay']})")
 
 
+def summarize_fraud_samples(conn, days=None):
+    """Compara la tasa de cuentas suspendidas/eliminadas entre bloqueados (muestra 10 %) y alertados."""
+    empty = {"total": 0, "checked": 0, "suspended": 0, "pct": 0.0}
+    if conn is None:
+        return {"blocked": dict(empty), "alerted": {"checked": 0, "suspended": 0, "pct": 0.0}}
+    blk = dict(empty)
+    try:
+        where_fs = "created_at >= datetime('now', ?)" if days else "1=1"
+        params_fs = (f"-{int(days)} days",) if days else ()
+        blk["total"] = conn.execute(f"SELECT COUNT(*) FROM fraud_samples WHERE {where_fs}", params_fs).fetchone()[0]
+        row_b = conn.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN seller_status IN ('banned', 'deleted') THEN 1 ELSE 0 END), 0)
+            FROM fraud_samples
+            WHERE {where_fs}
+              AND checked_at IS NOT NULL
+              AND seller_status IN ('active', 'banned', 'deleted')
+            """,
+            params_fs,
+        ).fetchone()
+        blk["checked"] = int(row_b[0] or 0)
+        blk["suspended"] = int(row_b[1] or 0)
+        blk["pct"] = round((blk["suspended"] / blk["checked"]) * 100.0, 1) if blk["checked"] else 0.0
+    except Exception:
+        pass
+
+    al = {"checked": 0, "suspended": 0, "pct": 0.0}
+    try:
+        where_ao = "alert_at >= datetime('now', ?)" if days else "1=1"
+        params_ao = (f"-{int(days)} days",) if days else ()
+        row_a = conn.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN seller_status IN ('banned', 'deleted') THEN 1 ELSE 0 END), 0)
+            FROM alert_outcomes
+            WHERE {where_ao}
+              AND seller_status IN ('active', 'banned', 'deleted')
+            """,
+            params_ao,
+        ).fetchone()
+        al["checked"] = int(row_a[0] or 0)
+        al["suspended"] = int(row_a[1] or 0)
+        al["pct"] = round((al["suspended"] / al["checked"]) * 100.0, 1) if al["checked"] else 0.0
+    except Exception:
+        pass
+    return {"blocked": blk, "alerted": al}
+
+
+def format_fraud_comparison_lines(comp):
+    blk = (comp or {}).get("blocked") or {"total": 0, "checked": 0, "suspended": 0, "pct": 0.0}
+    al = (comp or {}).get("alerted") or {"checked": 0, "suspended": 0, "pct": 0.0}
+    if not (blk.get("checked") or al.get("checked") or blk.get("total")):
+        return []
+    lines = ["\n**🧪 Comparativa antifraude (cuentas suspendidas/eliminadas a 24 h):**"]
+    if blk.get("checked"):
+        lines.append(f"• Bloqueados (muestra 10 %): **{blk['suspended']}** de {blk['checked']} ({blk['pct']:.0f}%)")
+    else:
+        lines.append(f"• Bloqueados (muestra 10 %): {blk.get('total', 0)} en espera de revisión 24 h")
+    if al.get("checked"):
+        lines.append(f"• Alertados: **{al['suspended']}** de {al['checked']} ({al['pct']:.0f}%)")
+    return lines
+
+
 @bot.tree.command(name="resultados", description="Qué pasó con las alertas: cuántas se vendieron, en cuánto tiempo y el retraso de las alertas")
 @app_commands.describe(dias="Solo alertas de los últimos N días (0 = todo)")
 async def slash_resultados(interaction: discord.Interaction, dias: int = 0):
     await interaction.response.defer(ephemeral=True)
     days = dias if dias and dias > 0 else None
     s = await db_call(get_outcome_summary, days)
+    fraud_comp = await db_call(summarize_fraud_samples, days)
     csv_text = await db_call(export_outcomes_csv)
     lines = []
     for plat, stats in sorted(s["by_platform"].items(), key=lambda kv: -kv[1]["tracked"]):
@@ -2481,6 +2546,7 @@ async def slash_resultados(interaction: discord.Interaction, dias: int = 0):
             g = truth.get(key, {"checked": 0, "banned": 0})
             pct = (g["banned"] / g["checked"] * 100) if g["checked"] else 0.0
             lines.append(f"• {label}: **{g['banned']}** de {g['checked']} ({pct:.0f}%)")
+    lines.extend(format_fraud_comparison_lines(fraud_comp))
     if s["pending"]:
         lines.append(f"\n⏳ {s['pending']} alertas pendientes de su primera comprobación.")
     embed = discord.Embed(title="⏱️ Resultados de las alertas (Nivel 1)", description="\n".join(lines)[:4000], color=0x1ABC9C)

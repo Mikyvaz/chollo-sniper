@@ -377,6 +377,23 @@ def init_db(conn=None):
         )
     """)
     c.execute("""
+        CREATE TABLE IF NOT EXISTS fraud_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT,
+            item_id TEXT,
+            seller_id TEXT DEFAULT '',
+            item_url TEXT DEFAULT '',
+            risk INTEGER DEFAULT 0,
+            codes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            item_status TEXT,
+            seller_status TEXT,
+            checked_at TIMESTAMP,
+            UNIQUE(platform, item_id)
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_fraud_samples_pending ON fraud_samples(checked_at, created_at)")
+    c.execute("""
         CREATE TABLE IF NOT EXISTS item_embeddings (
             item_key TEXT PRIMARY KEY,
             radar_id TEXT,
@@ -5157,6 +5174,60 @@ def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", sell
     except Exception:
         pass
     return True, ""
+
+
+def should_sample_fraud_block(platform: str, item_id) -> bool:
+    """Muestreo determinista del 10 % para auditar falsos positivos de la Puerta 0 (T3.9)."""
+    plat = str(platform or "").strip().upper()
+    iid = str(item_id or "").strip()
+    if not iid:
+        return False
+    digest = hashlib.sha1(f"{plat}:{iid}".encode("utf-8")).hexdigest()
+    return int(digest, 16) % 10 == 0
+
+
+def record_fraud_sample(conn, platform: str, item_id, seller_id: str = "", risk: int = 0,
+                        codes=None, item_url: str = "", seller=None) -> bool:
+    """Guarda en fraud_samples el 10 % determinista de los bloqueos de Puerta 0."""
+    if conn is None:
+        return False
+    plat = str(platform or "").strip().upper()
+    iid = str(item_id or "").strip()
+    if not should_sample_fraud_block(plat, iid):
+        return False
+    sid = str(seller_id or "").strip()
+    if not sid and seller is not None:
+        if isinstance(seller, dict):
+            sid = str(seller.get("id") or seller.get("user_id") or "").strip()
+        else:
+            sid = str(seller).strip()
+    if isinstance(codes, str):
+        codes_str = codes.strip()
+    elif codes:
+        extracted = []
+        for h in codes:
+            if isinstance(h, dict):
+                val = h.get("code") or h.get("label") or ""
+            else:
+                val = h
+            if val:
+                extracted.append(str(val).strip())
+        codes_str = ",".join(extracted)
+    else:
+        codes_str = ""
+    clean_url = sanitize_item_url(item_url or "", plat) or str(item_url or "")
+    try:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO fraud_samples (platform, item_id, seller_id, item_url, risk, codes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (plat, iid, sid, clean_url, int(risk or 0), codes_str),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        return False
 
 
 def get_daily_silent_digest_deals(conn, hours: int = 24, limit: int = 10) -> list:

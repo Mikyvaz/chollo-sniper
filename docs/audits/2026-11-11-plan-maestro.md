@@ -150,7 +150,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T3.6 | [x] | Gemini 3.8 Max | Payload: primera línea útil y sin deeplinks rotos | Acción en un toque | S | T1.5, T1.12 |
 | T3.7 | [x] | Gemini 3.8 Max | Ciclo de vida de la alerta en Discord | No perseguir anuncios vendidos | S | T1.5 |
 | T3.8 | [x] | Gemini 3.8 Max | Resumen diario de alertas silenciosas | Menos ruido | S | — |
-| T3.9 | [ ] | Gemini 3.8 Max | Muestreo de anuncios bloqueados | Medir los falsos positivos del antifraude | M | — |
+| T3.9 | [x] | Gemini 3.8 Max | Muestreo de anuncios bloqueados | Medir los falsos positivos del antifraude | M | — |
 | T3.10 | [ ] | Gemini 3.8 Max | A/B de resolución de imagen | Precisión visual a coste constante | S | T1.13 + aprobación |
 | T3.11 | [ ] | Gemini 3.8 Max | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
 

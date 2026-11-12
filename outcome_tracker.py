@@ -131,6 +131,23 @@ def ensure_outcome_tables(conn):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_outcome_checks_deal ON alert_outcome_checks(deal_id, id)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fraud_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT,
+            item_id TEXT,
+            seller_id TEXT DEFAULT '',
+            item_url TEXT DEFAULT '',
+            risk INTEGER DEFAULT 0,
+            codes TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            item_status TEXT,
+            seller_status TEXT,
+            checked_at TIMESTAMP,
+            UNIQUE(platform, item_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fraud_samples_pending ON fraud_samples(checked_at, created_at)")
     conn.commit()
 
 
@@ -378,6 +395,65 @@ def run_seller_checks(conn, limit=5):
     return n
 
 
+def check_pending_fraud_samples(conn, limit=10):
+    """Comprueba a las 24 h anuncio y vendedor de la muestra del 10 % de bloqueos (T3.9)."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, platform, item_id, seller_id
+            FROM fraud_samples
+            WHERE checked_at IS NULL
+              AND created_at <= datetime('now', '-24 hours')
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    except Exception:
+        return 0
+    checked = 0
+    for sample_id, plat, item_id, seller_id in rows:
+        plat_u = str(plat or "").upper()
+        if time.time() < _backoff_until.get(plat_u, 0):
+            continue
+        checker = CHECKERS.get(plat_u)
+        if checker:
+            _wait_pace(plat_u)
+            try:
+                res = checker(item_id)
+                item_status = res.get("status", "unknown")
+            except Throttled as e:
+                _backoff_until[plat_u] = time.time() + BACKOFF_SECONDS.get(plat_u, 1800)
+                print(f"[OUTCOME] {e}: pausa de {BACKOFF_SECONDS.get(plat_u, 1800) // 60} min para {plat_u}")
+                continue
+            except Exception:
+                item_status = "unknown"
+        else:
+            item_status = "unknown"
+
+        if seller_id and plat_u in ("WALLAPOP", "VINTED"):
+            _wait_pace(plat_u)
+            try:
+                seller_status = check_seller(plat_u, seller_id)
+            except Throttled as e:
+                _backoff_until[plat_u] = time.time() + BACKOFF_SECONDS.get(plat_u, 1800)
+                print(f"[OUTCOME] {e}: pausa de {BACKOFF_SECONDS.get(plat_u, 1800) // 60} min para {plat_u}")
+                continue
+            except Exception:
+                seller_status = "unknown"
+        else:
+            seller_status = "unknown"
+
+        conn.execute(
+            "UPDATE fraud_samples SET item_status = ?, seller_status = ?, checked_at = ? WHERE id = ?",
+            (item_status, seller_status, _fmt(_now()), sample_id),
+        )
+        conn.commit()
+        checked += 1
+        touch_heartbeat()
+    return checked
+
+
 # ==================== CICLO ====================
 
 def record_check(conn, row, res, now):
@@ -475,6 +551,7 @@ def run_cycle(conn):
         stats["checked"] += 1
         touch_heartbeat()
     stats["sellers"] = run_seller_checks(conn)
+    stats["fraud_samples"] = check_pending_fraud_samples(conn)
     return stats
 
 
