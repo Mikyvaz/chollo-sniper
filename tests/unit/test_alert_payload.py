@@ -280,6 +280,45 @@ class TestAlertPayload(unittest.TestCase):
         self.assertTrue(payload["click"].startswith("https://"))
         self.assertTrue(payload["actions"][0]["url"].startswith("https://"))
 
+    def test_ntfy_scanner_payload_builder_offer_opportunity_headline(self):
+        captured = []
+
+        def _fake_post(url, **kwargs):
+            captured.append(kwargs.get("json", {}))
+            return _FakeResp(200, {"id": "ntfy-offer-1"})
+
+        item = {
+            "title": "Consola PS5 anuncio bruto",
+            "price": 140.0,
+            "platform": "WALLAPOP",
+            "url": "https://es.wallapop.com/item/ps5-slim-999",
+            "seller_city": "Sevilla",
+            "seller": {"seller_trust_badge": "⭐ 4.9 (18)"},
+        }
+        ai_data = {
+            "deal_score": 8,
+            "deal_type": "offer_opportunity",
+            "identified_model": "PS5 Slim Digital",
+            "recommended_offer": 110,
+            "deal_tier": 2,
+            "_alert_push": True,
+        }
+        cex_data = {"cash": 150.0}
+        target = {"mode": "resale"}
+        analysis_payload = ce.build_ntfy_analysis_payload(
+            ai_data, cex_data, 50.0, target=target, score=8
+        )
+        with mock.patch.object(ce.HTTP_SESSION, "post", side_effect=_fake_post):
+            ok = ce.send_one_tap_ntfy_alert(item, analysis_result=analysis_payload, is_flash=False)
+        self.assertTrue(ok)
+        self.assertEqual(len(captured), 1)
+        headline = captured[0]["title"]
+        self.assertTrue(headline.startswith("🤝"), f"Titular inesperado: {headline!r}")
+        self.assertIn("PS5 Slim Digital", headline)
+        self.assertIn("ofertar 110 €", headline)
+        self.assertIn("pide 140 €", headline)
+        self.assertIn("+50 €", headline)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -595,6 +595,23 @@ def _vinted_verification_age_days(verification, now):
     return round(max(0.0, (now - oldest) / 86400.0), 1)
 
 
+def _is_health_in_cooldown(health_monitor) -> bool:
+    if health_monitor is None or not hasattr(health_monitor, "is_in_cooldown"):
+        return False
+    try:
+        return bool(health_monitor.is_in_cooldown())
+    except Exception:
+        return False
+
+
+def _rotate_session_safely(sess):
+    if hasattr(sess, "rotate"):
+        try:
+            sess.rotate()
+        except Exception:
+            pass
+
+
 def enrich_seller_profile(item_data: dict, http_session=None, platform: str = None, conn=None, health_monitor=None) -> dict:
     """
     Enriquece el perfil del vendedor consultando la API pública de la plataforma o extrayendo
@@ -693,106 +710,55 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
 
     if platform == "WALLAPOP":
         if seller_id and (reviews_count is None or rating is None):
-            sess = http_session or _get_thread_local_session()
-            raw_bkt = get_platform_bucket("WALLAPOP")
-            bkt = raw_bkt if getattr(sess, "bucket", None) is not raw_bkt else None
-            wallapop_http_ok = False
-            wallapop_blocked = False
-            try:
-                if bkt is not None:
-                    bkt.acquire()
-                url = f"https://api.wallapop.com/api/v3/users/{seller_id}"
-                r = sess.get(url, timeout=2.5)
-                if r.status_code == 200:
-                    wallapop_http_ok = True
-                    u_data = r.json()
-                    stats = u_data.get("stats") or {}
-                    u_rev = stats.get("reviews") or {}
-                    if isinstance(u_rev, dict) and "total" in u_rev:
-                        reviews_count = u_rev["total"]
-                    elif "sales" in stats:
-                        reviews_count = stats["sales"]
-                    elif "reviews_count" in u_data:
-                        reviews_count = u_data["reviews_count"]
-
-                    raw_scoring = u_data.get("scoring") or stats.get("rating")
-                    if raw_scoring is not None:
-                        rating = raw_scoring
-
-                    reg_date = u_data.get("register_date") or u_data.get("created_at")
-                    if reg_date:
-                        try:
-                            ts = float(reg_date)
-                            if ts > 1e11:
-                                ts /= 1000.0
-                            joined_days = round((now - ts) / 86400.0, 1)
-                            extra["seller_age_source"] = "register_date"
-                        except Exception:
-                            pass
-
-                    verif = u_data.get("verification") or {}
-                    if isinstance(verif, dict):
-                        verified = any(bool(v) for v in verif.values())
-                elif r.status_code in (401, 403, 429):
-                    wallapop_blocked = True
-                    wallapop_http_ok = False
-                    if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
-                        try:
-                            raw_bkt.penalize(factor=0.5)
-                        except Exception:
-                            pass
-                    if health_monitor is not None:
-                        try:
-                            retry_after = (r.headers or {}).get("Retry-After") if hasattr(r, "headers") else None
-                            health_monitor.handle_http_response(r.status_code, url=url, query=f"user:{seller_id}", retry_after=retry_after)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            if not wallapop_blocked and (reviews_count is None or rating is None):
+            if _is_health_in_cooldown(health_monitor):
+                should_cache = False
+                reviews_count = None
+                rating = None
+            else:
+                sess = http_session or _get_thread_local_session()
+                raw_bkt = get_platform_bucket("WALLAPOP")
+                bkt = raw_bkt if getattr(sess, "bucket", None) is not raw_bkt else None
+                wallapop_http_ok = False
+                wallapop_blocked = False
                 try:
                     if bkt is not None:
                         bkt.acquire()
-                    stats_url = f"https://api.wallapop.com/api/v3/users/{seller_id}/stats"
-                    st_r = sess.get(stats_url, timeout=2.5)
-                    if st_r.status_code == 200:
+                    url = f"https://api.wallapop.com/api/v3/users/{seller_id}"
+                    r = sess.get(url, timeout=2.5)
+                    if r.status_code == 200:
                         wallapop_http_ok = True
-                        st_data = st_r.json()
-                        rev_cnt = 0
-                        sells_cnt = 0
-                        for c in st_data.get("counters", []):
-                            if isinstance(c, dict):
-                                c_type = c.get("type")
-                                c_val = c.get("value") or 0
-                                if c_type == "reviews":
-                                    rev_cnt = max(rev_cnt, int(c_val))
-                                elif c_type in ("sells", "sold"):
-                                    sells_cnt = max(sells_cnt, int(c_val))
-                                elif c_type == "buys":
-                                    extra["seller_bought_count"] = int(c_val)
-                                elif c_type == "publish":
-                                    extra["seller_listings"] = int(c_val)
-                                elif c_type == "reports_received":
-                                    extra["seller_reports"] = int(c_val)
-                        reviews_count = max(rev_cnt, sells_cnt)
-                        seller["sales"] = sells_cnt
-                        extra["seller_sold_count"] = sells_cnt
+                        u_data = r.json()
+                        stats = u_data.get("stats") or {}
+                        u_rev = stats.get("reviews") or {}
+                        if isinstance(u_rev, dict) and "total" in u_rev:
+                            reviews_count = u_rev["total"]
+                        elif "sales" in stats:
+                            reviews_count = stats["sales"]
+                        elif "reviews_count" in u_data:
+                            reviews_count = u_data["reviews_count"]
 
-                        if st_data.get("rating_average") is not None and float(st_data.get("rating_average") or 0) > 0:
-                            rating = float(st_data["rating_average"])
-                        else:
-                            for r_item in st_data.get("ratings", []):
-                                if isinstance(r_item, dict) and r_item.get("type") == "reviews":
-                                    val = r_item.get("value")
-                                    if val is not None:
-                                        rating = float(val)
-                                        break
-                    elif st_r.status_code in (401, 403, 429):
+                        raw_scoring = u_data.get("scoring") or stats.get("rating")
+                        if raw_scoring is not None:
+                            rating = raw_scoring
+
+                        reg_date = u_data.get("register_date") or u_data.get("created_at")
+                        if reg_date:
+                            try:
+                                ts = float(reg_date)
+                                if ts > 1e11:
+                                    ts /= 1000.0
+                                joined_days = round((now - ts) / 86400.0, 1)
+                                extra["seller_age_source"] = "register_date"
+                            except Exception:
+                                pass
+
+                        verif = u_data.get("verification") or {}
+                        if isinstance(verif, dict):
+                            verified = any(bool(v) for v in verif.values())
+                    elif r.status_code in (401, 403, 429):
                         wallapop_blocked = True
                         wallapop_http_ok = False
-                        reviews_count = None
-                        rating = None
+                        _rotate_session_safely(sess)
                         if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
                             try:
                                 raw_bkt.penalize(factor=0.5)
@@ -800,18 +766,76 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                                 pass
                         if health_monitor is not None:
                             try:
-                                retry_after = (st_r.headers or {}).get("Retry-After") if hasattr(st_r, "headers") else None
-                                health_monitor.handle_http_response(st_r.status_code, url=stats_url, query=f"user_stats:{seller_id}", retry_after=retry_after)
+                                retry_after = (r.headers or {}).get("Retry-After") if hasattr(r, "headers") else None
+                                health_monitor.handle_http_response(r.status_code, url=url, query=f"user:{seller_id}", retry_after=retry_after)
                             except Exception:
                                 pass
                 except Exception:
                     pass
 
-            if not wallapop_http_ok or wallapop_blocked:
-                should_cache = False
-                if wallapop_blocked:
-                    reviews_count = None
-                    rating = None
+                if not wallapop_blocked and not _is_health_in_cooldown(health_monitor) and (reviews_count is None or rating is None):
+                    try:
+                        if bkt is not None:
+                            bkt.acquire()
+                        stats_url = f"https://api.wallapop.com/api/v3/users/{seller_id}/stats"
+                        st_r = sess.get(stats_url, timeout=2.5)
+                        if st_r.status_code == 200:
+                            wallapop_http_ok = True
+                            st_data = st_r.json()
+                            rev_cnt = 0
+                            sells_cnt = 0
+                            for c in st_data.get("counters", []):
+                                if isinstance(c, dict):
+                                    c_type = c.get("type")
+                                    c_val = c.get("value") or 0
+                                    if c_type == "reviews":
+                                        rev_cnt = max(rev_cnt, int(c_val))
+                                    elif c_type in ("sells", "sold"):
+                                        sells_cnt = max(sells_cnt, int(c_val))
+                                    elif c_type == "buys":
+                                        extra["seller_bought_count"] = int(c_val)
+                                    elif c_type == "publish":
+                                        extra["seller_listings"] = int(c_val)
+                                    elif c_type == "reports_received":
+                                        extra["seller_reports"] = int(c_val)
+                            reviews_count = max(rev_cnt, sells_cnt)
+                            seller["sales"] = sells_cnt
+                            extra["seller_sold_count"] = sells_cnt
+
+                            if st_data.get("rating_average") is not None and float(st_data.get("rating_average") or 0) > 0:
+                                rating = float(st_data["rating_average"])
+                            else:
+                                for r_item in st_data.get("ratings", []):
+                                    if isinstance(r_item, dict) and r_item.get("type") == "reviews":
+                                        val = r_item.get("value")
+                                        if val is not None:
+                                            rating = float(val)
+                                            break
+                        elif st_r.status_code in (401, 403, 429):
+                            wallapop_blocked = True
+                            wallapop_http_ok = False
+                            reviews_count = None
+                            rating = None
+                            _rotate_session_safely(sess)
+                            if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
+                                try:
+                                    raw_bkt.penalize(factor=0.5)
+                                except Exception:
+                                    pass
+                            if health_monitor is not None:
+                                try:
+                                    retry_after = (st_r.headers or {}).get("Retry-After") if hasattr(st_r, "headers") else None
+                                    health_monitor.handle_http_response(st_r.status_code, url=stats_url, query=f"user_stats:{seller_id}", retry_after=retry_after)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                if not wallapop_http_ok or wallapop_blocked:
+                    should_cache = False
+                    if wallapop_blocked:
+                        reviews_count = None
+                        rating = None
 
     elif platform == "VINTED":
         try:

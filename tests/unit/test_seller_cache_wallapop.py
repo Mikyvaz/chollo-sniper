@@ -18,6 +18,10 @@ class FakeSession:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.rotations = 0
+
+    def rotate(self):
+        self.rotations += 1
 
     def get(self, url, **kw):
         self.calls.append(url)
@@ -30,8 +34,12 @@ class FakeSession:
 
 
 class FakeHealthMonitor:
-    def __init__(self):
+    def __init__(self, cooldown=False):
         self.events = []
+        self._cooldown = cooldown
+
+    def is_in_cooldown(self):
+        return self._cooldown
 
     def handle_http_response(self, status_code, url="", query="", retry_after=None):
         self.events.append((status_code, url, query, retry_after))
@@ -156,6 +164,7 @@ class TestSellerCacheWallapop(unittest.TestCase):
             self.assertEqual(prof["seller_profile_status"], "unavailable")
             self.assertIsNone(prof["seller_reviews_count"])
             self.assertEqual(len(sess.calls), 1, "Should abort /stats when /users returns 429")
+            self.assertEqual(sess.rotations, 1, "Should rotate session on 429")
             self.assertEqual(len(hm.events), 1)
             self.assertEqual(hm.events[0][0], 429)
             self.assertEqual(hm.events[0][3], "120")
@@ -170,6 +179,26 @@ class TestSellerCacheWallapop(unittest.TestCase):
             self.assertIsNone(row)
         finally:
             antiban.set_platform_bucket("WALLAPOP", None)
+
+    def test_cooldown_aborts_http_returns_unavailable_and_not_cached(self):
+        import fraud_signals
+
+        hm = FakeHealthMonitor(cooldown=True)
+        sess = FakeSession([
+            FakeResp(200, {"scoring": 95, "stats": {"reviews": {"total": 15}}}),
+        ])
+        item = {"platform": "WALLAPOP", "seller": {"id": "wal_u_cooldown"}}
+        prof = fraud_signals.enrich_seller_profile(
+            item, http_session=sess, platform="WALLAPOP", conn=self.conn, health_monitor=hm
+        )
+        self.assertEqual(len(sess.calls), 0)
+        self.assertEqual(prof["seller_profile_status"], "unavailable")
+        self.assertIsNone(prof["seller_reviews_count"])
+        self.assertNotIn(("WALLAPOP", "wal_u_cooldown"), fraud_signals._SELLER_PROFILE_CACHE)
+        row = self.conn.execute(
+            "SELECT 1 FROM seller_profile_cache WHERE platform='WALLAPOP' AND seller_id='wal_u_cooldown'"
+        ).fetchone()
+        self.assertIsNone(row)
 
     def test_open_default_cache_db_uses_wal_and_busy_timeout_30000(self):
         import os

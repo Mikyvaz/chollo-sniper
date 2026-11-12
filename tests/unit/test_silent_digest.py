@@ -34,17 +34,19 @@ class TestSilentDigest(unittest.TestCase):
         ce.init_db(self.conn)
         ot.ensure_outcome_tables(self.conn)
 
-    def _insert_deal(self, deal_id, profit, push=False, status="available", hours_ago=2):
+    def _insert_deal(self, deal_id, profit, push=False, status="available", hours_ago=2,
+                     platform="WALLAPOP", with_outcome=True):
         self.conn.execute(
             """
             INSERT INTO deals (
                 deal_id, platform, item_id, title, identified_model, price, net_profit,
                 item_url, seller_city, alert_context_json, created_at
             )
-            VALUES (?, 'WALLAPOP', ?, ?, ?, 80.0, ?, ?, 'Madrid', ?, datetime('now', ?))
+            VALUES (?, ?, ?, ?, ?, 80.0, ?, ?, 'Madrid', ?, datetime('now', ?))
             """,
             (
                 deal_id,
+                platform,
                 deal_id,
                 f"Consola {deal_id}",
                 f"Modelo {deal_id}",
@@ -54,13 +56,14 @@ class TestSilentDigest(unittest.TestCase):
                 f"-{int(hours_ago)} hours",
             ),
         )
-        self.conn.execute(
-            """
-            INSERT INTO alert_outcomes (deal_id, platform, item_id, item_url, last_status)
-            VALUES (?, 'WALLAPOP', ?, ?, ?)
-            """,
-            (deal_id, deal_id, f"https://es.wallapop.com/item/{deal_id}", status),
-        )
+        if with_outcome:
+            self.conn.execute(
+                """
+                INSERT INTO alert_outcomes (deal_id, platform, item_id, item_url, last_status)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (deal_id, platform, deal_id, f"https://es.wallapop.com/item/{deal_id}", status),
+            )
 
     def test_12_silent_3_sold_returns_9_available_ordered_by_profit(self):
         avail_profits = [15, 45, 30, 80, 22, 60, 12, 95, 35]
@@ -156,6 +159,40 @@ class TestSilentDigest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn("Modelo dig_1", sent[0])
         self.assertIn("https://es.wallapop.com/item/dig_1", sent[0])
+
+    def test_silent_mode_digest_deletes_prior_flash_message(self):
+        pol = {**ce.NOTIFICATION_DEFAULTS, "silent_mode": "digest"}
+        flash_msg = {"message_id": "flash-999", "via": "bot"}
+        with mock.patch.object(ce, "BOT_TOKEN", "bot-tok"), \
+             mock.patch.object(ce, "ALERTS_CHANNEL_ID", "555"), \
+             mock.patch.object(ce, "WEBHOOK_URL", ""), \
+             mock.patch.object(ce, "decide_alert_push", return_value=(False, "margen < 40€")), \
+             mock.patch.object(ce, "get_notification_policy", return_value=pol), \
+             mock.patch.object(ce, "generate_multilingual_haggle_msg", return_value="hola"), \
+             mock.patch.object(ce.HTTP_SESSION, "delete", return_value=_FakeResp(204, {})) as del_mock, \
+             mock.patch.object(ce.HTTP_SESSION, "post") as post_mock:
+            ok = ce.send_discord_alert(
+                self.conn, "WALLAPOP", "779", "Switch Lite", "desc",
+                65.0, 70.0, 5.0, {"name": "Radar", "mode": "resale"},
+                {"deal_score": 8, "deal_type": "direct_chollo", "identified_model": "Switch Lite"},
+                None, optimal_price=105.0, net_profit=35.0,
+                item_url="https://es.wallapop.com/item/779",
+                flash_message=flash_msg,
+            )
+        self.assertFalse(ok)
+        post_mock.assert_not_called()
+        del_mock.assert_called_once()
+        self.assertIn("/channels/555/messages/flash-999", del_mock.call_args.args[0])
+
+    def test_digest_includes_milanuncios_without_outcome_and_excludes_sold(self):
+        self._insert_deal("mil_1", 70.0, push=False, platform="MILANUNCIOS", with_outcome=False, hours_ago=2)
+        self._insert_deal("wal_avail", 50.0, push=False, status="available", platform="WALLAPOP", with_outcome=True, hours_ago=2)
+        self._insert_deal("wal_sold", 200.0, push=False, status="sold", platform="WALLAPOP", with_outcome=True, hours_ago=2)
+        self.conn.commit()
+
+        rows = ce.get_daily_silent_digest_deals(self.conn, hours=24, limit=10)
+        ids = [r["deal_id"] for r in rows]
+        self.assertEqual(ids, ["mil_1", "wal_avail"])
 
 
 if __name__ == "__main__":

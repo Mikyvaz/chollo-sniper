@@ -1183,24 +1183,30 @@ def check_item_seen_or_dropped(conn, platform, item_id, current_price, min_drop_
         return False, None
 
     row_state = str(row[1] or "seen").strip().lower()
-    if row_state == "reserved":
-        # Mientras siga reservado se omite; al caer la reserva re-entra en el embudo
-        if is_reserved_now:
-            return True, None
-        return False, None
+    if row_state == "reserved" and is_reserved_now:
+        # Mientras siga reservado se omite
+        return True, None
 
     old_price = float(row[0] or 0)
     cur_price = float(current_price or 0)
+    price_drop_info = None
     if old_price > 0 and cur_price > 0 and cur_price < old_price:
         diff = old_price - cur_price
         pct = (diff / old_price) * 100.0
         if diff >= min_drop_eur and pct >= min_drop_pct:
-            return False, {
+            price_drop_info = {
                 "old_price": old_price,
                 "new_price": cur_price,
                 "drop_eur": diff,
                 "drop_pct": round(pct)
             }
+
+    if row_state == "reserved":
+        # Al caer la reserva re-entra en el embudo conservando price_drop_info si además bajó
+        return False, price_drop_info
+
+    if price_drop_info is not None:
+        return False, price_drop_info
 
     return True, None
 
@@ -1910,6 +1916,28 @@ def format_alert_headline(
     budget = max(8, max_len - len(prefix) - len(suffix))
     short_model = _compact_text(clean_model, budget)
     return _compact_text(f"{prefix}{short_model}{suffix}", max_len)
+
+
+def build_ntfy_analysis_payload(ai_data, cex_data, net_profit, target=None, score=None):
+    """Construye el diccionario completo de análisis requerido por send_one_tap_ntfy_alert."""
+    ai = ai_data or {}
+    tgt = target or {}
+    raw_score = score if score is not None else ai.get("deal_score", 8)
+    try:
+        resolved_score = int(raw_score if raw_score is not None else 8)
+    except (ValueError, TypeError):
+        resolved_score = 8
+    return {
+        "identified_model": ai.get("identified_model", ""),
+        "deal_type": ai.get("deal_type", "direct_chollo"),
+        "recommended_offer": float(ai.get("recommended_offer", 0.0) or 0.0),
+        "deal_score": resolved_score,
+        "mode": tgt.get("mode") or ai.get("mode") or "resale",
+        "cex_cash": float((cex_data or {}).get("cash", 0.0) or 0.0),
+        "p2p_net_profit": float(net_profit or 0.0),
+        "deal_tier": ai.get("deal_tier", 1),
+        "push": ai.get("_alert_push", True),
+    }
 
 
 def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
@@ -5309,10 +5337,10 @@ def get_daily_silent_digest_deals(conn, hours: int = 24, limit: int = 10) -> lis
             SELECT d.deal_id, d.platform, d.title, d.identified_model, d.price, d.net_profit,
                    d.item_url, d.seller_city, d.created_at
             FROM deals d
-            JOIN alert_outcomes ao ON ao.deal_id = d.deal_id
+            LEFT JOIN alert_outcomes ao ON ao.deal_id = d.deal_id
             WHERE d.created_at >= datetime('now', ?)
               AND json_extract(d.alert_context_json, '$.push') = 0
-              AND ao.last_status = 'available'
+              AND (ao.last_status IN ('available', 'pending') OR ao.deal_id IS NULL)
             ORDER BY COALESCE(d.net_profit, 0) DESC, d.created_at DESC
             LIMIT ?
             """,
@@ -6123,6 +6151,21 @@ def resolve_flash_discord_alert(
             print(f"[WARN] Error enviando notificación Push de rechazo (Webhook): {_redact(e)}")
 
 
+def _delete_flash_message(flash_message):
+    """Borra el mensaje Flash previo de Discord (vía bot o webhook) si existe."""
+    if not (flash_message and isinstance(flash_message, dict) and flash_message.get("message_id")):
+        return
+    f_id = flash_message["message_id"]
+    f_via = flash_message.get("via")
+    if f_via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
+        del_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
+        _discord_send("DELETE", del_url, headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5, attempts=1)
+    elif f_via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
+        base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
+        del_url = f"{base_wh}/messages/{f_id}"
+        _discord_send("DELETE", del_url, timeout=5, attempts=1)
+
+
 def send_discord_alert(
     conn, platform, item_id, title, description, price, landed_cost, fees,
     target, ai_data, cex_data, enhanced_cover_bytes=None, kit_folder="", optimal_price=0.0,
@@ -6169,6 +6212,7 @@ def send_discord_alert(
 
     silent_mode = str(get_notification_policy().get("silent_mode", "individual")).strip().lower()
     if not should_push and silent_mode == "digest":
+        _delete_flash_message(flash_message)
         print(f"[SILENT DIGEST] {deal_id} ({plat}) guardado para resumen diario ({quiet_reason})")
         return False
 
@@ -6392,16 +6436,7 @@ def send_discord_alert(
 
     # Si había un mensaje Flash previo (Fase 1), lo borramos y enviamos un POST NUEVO
     # para que salte la 2ª notificación push en el móvil con el veredicto de la IA.
-    if flash_message and isinstance(flash_message, dict) and flash_message.get("message_id"):
-        f_id = flash_message["message_id"]
-        f_via = flash_message.get("via")
-        if f_via == "bot" and BOT_TOKEN and ALERTS_CHANNEL_ID:
-            del_url = f"https://discord.com/api/v10/channels/{ALERTS_CHANNEL_ID}/messages/{f_id}"
-            _discord_send("DELETE", del_url, headers={"Authorization": f"Bot {BOT_TOKEN}"}, timeout=5, attempts=1)
-        elif f_via == "webhook" and WEBHOOK_URL and "http" in WEBHOOK_URL:
-            base_wh = WEBHOOK_URL.split("?")[0].rstrip("/")
-            del_url = f"{base_wh}/messages/{f_id}"
-            _discord_send("DELETE", del_url, timeout=5, attempts=1)
+    _delete_flash_message(flash_message)
 
     def _cover_multipart(payload, file_field):
         def _build():

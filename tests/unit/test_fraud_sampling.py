@@ -135,6 +135,48 @@ class TestFraudSampling(unittest.TestCase):
         self.assertIn("75%", joined)
         self.assertIn("20%", joined)
 
+    def test_outcome_tracker_skips_backoff_platforms_in_sql_so_other_platforms_not_starved(self):
+        import time as _t
+
+        for i in range(10):
+            self.conn.execute(
+                """
+                INSERT INTO fraud_samples (platform, item_id, seller_id, risk, codes, created_at)
+                VALUES ('EBAY', ?, ?, 6, 'ZERO_REP', datetime('now', ?))
+                """,
+                (f"eb_{i}", f"eb_s_{i}", f"-{30 + i} hours"),
+            )
+        self.conn.execute(
+            """
+            INSERT INTO fraud_samples (platform, item_id, seller_id, risk, codes, created_at)
+            VALUES ('WALLAPOP', 'wal_ok_1', 'wal_s_1', 6, 'ZERO_REP', datetime('now', '-25 hours'))
+            """
+        )
+        self.conn.commit()
+
+        fake_res = {"status": "available", "http": 200, "price": None, "views": None, "favorites": None, "conversations": None, "detail": ""}
+        ebay_mock = mock.Mock(return_value=fake_res)
+        wal_mock = mock.Mock(return_value=fake_res)
+        with mock.patch.dict(ot.CHECKERS, {"EBAY": ebay_mock, "WALLAPOP": wal_mock}), \
+             mock.patch.object(ot, "check_seller", return_value="active") as seller_mock, \
+             mock.patch.object(ot, "_wait_pace"):
+            ot._backoff_until.clear()
+            ot._backoff_until["EBAY"] = _t.time() + 3600
+            try:
+                checked = ot.check_pending_fraud_samples(self.conn, limit=10)
+            finally:
+                ot._backoff_until.clear()
+
+        self.assertEqual(checked, 1)
+        ebay_mock.assert_not_called()
+        wal_mock.assert_called_once_with("wal_ok_1")
+        seller_mock.assert_called_once_with("WALLAPOP", "wal_s_1")
+        wal_chk = self.conn.execute(
+            "SELECT item_status, seller_status, checked_at FROM fraud_samples WHERE item_id='wal_ok_1'"
+        ).fetchone()
+        self.assertEqual(wal_chk[:2], ("available", "active"))
+        self.assertIsNotNone(wal_chk[2])
+
 
 if __name__ == "__main__":
     unittest.main()

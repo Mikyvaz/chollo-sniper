@@ -29,7 +29,7 @@ from core_engine import (
     passes_filters, fetch_cex_live, download_item_images,
     analyze_and_generate_kit, evaluate_deal_math_and_score,
     build_kit_folder_name, send_discord_alert,
-    send_flash_discord_alert, resolve_flash_discord_alert, send_one_tap_ntfy_alert,
+    send_flash_discord_alert, resolve_flash_discord_alert, send_one_tap_ntfy_alert, build_ntfy_analysis_payload,
     touch_heartbeat, sleep_with_heartbeat,
     prescreen_item_text, AI_PRESCREEN_SHADOW_MODE,
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
@@ -1110,14 +1110,13 @@ def main():
                         listing_age_text=upload_date
                     )
 
+                    if country_tag and not item.get("country_tag"):
+                        item["country_tag"] = country_tag
                     send_one_tap_ntfy_alert(
                         item,
-                        {
-                            "cex_cash": float((cex_data or {}).get("cash", 0.0) or 0.0),
-                            "p2p_net_profit": float(best_net_profit or 0.0),
-                            "deal_tier": ai_data.get("deal_tier", 1),
-                            "push": ai_data.get("_alert_push", True)
-                        },
+                        build_ntfy_analysis_payload(
+                            ai_data, cex_data, best_net_profit, target=target, score=score
+                        ),
                         is_flash=False
                     )
                     t["alert_end"] = time.perf_counter()

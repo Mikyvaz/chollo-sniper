@@ -28,7 +28,7 @@ from core_engine import (
     passes_filters, fetch_cex_live, download_item_images,
     analyze_and_generate_kit, evaluate_deal_math_and_score,
     build_kit_folder_name, send_flash_discord_alert, resolve_flash_discord_alert, send_discord_alert,
-    send_one_tap_ntfy_alert,
+    send_one_tap_ntfy_alert, build_ntfy_analysis_payload,
     touch_heartbeat, sleep_with_heartbeat,
     prescreen_item_text, AI_PRESCREEN_SHADOW_MODE,
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
@@ -340,6 +340,28 @@ def handle_seen_and_reserved(conn, item_id, title, price, is_reserved_now, drop_
     return False, price_drop_info
 
 
+def _is_item_reserved_in_db(conn, item_id, platform="WALLAPOP"):
+    if conn is None or not item_id:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT state FROM market_seen_items WHERE platform = ? AND item_id = ?",
+            (platform.upper(), str(item_id)),
+        ).fetchone()
+        return bool(row and str(row[0] or "").strip().lower() == "reserved")
+    except Exception:
+        return False
+
+
+def should_skip_stale_listing(conn, item_id, age_days, price_drop_info=None, was_budget_deferred=False):
+    """No descarta por antigüedad (>1 día) si hay rebaja, aplazamiento por presupuesto o caída de reserva."""
+    if age_days is None or age_days <= 1.0:
+        return False
+    if price_drop_info or was_budget_deferred:
+        return False
+    return not _is_item_reserved_in_db(conn, item_id, platform="WALLAPOP")
+
+
 def main():
     conn = init_db()
     config = load_config()
@@ -516,7 +538,11 @@ def main():
                                 ts_val = ts_val / 1000.0
                             listing_ts = ts_val
                             age_days = max(0.0, (time.time() - ts_val) / 86400.0)
-                            if not price_drop_info and not was_budget_deferred and age_days > 1.0:
+                            if should_skip_stale_listing(
+                                conn, item_id, age_days,
+                                price_drop_info=price_drop_info,
+                                was_budget_deferred=was_budget_deferred,
+                            ):
                                 mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                                 continue
                         except Exception:
@@ -827,15 +853,17 @@ def main():
                         item_vec=item_vec,
                         listing_published_at=listing_ts
                     )
+                    raw_city = item.get("seller_city") or (item.get("location") or {}).get("city")
+                    if raw_city:
+                        item["seller_city"] = raw_city
+                    if country_tag and not item.get("country_tag"):
+                        item["country_tag"] = country_tag
                     item["url"] = item_url
                     send_one_tap_ntfy_alert(
                         item,
-                        {
-                            "cex_cash": float((cex_data or {}).get("cash", 0.0) or 0.0),
-                            "p2p_net_profit": float(best_net_profit or 0.0),
-                            "deal_tier": ai_data.get("deal_tier", 1),
-                            "push": ai_data.get("_alert_push", True)
-                        },
+                        build_ntfy_analysis_payload(
+                            ai_data, cex_data, best_net_profit, target=target, score=score
+                        ),
                         is_flash=False
                     )
                     t["alert_end"] = time.perf_counter()

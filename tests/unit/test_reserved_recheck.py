@@ -138,6 +138,52 @@ class TestReservedRecheck(unittest.TestCase):
         self.assertEqual(res4, "skipped")
         self.assertEqual(ai_mock.call_count, 1)
 
+    def test_reserved_over_48h_unreserved_with_and_without_price_drop_not_discarded_as_stale(self):
+        import core_engine
+        import sniper
+
+        # Item A: reserved >48h ago at 150€, reappears unreserved at 100€ -> keeps price_drop_info, not stale
+        core_engine.mark_item_seen(self.conn, "WALLAPOP", "w_res_drop", "Switch OLED", 150.0, state="reserved")
+        self.conn.execute(
+            "UPDATE market_seen_items SET seen_at = datetime('now', '-50 hours') "
+            "WHERE platform='WALLAPOP' AND item_id='w_res_drop'"
+        )
+        # Item B: reserved >48h ago at 150€, reappears unreserved at 150€ -> price_drop_info=None, still not stale
+        core_engine.mark_item_seen(self.conn, "WALLAPOP", "w_res_same", "Switch OLED 2", 150.0, state="reserved")
+        self.conn.execute(
+            "UPDATE market_seen_items SET seen_at = datetime('now', '-50 hours') "
+            "WHERE platform='WALLAPOP' AND item_id='w_res_same'"
+        )
+        self.conn.commit()
+
+        skip_a, drop_a = sniper.handle_seen_and_reserved(
+            self.conn, "w_res_drop", "Switch OLED", 100.0, is_reserved_now=False, drop_pct=15, drop_eur=10
+        )
+        self.assertFalse(skip_a)
+        self.assertIsNotNone(drop_a)
+        self.assertEqual(drop_a["old_price"], 150.0)
+        self.assertEqual(drop_a["new_price"], 100.0)
+        self.assertEqual(drop_a["drop_eur"], 50.0)
+        self.assertEqual(drop_a["drop_pct"], 33)
+        self.assertFalse(
+            sniper.should_skip_stale_listing(self.conn, "w_res_drop", age_days=2.2, price_drop_info=drop_a)
+        )
+
+        skip_b, drop_b = sniper.handle_seen_and_reserved(
+            self.conn, "w_res_same", "Switch OLED 2", 150.0, is_reserved_now=False, drop_pct=15, drop_eur=10
+        )
+        self.assertFalse(skip_b)
+        self.assertIsNone(drop_b)
+        self.assertFalse(
+            sniper.should_skip_stale_listing(self.conn, "w_res_same", age_days=2.2, price_drop_info=drop_b)
+        )
+
+        # Control: once marked 'seen', an old item without price drop IS discarded by age > 1.0
+        core_engine.mark_item_seen(self.conn, "WALLAPOP", "w_res_same", "Switch OLED 2", 150.0, state="seen")
+        self.assertTrue(
+            sniper.should_skip_stale_listing(self.conn, "w_res_same", age_days=2.2, price_drop_info=None)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

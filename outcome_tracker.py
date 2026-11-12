@@ -397,18 +397,26 @@ def run_seller_checks(conn, limit=5):
 
 def check_pending_fraud_samples(conn, limit=10):
     """Comprueba a las 24 h anuncio y vendedor de la muestra del 10 % de bloqueos (T3.9)."""
+    now_ts = time.time()
+    backoff_plats = sorted({
+        str(p).upper() for p, until in _backoff_until.items()
+        if p and until and now_ts < until
+    })
+    sql = """
+        SELECT id, platform, item_id, seller_id
+        FROM fraud_samples
+        WHERE checked_at IS NULL
+          AND created_at <= datetime('now', '-24 hours')
+    """
+    params = []
+    if backoff_plats:
+        placeholders = ", ".join("?" for _ in backoff_plats)
+        sql += f"\n          AND COALESCE(UPPER(platform), '') NOT IN ({placeholders})"
+        params.extend(backoff_plats)
+    sql += "\n        ORDER BY created_at ASC\n        LIMIT ?"
+    params.append(int(limit))
     try:
-        rows = conn.execute(
-            """
-            SELECT id, platform, item_id, seller_id
-            FROM fraud_samples
-            WHERE checked_at IS NULL
-              AND created_at <= datetime('now', '-24 hours')
-            ORDER BY created_at ASC
-            LIMIT ?
-            """,
-            (int(limit),),
-        ).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     except Exception:
         return 0
     checked = 0
