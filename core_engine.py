@@ -7,6 +7,7 @@ Compartido por todos los snipers (Wallapop, Vinted, Multi-Market) y el bot de Di
 import os
 import io
 import re
+import copy
 import html
 import json
 import time
@@ -1405,6 +1406,193 @@ def find_semantic_duplicate(conn, text, radar_id="", threshold=0.92, hours=720, 
         print(f"[WARN] Error buscando duplicado semántico: {e}")
 
     return None, target_vec
+
+
+SEMANTIC_REJECT_PRICE_RE = re.compile(r"(precio|margen|caro|barato|irreal|estafa|anzuelo)", re.IGNORECASE)
+
+
+def _parse_item_key(item_key: str) -> tuple:
+    raw = str(item_key or "").strip()
+    if ":" in raw:
+        plat, sid = raw.split(":", 1)
+        return plat.strip().upper(), sid.strip()
+    return "", raw
+
+
+def get_item_seen_image_hashes(conn, item_key: str) -> set:
+    """Devuelve el conjunto de dHash registrados en seen_image_hashes para un item_key."""
+    if not conn or not item_key:
+        return set()
+    plat, sid = _parse_item_key(item_key)
+    if not sid:
+        return set()
+    try:
+        c = conn.cursor()
+        if plat:
+            c.execute(
+                "SELECT hash FROM seen_image_hashes WHERE item_id = ? AND UPPER(platform) = ?",
+                (sid, plat),
+            )
+        else:
+            c.execute("SELECT hash FROM seen_image_hashes WHERE item_id = ?", (sid,))
+        return {str(r[0]).strip() for r in c.fetchall() if r and r[0]}
+    except Exception:
+        return set()
+
+
+def should_inherit_semantic_rejection(
+    conn,
+    sem_dup: dict,
+    cached_verdict: dict,
+    current_seller_id: str = "",
+    current_image_hashes=None,
+    image_hash_provider=None,
+    current_item_key: str = "",
+) -> tuple:
+    """
+    Decide si un rechazo previo (sim >= 0.96) puede heredarse.
+    Solo hereda si el motivo NO depende del precio y además:
+      - coincide el seller_id (no vacío), o
+      - alguna foto actual coincide exactamente (dHash) con seen_image_hashes del anuncio previo.
+    """
+    if not isinstance(sem_dup, dict) or not isinstance(cached_verdict, dict):
+        return False, "invalid_match"
+
+    sim_score = float(sem_dup.get("similarity", sem_dup.get("score", 0.0)))
+    if sim_score < 0.96:
+        return False, "sim_below_096"
+
+    rej_reason = str(cached_verdict.get("reject_reason") or "").strip()
+    if rej_reason and SEMANTIC_REJECT_PRICE_RE.search(rej_reason):
+        return False, "price_dependent_reason"
+
+    cur_seller = str(current_seller_id or "").strip()
+    prev_seller = str(sem_dup.get("seller_id") or "").strip()
+    if cur_seller and prev_seller and cur_seller == prev_seller:
+        return True, "same_seller"
+
+    prev_hashes = get_item_seen_image_hashes(conn, sem_dup.get("item_key", ""))
+    if prev_hashes:
+        cur_hashes = current_image_hashes
+        if cur_hashes is None and current_item_key:
+            existing = get_item_seen_image_hashes(conn, current_item_key)
+            if existing:
+                cur_hashes = existing
+        if (cur_hashes is None or len(cur_hashes) == 0) and callable(image_hash_provider):
+            cur_hashes = image_hash_provider()
+        cur_set = {str(h).strip() for h in (cur_hashes or []) if h}
+        if prev_hashes & cur_set:
+            return True, "same_image_hash"
+
+    return False, "different_seller_and_photo"
+
+
+def make_image_hash_prefetcher(img_urls, rotator=None, force_safari=False, timings=None):
+    """Descarga 1 foto bajo demanda para comprobar dHash en dedup y reutilizarla en Puerta 2."""
+    state = {"photos": None, "dhash": None}
+
+    def _provide():
+        if state["dhash"] is not None:
+            return [state["dhash"]] if state["dhash"] else []
+        if img_urls:
+            if isinstance(timings, dict):
+                timings["image"] = time.perf_counter()
+            photos = download_item_images(img_urls, rotator=rotator, max_images=1, force_safari=force_safari)
+            state["photos"] = photos
+            if photos and photos[0]:
+                state["dhash"] = calculate_dhash(photos[0]) or ""
+                return [state["dhash"]] if state["dhash"] else []
+        state["dhash"] = ""
+        return []
+
+    return _provide, state
+
+
+def evaluate_semantic_duplicate(
+    conn,
+    platform: str,
+    item_id,
+    title: str,
+    desc: str,
+    price: float,
+    radar_id: str = "",
+    current_seller_id: str = "",
+    filter_pro_seller: bool = False,
+    current_image_hashes=None,
+    image_hash_provider=None,
+    vector=None,
+) -> tuple:
+    """
+    Evalúa la deduplicación semántica completa para un candidato.
+    Devuelve (action, ai_data, reject_reason, item_vec, sem_dup):
+      - 'reject': rechazo previo heredado (mismo vendedor no vacío o misma foto dHash, nunca motivo de precio).
+      - 'reuse': kit aprobado reutilizado (mismo vendedor no vacío y price <= cached_price).
+      - 'vision': requiere inspección visual (ai_data=None).
+    """
+    plat = str(platform or "").upper()
+    item_key = f"{plat}:{item_id}"
+    text_for_embed = f"{title}\n{desc}".strip()
+    sem_dup, item_vec = find_semantic_duplicate(
+        conn, text_for_embed, radar_id=radar_id, threshold=0.92, hours=720,
+        vector=vector, price=price, exclude_item_key=item_key
+    )
+    if not sem_dup or not sem_dup.get("verdict_json"):
+        return "vision", None, "", item_vec, sem_dup
+
+    try:
+        cached_verdict = json.loads(sem_dup["verdict_json"])
+        if not isinstance(cached_verdict, dict):
+            return "vision", None, "", item_vec, sem_dup
+    except Exception as e:
+        print(f"[WARN] Error parseando veredicto de dedup: {e}")
+        return "vision", None, "", item_vec, sem_dup
+
+    sim_score = float(sem_dup.get("similarity", sem_dup.get("score", 0.0)))
+    cached_seller_id = str(sem_dup.get("seller_id") or "").strip()
+    cur_seller = str(current_seller_id or "").strip()
+    cached_price = float(sem_dup.get("price", 999999.0))
+    is_pro = bool(cached_verdict.get("is_pro_seller", False)) if filter_pro_seller else False
+    is_cached_reject = (
+        (not cached_verdict.get("is_valid_deal", False))
+        or is_pro
+        or bool(cached_verdict.get("has_defect_or_missing_parts", False))
+    )
+
+    if is_cached_reject:
+        inherit, why = should_inherit_semantic_rejection(
+            conn,
+            sem_dup,
+            cached_verdict,
+            current_seller_id=cur_seller,
+            current_image_hashes=current_image_hashes,
+            image_hash_provider=image_hash_provider,
+            current_item_key=item_key,
+        )
+        rej = cached_verdict.get("reject_reason") or "Descartado previamente por IA"
+        if inherit:
+            print(
+                f"[{plat} DEDUP SEMÁNTICA RECHAZO] '{title}' duplicado de '{sem_dup['title']}' "
+                f"(sim={sim_score:.2f} >= 0.96, vendedor={cur_seller or 'N/A'} vs previo={cached_seller_id or 'N/A'}, {why}) -> {rej}"
+            )
+            return "reject", None, rej, item_vec, sem_dup
+        print(
+            f"[{plat} DEDUP SEMÁNTICA] Match rechazado previo no heredado "
+            f"(sim={sim_score:.2f}, vendedor={cur_seller or 'N/A'} vs previo={cached_seller_id or 'N/A'}, motivo={why}) -> Inspección visual obligatoria"
+        )
+        return "vision", None, "", item_vec, sem_dup
+
+    if cur_seller and cur_seller == cached_seller_id and float(price) <= cached_price:
+        print(
+            f"[{plat} DEDUP SEMÁNTICA REUTILIZADO] '{title}' duplicado aprobado de '{sem_dup['title']}' "
+            f"(mismo vendedor {cur_seller}, {float(price):.0f}€ <= {cached_price:.0f}€, sim={sim_score:.2f}) -> Reutilizando kit sin visión"
+        )
+        return "reuse", copy.deepcopy(cached_verdict), "", item_vec, sem_dup
+
+    print(
+        f"[{plat} DEDUP SEMÁNTICA] Match aprobado pero vendedor ({cur_seller or 'N/A'} vs {cached_seller_id or 'N/A'}) "
+        f"o precio ({float(price):.0f}€ vs {cached_price:.0f}€) no apto para bypass -> Forzando visión"
+    )
+    return "vision", None, "", item_vec, sem_dup
 
 
 def is_duplicate_recent_deal(conn, platform, title, price, hours=48, radar_id="", semantic_check=False, vector=None):

@@ -37,7 +37,7 @@ from core_engine import (
     prescreen_item_text, AI_PRESCREEN_SHADOW_MODE,
     evaluate_fraud_risk, log_fraud_event, calculate_dhash, check_and_record_image_hash,
     enrich_seller_profile, evaluate_seller_risk,
-    find_semantic_duplicate, save_item_embedding, WafBlockedError, is_ai_budget_paused,
+    find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, WafBlockedError, is_ai_budget_paused,
     CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, DB_PATH
 )
 from store_breaker import StoreBreaker, store_enabled
@@ -498,56 +498,38 @@ def main():
                             current_seller_id = str(seller).strip()
 
                         text_for_embed = f"{title}\n{desc}".strip()
-                        sem_dup, item_vec = find_semantic_duplicate(
-                            conn, text_for_embed, radar_id=target.get("id", ""), threshold=0.92, hours=720, price=price,
-                            exclude_item_key=f"{plat}:{item_id}"
+                        img_urls = item.get("images", [])
+                        cover_url = img_urls[0] if img_urls else ""
+                        _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
+                            img_urls, rotator=rotator, force_safari=store["img_safari"], timings=t
                         )
-
-                        ai_data = None
-                        if sem_dup and sem_dup.get("verdict_json"):
-                            try:
-                                cached_verdict = json.loads(sem_dup["verdict_json"])
-                                if isinstance(cached_verdict, dict):
-                                    sim_score = float(sem_dup.get("similarity", sem_dup.get("score", 0.0)))
-                                    cached_seller_id = str(sem_dup.get("seller_id", "")).strip()
-                                    cached_price = float(sem_dup.get("price", 999999.0))
-                                    is_pro = bool(cached_verdict.get("is_pro_seller", False)) if store["FilterProSeller"] else False
-                                    is_cached_reject = (not cached_verdict.get("is_valid_deal", False)) or is_pro or cached_verdict.get("has_defect_or_missing_parts", False)
-
-                                    if is_cached_reject:
-                                        if sim_score >= 0.96:
-                                            rej = cached_verdict.get("reject_reason") or "Descartado previamente por IA"
-                                            print(f"[{plat} DEDUP SEMÁNTICA RECHAZO] '{title}' duplicado de '{sem_dup['title']}' (sim={sim_score:.2f} >= 0.96) -> {rej}")
-                                            if flash_msg:
-                                                resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Duplicado semántico: {rej}", title=title, price=price, item_url=item.get("url", ""))
-                                            mark_item_seen(conn, plat, item_id, title, price)
-                                            _emit_pipeline("sem_dup_reject")
-                                            continue
-                                        else:
-                                            print(f"[{plat} DEDUP SEMÁNTICA] Match rechazado previo pero sim={sim_score:.2f} < 0.96 -> Inspección visual obligatoria")
-                                            ai_data = None
-                                    else:
-                                        if current_seller_id and current_seller_id == cached_seller_id and price <= cached_price:
-                                            print(f"[{plat} DEDUP SEMÁNTICA REUTILIZADO] '{title}' duplicado aprobado de '{sem_dup['title']}' (mismo vendedor {current_seller_id}, {price:.0f}€ <= {cached_price:.0f}€, sim={sim_score:.2f}) -> Reutilizando kit sin visión")
-                                            ai_data = copy.deepcopy(cached_verdict)
-                                        else:
-                                            print(f"[{plat} DEDUP SEMÁNTICA] Match aprobado pero vendedor ({current_seller_id} vs {cached_seller_id}) o precio ({price:.0f}€ vs {cached_price:.0f}€) no apto para bypass -> Forzando visión")
-                                            ai_data = None
-                            except Exception as e:
-                                print(f"[WARN] Error parseando veredicto de dedup: {e}")
+                        sem_action, ai_data, sem_rej, item_vec, _ = evaluate_semantic_duplicate(
+                            conn, plat, item_id, title, desc, price,
+                            radar_id=target.get("id", ""),
+                            current_seller_id=current_seller_id,
+                            filter_pro_seller=store["FilterProSeller"],
+                            image_hash_provider=_img_hash_provider,
+                        )
+                        if sem_action == "reject":
+                            if flash_msg:
+                                resolve_flash_discord_alert(flash_msg, approved=False, reason=f"Duplicado semántico: {sem_rej}", title=title, price=price, item_url=item.get("url", ""))
+                            mark_item_seen(conn, plat, item_id, title, price)
+                            _emit_pipeline("sem_dup_reject")
+                            continue
 
                         if ai_data is None:
                             # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
-                            img_urls = item.get("images", [])
-                            cover_url = img_urls[0] if img_urls else ""
-                            t["image"] = time.perf_counter()
-                            raw_photos = download_item_images(
-                                img_urls, rotator=rotator, max_images=1, force_safari=store["img_safari"]
-                            )
+                            if _img_prefetch["photos"] is not None:
+                                raw_photos = _img_prefetch["photos"]
+                            else:
+                                t["image"] = time.perf_counter()
+                                raw_photos = download_item_images(
+                                    img_urls, rotator=rotator, max_images=1, force_safari=store["img_safari"]
+                                )
 
                             # Comprobación de dHash para fotos reutilizadas (P2-5)
                             if raw_photos and len(raw_photos) > 0 and raw_photos[0]:
-                                img_h = calculate_dhash(raw_photos[0])
+                                img_h = _img_prefetch["dhash"] or calculate_dhash(raw_photos[0])
                                 if img_h:
                                     is_reused, r_info = check_and_record_image_hash(conn, img_h, plat, item_id, target.get("id", ""))
                                     if is_reused and r_info:
