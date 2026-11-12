@@ -22,9 +22,9 @@
   },
   "stores": {
     "milanuncios": {"enabled": true},
-    "cashconverters": {"enabled": true},
-    "ebay": {"enabled": true},
-    "todocoleccion": {"enabled": true}
+    "cashconverters": {"enabled": true, "interval_s": 600},
+    "ebay": {"enabled": true, "interval_s": 300},
+    "todocoleccion": {"enabled": true, "interval_s": 1800}
   },
   "notifications": {
     "flash_mode": "off",

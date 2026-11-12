@@ -64,6 +64,7 @@ STORE_PIPELINE = [
         "FilterProSeller": False,
         "img_safari": False,
         "query_sleep": (0.6, 1.3),
+        "interval_s": 600,
         "default_city": "Cash Converters España",
         "default_shipping": "🏪 Compra Directa Web + Garantía",
         "cooldown_until": 0
@@ -76,6 +77,7 @@ STORE_PIPELINE = [
         "FilterProSeller": True,
         "img_safari": True,
         "query_sleep": (1.5, 3.0),
+        "interval_s": SCAN_INTERVAL,
         "default_city": "España",
         "default_shipping": "📦 Milanuncios Express",
         "cooldown_until": 0
@@ -88,6 +90,7 @@ STORE_PIPELINE = [
         "FilterProSeller": False,
         "img_safari": True,
         "query_sleep": (0.8, 1.8),
+        "interval_s": 300,
         "default_city": "eBay ES/UE",
         "default_shipping": "🌐 Envío eBay",
         "cooldown_until": 0
@@ -100,11 +103,52 @@ STORE_PIPELINE = [
         "FilterProSeller": False,
         "img_safari": True,
         "query_sleep": (0.7, 1.5),
+        "interval_s": 1800,
         "default_city": "TodoColección España",
         "default_shipping": "📦 Envío Correos TC",
         "cooldown_until": 0
     }
 ]
+
+
+def get_store_interval_s(config, store) -> float:
+    """Devuelve el intervalo base en segundos para una tienda desde config['stores'] o STORE_PIPELINE."""
+    default_s = float(store.get("interval_s") or SCAN_INTERVAL)
+    stores_cfg = (config or {}).get("stores") if isinstance(config, dict) else None
+    if isinstance(stores_cfg, dict):
+        entry = stores_cfg.get(store.get("key"))
+        if isinstance(entry, dict) and entry.get("interval_s") is not None:
+            try:
+                val = float(entry["interval_s"])
+                if val > 0:
+                    return val
+            except (TypeError, ValueError):
+                pass
+    return default_s
+
+
+def compute_next_fetch_at(now: float, interval_s: float, rng=None) -> tuple:
+    """Calcula (next_fetch_at, delay_s) con jitter ±15%: now + interval_s * uniform(0.85, 1.15)."""
+    r = rng if rng is not None else random
+    delay_s = float(interval_s) * r.uniform(0.85, 1.15)
+    return float(now) + delay_s, delay_s
+
+
+def schedule_stores_after_round(pipeline, fetched_plats, due_plats, config, now_ts, rng=None) -> dict:
+    """Actualiza next_fetch_at y last_sleep tras la ronda según el interval_s de cada tienda."""
+    platform_sleeps = {}
+    for st in pipeline:
+        plat = st["platform"]
+        interval_s = get_store_interval_s(config, st)
+        if plat in fetched_plats:
+            next_at, delay_s = compute_next_fetch_at(now_ts, interval_s, rng=rng)
+            st["last_sleep"] = delay_s
+            st["next_fetch_at"] = next_at
+            platform_sleeps[plat] = (delay_s, False, None, f"intervalo {int(round(interval_s))}s ±15%")
+        elif plat in due_plats:
+            fallback_delay = float(st.get("last_sleep") or interval_s)
+            st["next_fetch_at"] = float(now_ts) + fallback_delay
+    return platform_sleeps
 
 
 def get_queries_for_store(target, kw_field):
@@ -702,20 +746,12 @@ def main():
         round_num += 1
         duration = round(time.time() - round_start, 1)
         rotator.step_round()
-        # A-005: espera por tienda. Solo se adapta (y penaliza) la tienda que hizo peticiones;
+        # A-005 / T2.9: espera por tienda según su interval_s configurado con jitter ±15%;
         # la ronda duerme hasta que le toque a la PRIMERA tienda, no a la más lenta.
         now_ts = time.time()
-        platform_sleeps = {}
-        for st in STORE_PIPELINE:
-            plat = st["platform"]
-            if plat in fetched_plats:
-                res = timing.calculate_round_sleep(SCAN_INTERVAL, plat)
-                platform_sleeps[plat] = res
-                st["last_sleep"] = res[0]
-                st["next_fetch_at"] = now_ts + res[0]
-            elif plat in due_plats:
-                # Le tocaba pero ningún radar de esta ronda la usaba: reprogramar con su último intervalo
-                st["next_fetch_at"] = now_ts + st.get("last_sleep", SCAN_INTERVAL)
+        platform_sleeps = schedule_stores_after_round(
+            STORE_PIPELINE, fetched_plats, due_plats, config, now_ts
+        )
 
         if not platform_sleeps:
             platform_sleeps = {"MULTI": timing.calculate_round_sleep(SCAN_INTERVAL, "MULTI")}
@@ -725,6 +761,8 @@ def main():
 
         wake_times = []
         for st in STORE_PIPELINE:
+            if not store_enabled(config, st["key"]):
+                continue
             if st.get("cooldown_until", 0) > now_ts:
                 wake_times.append((st["cooldown_until"], st["platform"]))
             elif st.get("next_fetch_at", 0) > now_ts:

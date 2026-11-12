@@ -141,7 +141,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.6 | [ ] | Argon 4 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
 | T2.7 | [ ] | Argon 4 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |
 | T2.8 | [ ] | Argon 4 | Embeds de salud asíncronos + locks | Sin pausas de 10 s en el bucle | S | T1.5 |
-| T2.9 | [ ] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
+| T2.9 | [x] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
 | T3.1 | [ ] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
 | T3.2 | [ ] | Argon 4 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
 | T3.3 | [ ] | Argon 4 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
