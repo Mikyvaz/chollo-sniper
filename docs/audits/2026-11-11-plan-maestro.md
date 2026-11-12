@@ -145,7 +145,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T3.1 | [x] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
 | T3.2 | [ ] | Argon 4 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
 | T3.3 | [ ] | Argon 4 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
-| T3.4 | [ ] | Gemini 3.8 Max | Vinted: envío según país | Margen real | S | — |
+| T3.4 | [x] | Gemini 3.8 Max | Vinted: envío según país | Margen real | S | — |
 | T3.5 | [ ] | Gemini 3.8 Max | Re-chequeo de reservados | Recupera oportunidades | S | — |
 | T3.6 | [ ] | Gemini 3.8 Max | Payload: primera línea útil y sin deeplinks rotos | Acción en un toque | S | T1.5, T1.12 |
 | T3.7 | [ ] | Gemini 3.8 Max | Ciclo de vida de la alerta en Discord | No perseguir anuncios vendidos | S | T1.5 |

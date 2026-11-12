@@ -548,10 +548,48 @@ def get_vinted_queries_for_target(target):
     return [target.get("keywords", "").strip()]
 
 
-def parse_vinted_price(item):
+DEFAULT_VINTED_SHIPPING_EUR = {
+    "ES": 3.29,
+    "PT": 5.5,
+    "FR": 7.5,
+    "IT": 7.5,
+    "BE": 8.5,
+    "NL": 8.5,
+    "default": 8.0,
+}
+
+
+def get_vinted_shipping_eur(country=None, shipping_table=None) -> float:
+    """Devuelve el coste de envío estimado en EUR para Vinted según el país del vendedor."""
+    table = dict(DEFAULT_VINTED_SHIPPING_EUR)
+    if isinstance(shipping_table, dict):
+        for k, v in shipping_table.items():
+            try:
+                key_norm = "default" if str(k).strip().lower() == "default" else str(k).strip().upper()
+                table[key_norm] = float(v)
+            except (TypeError, ValueError):
+                pass
+    code = str(country or "").strip().upper()
+    if code and code in table:
+        return float(table[code])
+    return float(table.get("default", 8.0))
+
+
+def parse_vinted_price(item, country=None, shipping_table=None):
     base_price = float(item.get("price", 0.0))
     buyer_fee = round((base_price * 0.05) + 0.70, 2)
-    shipping_est = 3.29
+    if country is None and isinstance(item, dict):
+        seller_obj = item.get("seller")
+        country = (
+            item.get("country_code")
+            or (seller_obj.get("country_code") if isinstance(seller_obj, dict) else None)
+        )
+    if shipping_table is None:
+        try:
+            shipping_table = load_config().get("vinted_shipping_eur")
+        except Exception:
+            shipping_table = None
+    shipping_est = get_vinted_shipping_eur(country, shipping_table=shipping_table)
     landed_cost = round(base_price + buyer_fee + shipping_est, 2)
     return base_price, landed_cost, round(buyer_fee + shipping_est, 2)
 
@@ -701,7 +739,9 @@ def main():
                     title = item.get("title", "")
                     brand = item.get("brand_title", "")
                     status_cond = item.get("status", "")
-                    base_price, landed_cost, fees = parse_vinted_price(item)
+                    base_price, landed_cost, fees = parse_vinted_price(
+                        item, shipping_table=config.get("vinted_shipping_eur")
+                    )
 
                     already_seen, price_drop_info = check_item_seen_or_dropped(
                         conn, "VINTED", item_id, base_price, min_drop_pct=drop_pct, min_drop_eur=drop_eur
@@ -750,6 +790,17 @@ def main():
                         item["seller"] = seller_info
                         if seller_info.get("country_code") and not item.get("country_code"):
                             item["country_code"] = seller_info["country_code"]
+
+                    # T3.4: recalcular coste puesto en casa con el país real del vendedor tras fetch_item_details
+                    _seller_obj = item.get("seller") or {}
+                    _country_code = (
+                        item.get("country_code")
+                        or (_seller_obj.get("country_code") if isinstance(_seller_obj, dict) else "")
+                        or ""
+                    ).strip().upper()
+                    base_price, landed_cost, fees = parse_vinted_price(
+                        item, country=_country_code, shipping_table=config.get("vinted_shipping_eur")
+                    )
 
                     if not was_budget_deferred and not is_vinted_item_fresh(upload_date):
                         print(f"[VINTED DESCARTADO - ANUNCIO ANTIGUO ({upload_date})] {title} ({base_price:.0f}€)")

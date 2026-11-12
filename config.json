@@ -26,6 +26,15 @@
     "ebay": {"enabled": true, "interval_s": 300},
     "todocoleccion": {"enabled": true, "interval_s": 1800}
   },
+  "vinted_shipping_eur": {
+    "ES": 3.29,
+    "PT": 5.5,
+    "FR": 7.5,
+    "IT": 7.5,
+    "BE": 8.5,
+    "NL": 8.5,
+    "default": 8.0
+  },
   "notifications": {
     "flash_mode": "off",
     "push_min_profit_eur": 40,
