@@ -409,17 +409,23 @@ def _seller_cache_ttl_seconds(reviews_count) -> int:
 
 def _open_default_cache_db():
     db_path = os.environ.get("DB_PATH")
-    if not db_path:
-        try:
-            import core_engine
+    core_engine = None
+    try:
+        import core_engine as _ce
+        core_engine = _ce
+        if not db_path:
             db_path = getattr(core_engine, "DB_PATH", None)
-        except Exception:
-            db_path = None
+    except Exception:
+        pass
     if not db_path:
         return None
     try:
-        c = sqlite3.connect(db_path, timeout=5)
-        c.execute("PRAGMA busy_timeout=5000;")
+        if core_engine is not None and hasattr(core_engine, "get_db"):
+            return core_engine.get_db(db_path=db_path)
+        c = sqlite3.connect(db_path, timeout=30.0)
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
+        c.execute("PRAGMA busy_timeout=30000;")
         return c
     except Exception:
         return None
@@ -732,7 +738,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                     wallapop_http_ok = False
                     if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
                         try:
-                            raw_bkt.penalize(factor=0.5, duration_s=120)
+                            raw_bkt.penalize(factor=0.5)
                         except Exception:
                             pass
                     if health_monitor is not None:
@@ -789,7 +795,7 @@ def enrich_seller_profile(item_data: dict, http_session=None, platform: str = No
                         rating = None
                         if raw_bkt is not None and getattr(sess, "bucket", None) is not raw_bkt:
                             try:
-                                raw_bkt.penalize(factor=0.5, duration_s=120)
+                                raw_bkt.penalize(factor=0.5)
                             except Exception:
                                 pass
                         if health_monitor is not None:

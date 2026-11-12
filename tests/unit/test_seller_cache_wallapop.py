@@ -138,30 +138,57 @@ class TestSellerCacheWallapop(unittest.TestCase):
             self.assertEqual(len(sess_ok.calls), 1)
 
     def test_429_sets_unavailable_notifies_health_monitor_and_not_cached(self):
+        import antiban
         import fraud_signals
 
-        hm = FakeHealthMonitor()
-        sess = FakeSession([
-            FakeResp(429, {}, headers={"Retry-After": "120"}),
-            FakeResp(200, {"counters": [{"type": "reviews", "value": 9}]}),  # should NOT be called after 429 on /users
-        ])
-        item = {"platform": "WALLAPOP", "seller": {"id": "wal_u_429"}}
-        prof = fraud_signals.enrich_seller_profile(
-            item, http_session=sess, platform="WALLAPOP", conn=self.conn, health_monitor=hm
-        )
-        self.assertEqual(prof["seller_profile_status"], "unavailable")
-        self.assertIsNone(prof["seller_reviews_count"])
-        self.assertEqual(len(sess.calls), 1, "Should abort /stats when /users returns 429")
-        self.assertEqual(len(hm.events), 1)
-        self.assertEqual(hm.events[0][0], 429)
-        self.assertEqual(hm.events[0][3], "120")
+        bucket = antiban.TokenBucket(1.0, burst=5, sleeper=lambda _: None)
+        antiban.set_platform_bucket("WALLAPOP", bucket)
+        try:
+            hm = FakeHealthMonitor()
+            sess = FakeSession([
+                FakeResp(429, {}, headers={"Retry-After": "120"}),
+                FakeResp(200, {"counters": [{"type": "reviews", "value": 9}]}),  # should NOT be called after 429 on /users
+            ])
+            item = {"platform": "WALLAPOP", "seller": {"id": "wal_u_429"}}
+            prof = fraud_signals.enrich_seller_profile(
+                item, http_session=sess, platform="WALLAPOP", conn=self.conn, health_monitor=hm
+            )
+            self.assertEqual(prof["seller_profile_status"], "unavailable")
+            self.assertIsNone(prof["seller_reviews_count"])
+            self.assertEqual(len(sess.calls), 1, "Should abort /stats when /users returns 429")
+            self.assertEqual(len(hm.events), 1)
+            self.assertEqual(hm.events[0][0], 429)
+            self.assertEqual(hm.events[0][3], "120")
+            self.assertLess(bucket.rate, 1.0)
+            self.assertAlmostEqual(bucket.rate, 0.5)
 
-        # Must not be cached in RAM or SQLite
-        self.assertNotIn(("WALLAPOP", "wal_u_429"), fraud_signals._SELLER_PROFILE_CACHE)
-        row = self.conn.execute(
-            "SELECT 1 FROM seller_profile_cache WHERE platform='WALLAPOP' AND seller_id='wal_u_429'"
-        ).fetchone()
-        self.assertIsNone(row)
+            # Must not be cached in RAM or SQLite
+            self.assertNotIn(("WALLAPOP", "wal_u_429"), fraud_signals._SELLER_PROFILE_CACHE)
+            row = self.conn.execute(
+                "SELECT 1 FROM seller_profile_cache WHERE platform='WALLAPOP' AND seller_id='wal_u_429'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            antiban.set_platform_bucket("WALLAPOP", None)
+
+    def test_open_default_cache_db_uses_wal_and_busy_timeout_30000(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        import fraud_signals
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_db = os.path.join(tmpdir, "cache_test.db")
+            with patch.dict(os.environ, {"DB_PATH": tmp_db}):
+                c = fraud_signals._open_default_cache_db()
+                self.assertIsNotNone(c)
+                try:
+                    jm = c.execute("PRAGMA journal_mode;").fetchone()[0]
+                    bt = c.execute("PRAGMA busy_timeout;").fetchone()[0]
+                    self.assertEqual(str(jm).lower(), "wal")
+                    self.assertEqual(int(bt), 30000)
+                finally:
+                    c.close()
 
 
 if __name__ == "__main__":
