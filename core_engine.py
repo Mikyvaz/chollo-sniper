@@ -1830,6 +1830,70 @@ def sanitize_item_url(url: str, platform: str = "") -> str:
     ))
 
 
+def _compact_text(text, max_len: int) -> str:
+    """Normaliza espacios y trunca limpiamente con elipsis sin superar max_len."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if max_len <= 0:
+        return ""
+    if len(cleaned) <= max_len:
+        return cleaned
+    if max_len == 1:
+        return "…"
+    return cleaned[: max_len - 1].rstrip() + "…"
+
+
+def format_alert_headline(
+    model: str,
+    price: float,
+    net_profit: float,
+    platform: str = "",
+    location: str = "",
+    deal_type: str = "direct_chollo",
+    recommended_offer: float = 0.0,
+    score: int = 8,
+    mode: str = "resale",
+    max_len: int = 110,
+) -> str:
+    """Construye la primera línea compacta (<=110 chars) compartida entre Discord y ntfy."""
+    plat = (platform or "").upper()
+    clean_model = re.sub(r"\s+", " ", str(model or "Producto")).strip() or "Producto"
+    price_f = float(price or 0.0)
+    profit_f = float(net_profit or 0.0)
+    profit_str = f"+{profit_f:.0f} €" if profit_f >= 0 else f"{profit_f:.0f} €"
+
+    if deal_type == "offer_opportunity":
+        offer_f = float(recommended_offer or 0.0) or max(1.0, price_f)
+        prefix = "🤝 "
+        suffix = f" · ofertar {offer_f:.0f} € (pide {price_f:.0f} €) → {profit_str}"
+    else:
+        if deal_type == "high_risk_opportunity":
+            emoji = "⚠️"
+        elif mode == "personal":
+            emoji = "💾"
+        elif int(score or 0) == 10:
+            emoji = "🚨"
+        else:
+            emoji = {
+                "WALLAPOP": "🔥",
+                "VINTED": "💎",
+                "MILANUNCIOS": "🟢",
+                "CASHCONVERTERS": "🏪",
+                "EBAY": "🌐",
+                "TODOCOLECCION": "🏺",
+            }.get(plat, "🔥")
+        prefix = f"{emoji} "
+        loc = _compact_text(location, 20)
+        place = f"{plat} {loc}".strip() if plat else loc
+        tail = f" · {place}" if place else ""
+        suffix = f" · {price_f:.0f} € → {profit_str}{tail}"
+        if max_len - len(prefix) - len(suffix) < 18 and loc and plat:
+            suffix = f" · {price_f:.0f} € → {profit_str} · {plat}"
+
+    budget = max(8, max_len - len(prefix) - len(suffix))
+    short_model = _compact_text(clean_model, budget)
+    return _compact_text(f"{prefix}{short_model}{suffix}", max_len)
+
+
 def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
     """
     Envía notificación push 1-Tap mediante ntfy.sh con cabeceras Click y Actions
@@ -1860,17 +1924,31 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         p2p_profit = float(analysis.get("p2p_net_profit", 0.0) or 0.0)
         cex_cash = float(analysis.get("cex_cash", 0.0) or 0.0)
         deal_tier = analysis.get("deal_tier")
+        model_name = analysis.get("identified_model") or title
+        location = item_data.get("seller_city") or item_data.get("country_tag") or ""
 
         if is_flash:
-            tier_str = "FLASH"
             priority = "5"
-            profit_str = ""
+            plat_u = str(platform or "").upper()
+            flash_suffix = f" · {price:.0f} €" + (f" · {plat_u}" if plat_u else "")
+            flash_model = _compact_text(model_name, max(12, 110 - 2 - len(flash_suffix)))
+            title_header = _compact_text(f"⚡ {flash_model}{flash_suffix}", 110)
         else:
-            tier_str = f"NIVEL {deal_tier}" if deal_tier else "CHOLLO"
             priority = "5" if deal_tier == 1 else "4"
-            profit_str = f" (Beneficio +{p2p_profit:.0f}€)" if p2p_profit > 0 else ""
-
-        title_header = f"⚡ [{tier_str}] {title[:45]} - {price:.0f}€{profit_str}"
+            if analysis.get("alert_title"):
+                title_header = _compact_text(analysis["alert_title"], 110)
+            else:
+                title_header = format_alert_headline(
+                    model=model_name,
+                    price=price,
+                    net_profit=p2p_profit,
+                    platform=platform,
+                    location=location,
+                    deal_type=analysis.get("deal_type", "direct_chollo"),
+                    recommended_offer=float(analysis.get("recommended_offer", 0.0) or 0.0),
+                    score=int(analysis.get("deal_score", 8) or 8),
+                    mode=analysis.get("mode", "resale"),
+                )
 
         seller = item_data.get("seller") or {}
         seller_badge = item_data.get("seller_trust_badge") or seller.get("seller_trust_badge", "👤 Vendedor particular")
@@ -1882,14 +1960,15 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         body = "\n".join(body_lines)
 
         base, topic = NTFY_TOPIC_URL.rstrip("/").rsplit("/", 1)
+        actions = [{"action": "view", "label": "Abrir anuncio", "url": clean_url, "clear": True}] if _valid_http(clean_url) else []
         payload = {
             "topic": topic,
-            "title": title_header[:250],
+            "title": title_header[:110],
             "message": body[:4000],
             "click": clean_url,
             "priority": int(priority),
             "tags": ["moneybag"],
-            "actions": [{"action": "view", "label": "Abrir anuncio", "url": clean_url, "clear": True}],
+            "actions": actions,
         }
         headers = {"Authorization": f"Bearer {NTFY_TOKEN}"} if NTFY_TOKEN else {}
         resp = HTTP_SESSION.post(base, json=payload, headers=headers, timeout=3)
@@ -5570,20 +5649,25 @@ def send_flash_discord_alert(
             return None
 
     clean_item_url, clean_checkout_url = normalize_and_build_links(platform, item_id, item_url)
+    clean_item_url = sanitize_item_url(clean_item_url, platform) or clean_item_url
+    clean_checkout_url = sanitize_item_url(clean_checkout_url, platform) or clean_checkout_url
+    plat_u = (platform or "").upper()
     clean_t = re.sub(r"\s+", " ", (title or "").strip())
-    loc_str = f" 🔥 **EN MANO ({seller_city})**" if is_local else f" ({seller_city})"
-    user_ping = f"<@{ALERT_USER_ID}> " if (ALERT_USER_ID and not silent) else ""
+    loc_tag = _compact_text(seller_city, 20)
     flash_flags = {"flags": DISCORD_SILENT_FLAG} if silent else {}
 
-    deeplink = build_native_deeplink(platform, clean_item_url, item_id)
-    app_link_str = f"📲 **App Directa:** [Abrir en App Nativa]({deeplink})\n" if deeplink else ""
+    flash_suffix = f" · {price:.0f} € (~{landed_cost:.0f} €)" + (f" · {plat_u} {loc_tag}".rstrip() if (plat_u or loc_tag) else "")
+    flash_model = _compact_text(clean_t or "Producto", max(12, 110 - 2 - len(flash_suffix)))
+    flash_line1 = _compact_text(f"⚡ {flash_model}{flash_suffix}", 110)
 
-    flash_content = (
-        f"⚡ **[FLASH SIN IA] {clean_t} — {price:.0f}€** {user_ping}\n"
-        f"{app_link_str}"
-        f"👉 **ABRIR ANUNCIO:** {clean_item_url}\n"
-        f"⏳ *Puesto en casa: ~{landed_cost:.0f}€{loc_str} • Auditando con IA (recibirás 2ª notificación en 3s con la decisión)...*"
-    )
+    flash_lines = [flash_line1]
+    if _valid_http(clean_item_url):
+        flash_lines.append(clean_item_url)
+    if ALERT_USER_ID and not silent:
+        flash_lines.append(f"<@{ALERT_USER_ID}>")
+    elif silent:
+        flash_lines.append("🔕 *Flash silencioso (auditando con IA)*")
+    flash_content = "\n".join(flash_lines)
 
     btn_row = []
     if _valid_http(clean_item_url):
@@ -5700,6 +5784,8 @@ def send_discord_alert(
     mode = target.get("mode", "resale")
 
     clean_item_url, clean_checkout_url = normalize_and_build_links(plat, item_id, item_url, checkout_url)
+    clean_item_url = sanitize_item_url(clean_item_url, plat) or clean_item_url
+    clean_checkout_url = sanitize_item_url(clean_checkout_url, plat) or clean_checkout_url
 
     score = int(ai_data.get("deal_score", 8))
     deal_type = ai_data.get("deal_type", "direct_chollo")
@@ -5806,138 +5892,110 @@ def send_discord_alert(
 
     # Si es un 10/10, el enlace principal lleva directo al Checkout 1-Tap; en caso contrario lleva directo al anuncio
     primary_action_url = clean_checkout_url if (score == 10 and deal_type not in ("offer_opportunity", "high_risk_opportunity")) else clean_item_url
-    # Solo las alertas que merecen interrumpir mencionan al usuario (ver decide_alert_push)
-    user_ping = f"<@{ALERT_USER_ID}> " if (ALERT_USER_ID and should_push) else ""
 
-    # ==================== CABECERA DISTINTA PARA OPORTUNIDAD DE CHOLLO (HACER OFERTA) ====================
+    location_label = seller_city if (seller_city and seller_city != "España") else (country_tag or seller_city or "")
+    line1 = format_alert_headline(
+        model=identified_model,
+        price=price,
+        net_profit=net_profit,
+        platform=plat,
+        location=location_label,
+        deal_type=deal_type,
+        recommended_offer=recommended_offer,
+        score=score,
+        mode=mode,
+    )
+
     if deal_type == "offer_opportunity":
-        header_title = (
-            f"🤝 [OPORTUNIDAD DE CHOLLO • {plat}] ({score}/10): {identified_model[:42]} "
-            f"— Ofertar {recommended_offer}€ (Anuncio: {price:.0f}€) ➔ +{net_profit:.0f}€"
-        )
         color = PLATFORM_COLORS["OFFER_OPPORTUNITY"]
-        cost_field_name = "🎯 Estrategia de Oferta"
-        cost_field_val = (
-            f"🏷️ **Anuncio:** ~~{price:.0f}€~~ ➔ **Ofertar: `{recommended_offer}€`** (**-{offer_disc_pct}%**)\n"
-            f"💳 **Puesto en casa si acepta:** **{offer_landed_cost:.0f}€**"
-        )
-        profit_block = (
-            f"💰 **Reventa Rápida (<48h):** **{optimal_price:.0f}€** *(Beneficio limpio si acepta: **`+{net_profit:.0f}€`**)*\n"
-            f"🗣️ **Mensaje de Oferta Listo (1 toque para copiar):**\n```text\n{haggle_msg}\n```"
-        )
-        block_title = "🤝 Plan de Regateo y Rentabilidad"
-        push_notification_content = (
-            f"🤝 **[OPORTUNIDAD DE CHOLLO • OFERTAR {recommended_offer}€]** ({score}/10) {user_ping}\n"
-            f"👉 **ABRIR ANUNCIO PARA OFERTAR:** {clean_item_url}\n"
-            f"💡 **{identified_model}** listado a **{price:.0f}€** • Lanza oferta de **{recommended_offer}€** (-{offer_disc_pct}%) ➔ **Ganas +{net_profit:.0f}€ limpios**"
-        )
     elif deal_type == "high_risk_opportunity":
-        header_title = f"⚠️ [ALTO RIESGO • {plat}] ({score}/10): {identified_model[:50]} — {price:.0f}€ (Precio Anómalo)"
         color = 0xE67E22
-        cost_field_name = "💳 Coste Puesto en Casa"
-        cost_field_val = f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*"
-        profit_block = (
-            f"💰 **Reventa Teórica:** **{optimal_price:.0f}€** *(Margen teórico: **`+{net_profit:.0f}€`**)*\n"
-            f"⚠️ **Atención:** Proceder solo con pago protegido por la app y verificar el perfil del vendedor.\n"
-            f"💬 **Mensaje Consulta:**\n```text\n{fast_msg}\n```"
-        )
-        block_title = "⚠️ Evaluación de Riesgo y Rentabilidad"
-        push_notification_content = (
-            f"⚠️ **[ALTO RIESGO • PRECIO ANÓMALO]** ({score}/10) {identified_model} a **{price:.0f}€** {user_ping}\n"
-            f"👉 **REVISAR CON CAUTELA:** {clean_item_url}\n"
-            f"⚠️ Margen de +{net_profit:.0f}€ pero precio muy bajo. Pagar solo con protección dentro de la app."
-        )
     elif mode == "personal":
-        header_title = f"💾 [SERVIDOR PERSONAL • {plat}] ({score}/10): {identified_model} — {price:.0f}€ (Ahorras +{net_profit:.0f}€)"
         color = PLATFORM_COLORS["PERSONAL"]
-        cost_field_name = "💳 Coste Puesto en Casa"
-        cost_field_val = f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*"
-        profit_block = (
-            f"🏷️ **Valor normal de mercado:** **{optimal_price:.0f}€** | **Ahorro neto real:** **`+{net_profit:.0f}€`**\n"
-            f"💬 **Mensaje rápido:**\n```text\n{fast_msg}\n```"
-        )
-        block_title = "🖥️ Análisis de Ahorro para tu Servidor"
-        push_notification_content = (
-            f"💾 **[CHOLLO SERVIDOR • {score}/10] {identified_model} — {price:.0f}€ (Ahorras +{net_profit:.0f}€)** {user_ping}\n"
-            f"👉 **IR AL ANUNCIO:** {primary_action_url}"
-        )
     else:
-        emoji_plat = "🚨" if score == 10 else {"WALLAPOP": "🔥", "VINTED": "💎", "MILANUNCIOS": "🟢", "CASHCONVERTERS": "🏪", "EBAY": "🌐", "TODOCOLECCION": "🏺"}.get(plat, "🔥")
-        header_title = f"{emoji_plat} [{plat}] ({score}/10): {identified_model[:55]} — {price:.0f}€ (Limpio +{net_profit:.0f}€)"
         color = 0xFFAA00 if score == 10 else (0x2ECC71 if is_local else PLATFORM_COLORS.get(plat, 0x3498DB))
-        cost_field_name = "💳 Coste Puesto en Casa"
-        cost_field_val = f"**{landed_cost:.0f}€** *(Anuncio: {price:.0f}€)*"
-        profit_block = (
-            f"💰 **Reventa Rápida (<48h):** **{optimal_price:.0f}€** *(Beneficio limpio: **`+{net_profit:.0f}€`**)*\n"
-            f"📁 **Kit bajo demanda:** Pulsa **✅ ¡Comprado!** para limpiar fotos y generar anuncio\n"
-            f"💬 **Mensaje Compra Rápida:**\n```text\n{fast_msg}\n```"
-        )
-        block_title = "📦 Rentabilidad y Acción Rápida"
 
-        if score == 10:
-            push_notification_content = (
-                f"🚨 **¡SIGUE CON LA COMPRA! 10/10 COMPRA A CIEGAS (+{net_profit:.0f}€ LIMPIOS)** 🚨 {user_ping}\n"
-                f"⚡ **ABRIR ANUNCIO:** {clean_item_url}\n"
-                f"🔗 **Modelo:** `{identified_model}` ({price:.0f}€)"
-            )
-        else:
-            push_notification_content = (
-                f"✅ **¡APROBADO POR IA ({score}/10)! SIGUE CON LA COMPRA (+{net_profit:.0f}€ LIMPIOS)** {user_ping}\n"
-                f"👉 **ABRIR ANUNCIO:** {clean_item_url}\n"
-                f"🔗 **Modelo:** `{identified_model}` ({price:.0f}€)"
-            )
-
-    # Alerta silenciosa: llega al canal pero no hace saltar el móvil (y se dice por qué)
     msg_flags = {} if should_push else {"flags": DISCORD_SILENT_FLAG}
-    if not should_push:
-        push_notification_content = f"🔕 *Sin aviso sonoro: {quiet_reason}*\n{push_notification_content}"
+    content_lines = [line1]
+    if _valid_http(clean_item_url):
+        content_lines.append(clean_item_url)
+    if should_push and ALERT_USER_ID:
+        content_lines.append(f"<@{ALERT_USER_ID}>")
+    elif not should_push:
+        content_lines.append(f"🔕 *Sin aviso sonoro: {quiet_reason}*")
+    push_notification_content = "\n".join(content_lines)
 
-    clean_embed_desc = re.sub(r"\s+", " ", html.unescape(description or "Sin descripción.")).strip()
-    footer_text = f"Boti Sniper v4.3 (Visión Multimodal + Offer Sniper) • ID: {deal_id} • {datetime.now().strftime('%H:%M:%S')}".replace("\n", " ").strip()
-
-    deeplink = build_native_deeplink(plat, clean_item_url, item_id)
-    deeplink_header = f"📲 **App Directa:** [Abrir en App Nativa]({deeplink})\n\n" if deeplink else ""
-    full_embed_desc = f"{deeplink_header}{clean_embed_desc[:220]}..." if len(clean_embed_desc) > 220 else f"{deeplink_header}{clean_embed_desc}"
-
-    cex_cash_val = float(cex_data.get("cash", 0.0) or 0.0) if cex_data else 0.0
-    cex_cash_net = float(ai_data.get("cex_cash_net", round(cex_cash_val - landed_cost, 2)))
-    cex_coverage = float(ai_data.get("cex_coverage_pct", round((cex_cash_val / max(1.0, landed_cost)) * 100.0, 1)))
+    clean_embed_desc = _compact_text(html.unescape(description or "Sin descripción."), 200)
+    footer_text = _compact_text(f"Boti Sniper · {target['name']} · ID: {deal_id} · {datetime.now().strftime('%H:%M:%S')}", 90)
 
     p2p_net = float(ai_data.get("p2p_net_profit", net_profit))
     p2p_roi = float(ai_data.get("p2p_roi_pct", round((p2p_net / max(1.0, landed_cost)) * 100.0, 1)))
     p2p_market = float(ai_data.get("estimated_resale_price", optimal_price))
-
-    sign_c = "+" if cex_cash_net >= 0 else ""
     sign_p = "+" if p2p_net >= 0 else ""
 
-    dual_breakdown_field = {
-        "name": "📊 Valoración Dual (CeX vs Reventa Particular)",
-        "value": (
-            f"💵 **CeX Efectivo:** **{cex_cash_val:.0f}€** (Neto: `{sign_c}{cex_cash_net:.0f}€` | Cubre: **{cex_coverage:.0f}%**)\n"
-            f"📈 **Reventa P2P:** **{p2p_market:.0f}€** (Beneficio Neto: `{sign_p}{p2p_net:.0f}€` | ROI: **{p2p_roi:.0f}%**)"
-        ),
-        "inline": False
-    }
+    verdict_parts = [f"⭐ {score}/10 · Confianza {vis_conf}"]
+    if price_drop_info:
+        verdict_parts.append(f"📉 Bajada -{price_drop_info['drop_eur']:.0f} € (antes {price_drop_info['old_price']:.0f} €)")
+    if deal_type == "high_risk_opportunity" or ai_data.get("is_anomalously_low"):
+        verdict_parts.append("⚠️ Precio anómalo: pagar SOLO con protección dentro de la app.")
+    if fraud_banner:
+        verdict_parts.append(_compact_text(fraud_banner, 140))
+    verdict_parts.append(_compact_text(vis_notes, 180))
+    if charger_penalty > 0:
+        verdict_parts.append("⚠️ Sin cargador (-12€)")
+    if case_penalty > 0:
+        verdict_parts.append("⚠️ Sin caja (-12€)")
+    verdict_val = (" | ".join(verdict_parts[:2]) + ("\n" + "\n".join(verdict_parts[2:]) if len(verdict_parts) > 2 else ""))[:450]
+
+    if cex_data and cex_data.get("cash", 0) > 0:
+        net_cash = cex_data["cash"] - base_cost_for_cex
+        net_voucher = cex_data["voucher"] - base_cost_for_cex
+        sc = "+" if net_cash >= 0 else ""
+        sv = "+" if net_voucher >= 0 else ""
+        extras_tag = f" (+{len(ai_data['bundled_matches'])} extras)" if ai_data.get("bundled_matches") else ""
+        cex_summary = (
+            f"🏷️ `{_compact_text(cex_data.get('box_name', ''), 65)}`{extras_tag}\n"
+            f"💵 Efectivo: **{cex_data['cash']:.0f} €** (`{sc}{net_cash:.0f} €` neto) · "
+            f"🎟️ Vale: **{cex_data['voucher']:.0f} €** (`{sv}{net_voucher:.0f} €`)\n"
+            f"📈 Reventa P2P: **{p2p_market:.0f} €** (`{sign_p}{p2p_net:.0f} €`, ROI {p2p_roi:.0f}%) · [Ficha CeX]({cex_link})"
+        )[:450]
+    else:
+        cex_summary = (
+            f"{_compact_text(target.get('cex_cash_ref', 'Sin referencia CeX'), 80)}\n"
+            f"📈 Reventa P2P: **{p2p_market:.0f} €** (`{sign_p}{p2p_net:.0f} €`, ROI {p2p_roi:.0f}%) · [Buscar en CeX]({cex_link})"
+        )[:450]
+
+    seller_val = f"{_compact_text(seller_line.strip(), 170)}\n{loc_badge} · {ship_badge}"[:320]
+
+    if deal_type == "offer_opportunity":
+        action_val = (
+            f"🤝 Ofertar **{recommended_offer} €** (-{offer_disc_pct}%, puesto ~{offer_landed_cost:.0f} €)\n"
+            f"```text\n{_compact_text(haggle_msg, 240)}\n```"
+        )[:380]
+    else:
+        action_val = (
+            f"💳 Puesto en casa: **{landed_cost:.0f} €** (anuncio {price:.0f} €)\n"
+            f"```text\n{_compact_text(fast_msg, 200)}\n```"
+        )[:380]
+
+    fields = [
+        {"name": "Veredicto IA", "value": verdict_val, "inline": False},
+        {"name": "CeX", "value": cex_summary, "inline": False},
+        {"name": "Vendedor", "value": seller_val, "inline": False},
+        {"name": "Acción", "value": action_val, "inline": False},
+    ]
 
     embed = {
-        "title": header_title[:250],
+        "title": line1,
         "color": color,
-        "description": full_embed_desc.strip(),
-        "fields": [
-            {"name": "🎯 Radar", "value": target["name"], "inline": True},
-            {"name": cost_field_name, "value": cost_field_val, "inline": True},
-            {"name": "🚚 Entrega / Origen", "value": f"{loc_badge}\n{ship_badge}", "inline": True},
-            {"name": "🧠 Auditoría Visual & Técnica IA", "value": ai_text[:1020], "inline": False},
-            {"name": "🏪 Suelo de Amortización CeX España", "value": cex_field_val[:1020], "inline": False},
-            dual_breakdown_field,
-            {"name": block_title, "value": profit_block[:1020], "inline": False}
-        ],
+        "description": clean_embed_desc,
+        "fields": fields,
         "footer": {"text": footer_text}
     }
     if _valid_http(primary_action_url):
         embed["url"] = primary_action_url
 
-    if not enhanced_cover_bytes and image_url:
+    if not enhanced_cover_bytes and _valid_http(image_url):
         embed["image"] = {"url": image_url}
 
     has_distinct_checkout = bool(clean_checkout_url and clean_checkout_url != clean_item_url)
