@@ -139,7 +139,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.4 | [x] | Gemini 3.8 Max | Vinted: ficha y vendedor robustos | No evaluar a ciegas | S | T2.3 |
 | T2.5 | [x] | Argon 4 | Vendedor Wallapop: identidad, límite y caché persistente | Menos peticiones y ningún falso «0 valoraciones» | S | T2.2, T1.4 |
 | T2.6 | [ ] | Argon 4 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
-| T2.7 | [ ] | Argon 4 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |
+| T2.7 | [ ] | Argon 4 | IA: breaker y plazos implementados y probados; falta revisión independiente de la corrección SQLite | 10 s Puerta 1 + 20 s visión en el gateway | S | T1.6 |
 | T2.8 | [x] | Argon 4 | Embeds de salud asíncronos + locks | Encolado <5 ms; envío fuera del bucle | S | T1.5 |
 | T2.9 | [x] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
 | T3.1 | [x] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |

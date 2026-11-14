@@ -24,6 +24,7 @@ import urllib.parse
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import requests as std_requests
 from requests.adapters import HTTPAdapter
 from curl_cffi import requests, CurlMime
@@ -650,15 +651,27 @@ def _prompt_tokens_by_modality(usage):
     return img, text
 
 
+def _limit_ai_db_wait(conn, deadline):
+    """Acota cada espera SQLite del gateway; el llamador restaura el PRAGMA al salir."""
+    if conn is not None and deadline is not None:
+        current_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        conn.execute(f"PRAGMA busy_timeout={min(current_ms, remaining_ms)}")
+
+
 def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_out, thoughts_tokens=0, finish_reason=None,
-                tokens_img=0, tokens_text=0):
+                tokens_img=0, tokens_text=0, deadline=None):
     if not conn:
         return
+    original_busy_timeout = None
     try:
+        if deadline is not None:
+            original_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
         usd = calculate_ai_cost_usd(model, tokens_in, tokens_out, thoughts_tokens)
         c = conn.cursor()
         total_out = int(tokens_out or 0) + int(thoughts_tokens or 0)
         try:
+            _limit_ai_db_wait(conn, deadline)
             c.execute(
                 """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd,
                                             finish_reason, tokens_thoughts, tokens_img, tokens_text, created_at)
@@ -668,11 +681,14 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
             )
         except sqlite3.OperationalError:
             # BD sin migrar (columnas nuevas ausentes): registrar al menos el coste
+            # Un bloqueo también llega aquí: nunca repetir la espera ya consumida.
+            _limit_ai_db_wait(conn, deadline)
             c.execute(
                 """INSERT INTO ai_cost_log (platform, radar_id, model, call_type, tokens_in, tokens_out, usd, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                 (platform, radar_id or "", model or "", call_type or "unknown", int(tokens_in or 0), total_out, usd)
             )
+        _limit_ai_db_wait(conn, deadline)
         conn.commit()
         try:  # mantiene al día el gasto memorizado de este proceso
             key = _cost_cache_key(conn)
@@ -683,7 +699,12 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
         except Exception:
             pass
     except Exception as e:
-        print(f"[WARN] Error registrando coste IA: {e}")
+        print(f"[WARN] Error registrando coste IA: {_redact(e)}; "
+              f"no persistido model={_redact(model)} tokens_in={tokens_in} "
+              f"tokens_out={tokens_out} thoughts={thoughts_tokens}")
+    finally:
+        if original_busy_timeout is not None:
+            conn.execute(f"PRAGMA busy_timeout={original_busy_timeout}")
 
 
 _TODAY_COST_TTL_S = 60.0
@@ -729,6 +750,60 @@ AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
 _AI_GATEWAY_SEMAPHORE = threading.Semaphore(AI_MAX_CONCURRENCY)
 # T1.6: presupuesto de salida de los modelos Gemini no lite (incluye el thinking, que no se puede desactivar)
 GEMINI_NON_LITE_MAX_OUTPUT_TOKENS = 2048
+
+
+class ModelBreaker:
+    """Fallos consecutivos por modelo, compartidos entre los hilos del proceso."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._failures = {}
+        self._open_until = {}
+
+    def allow(self, model):
+        with self._lock:
+            return time.monotonic() >= self._open_until.get(model, 0)
+
+    def record_success(self, model):
+        with self._lock:
+            self._failures.pop(model, None)
+            self._open_until.pop(model, None)
+
+    def record_failure(self, model, retry_after=None):
+        cooldown = 300.0
+        if retry_after is not None:
+            try:
+                seconds = float(retry_after)
+            except (TypeError, ValueError):
+                try:
+                    seconds = parsedate_to_datetime(retry_after).timestamp() - time.time()
+                except (TypeError, ValueError, AttributeError, OverflowError):
+                    seconds = 0
+            if math.isfinite(seconds) and seconds > 0:
+                cooldown = seconds
+        with self._lock:
+            failures = self._failures.get(model, 0) + 1
+            self._failures[model] = failures
+            if failures >= 3:
+                self._open_until[model] = max(
+                    self._open_until.get(model, 0), time.monotonic() + cooldown)
+
+
+class _AIHTTPClient:
+    """curl tiene timeout total de transferencia; una sesión por hilo, sin reintentos."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def post(self, url, **kwargs):
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._local.session = requests.Session()
+        return session.post(url, **kwargs)
+
+
+_MODEL_BREAKER = ModelBreaker()
+_AI_HTTP_SESSION = _AIHTTPClient()
 
 
 class BudgetExceededError(RuntimeError):
@@ -849,7 +924,8 @@ def ai_gateway_call(
     call_type: str = "general",
     timeout: int = 15,
     enforce_budget: bool = True,
-    schema_defaults: dict = None
+    schema_defaults: dict = None,
+    deadline_s: float = None
 ):
     """
     AI Gateway Centralizado con Cortafuegos de Presupuesto (CORRECION_FALLOS.md 3.1 & 2.4 & 3.2):
@@ -866,16 +942,30 @@ def ai_gateway_call(
     if not prompt:
         return dict(schema_defaults) if schema_defaults else None
 
+    # Un único reloj incluye la espera de concurrencia y todos los proveedores.
+    deadline = time.monotonic() + float(deadline_s if deadline_s is not None else
+                                       (10 if call_type == "prescreen" else 20))
+    attempt_limit = min(float(timeout or 15), 6 if call_type == "prescreen" else 12)
+
+    def remaining_timeout():
+        remaining = deadline - time.monotonic()
+        return min(attempt_limit, remaining) if remaining >= 3 else None
+
     close_conn_after = False
     active_conn = conn
+    original_busy_timeout = None
     if active_conn is None:
         try:
-            active_conn = get_db()
+            active_conn = get_db(timeout=max(0, min(30, deadline - time.monotonic())))
             close_conn_after = True
         except Exception:
             active_conn = None
 
     try:
+        if active_conn is not None:
+            original_busy_timeout = (30000 if close_conn_after else
+                                     active_conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            _limit_ai_db_wait(active_conn, deadline)
         # 1. Caché Local SHA-256 (Tier 2 - Nivel Prompt Exacto)
         hasher = hashlib.sha256()
         hasher.update((call_type or "general").encode("utf-8"))
@@ -891,6 +981,7 @@ def ai_gateway_call(
 
         if active_conn:
             try:
+                _limit_ai_db_wait(active_conn, deadline)
                 c = active_conn.cursor()
                 c.execute("SELECT result_json FROM ai_prompt_cache WHERE prompt_hash = ?", (prompt_hash,))
                 cached_row = c.fetchone()
@@ -903,6 +994,7 @@ def ai_gateway_call(
 
         # 2. Cortafuegos de Presupuesto Diario (Hard Limit)
         if enforce_budget and active_conn:
+            _limit_ai_db_wait(active_conn, deadline)
             today_cost = get_today_ai_cost(active_conn)
             if today_cost >= AI_DAILY_BUDGET_USD:
                 err_msg = (
@@ -913,12 +1005,17 @@ def ai_gateway_call(
                 raise BudgetExceededError(err_msg)
 
         # 3. Control de Concurrencia y Abort Timeout (Punto 6)
-        slot_acquired = _AI_GATEWAY_SEMAPHORE.acquire(timeout=float(timeout or 15))
+        slot_acquired = _AI_GATEWAY_SEMAPHORE.acquire(
+            timeout=max(0, min(attempt_limit, deadline - time.monotonic())))
         if not slot_acquired:
             print(f"[WARN AI_GATEWAY] Concurrencia máxima ({AI_MAX_CONCURRENCY}) ocupada. Timeout esperando slot en {call_type}.")
             return dict(schema_defaults) if schema_defaults else None
 
         try:
+            # El gasto puede haber cambiado mientras este hilo esperaba el semáforo.
+            _limit_ai_db_wait(active_conn, deadline)
+            if enforce_budget and active_conn and get_today_ai_cost(active_conn) >= AI_DAILY_BUDGET_USD:
+                raise BudgetExceededError("Cortafuegos IA activo tras esperar el slot de concurrencia.")
             # 4. Control de max_tokens duro
             max_tokens = int(max_tokens or 300)
             if max_tokens <= 0:
@@ -957,6 +1054,8 @@ def ai_gateway_call(
                 for model in candidate_models:
                     if "3.8" in model:
                         continue
+                    if not _MODEL_BREAKER.allow(model):
+                        continue
                     # T1.6: en modelos no lite el límite incluye el thinking; 2048 para que quepan thinking + JSON
                     model_max_tokens = max_tokens if "lite" in model.lower() else GEMINI_NON_LITE_MAX_OUTPUT_TOKENS
                     payload = {
@@ -969,8 +1068,11 @@ def ai_gateway_call(
                     }
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                     gemini_headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+                    attempt_timeout = remaining_timeout()
+                    if attempt_timeout is None:
+                        break
                     try:
-                        resp = HTTP_SESSION.post(url, json=payload, headers=gemini_headers, timeout=timeout)
+                        resp = _AI_HTTP_SESSION.post(url, json=payload, headers=gemini_headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
                             resp_json = resp.json()
                             usage = resp_json.get("usageMetadata", {})
@@ -981,11 +1083,13 @@ def ai_gateway_call(
                             finish = (candidates[0].get("finishReason") if candidates else None)
                             t_img, t_text = _prompt_tokens_by_modality(usage)
                             log_ai_cost(active_conn, platform, radar_id, model, call_type, p_tokens, c_tokens,
-                                        thoughts_tokens, finish_reason=finish, tokens_img=t_img, tokens_text=t_text)
+                                        thoughts_tokens, finish_reason=finish, tokens_img=t_img, tokens_text=t_text,
+                                        deadline=deadline)
 
                             if finish == "MAX_TOKENS":
                                 # Respuesta truncada: no se parsea la parte parcial, se pasa al siguiente modelo
                                 print(f"[AI_GATEWAY] MAX_TOKENS {model} out={c_tokens} thoughts={thoughts_tokens}")
+                                _MODEL_BREAKER.record_failure(model)
                                 continue
 
                             if candidates:
@@ -997,18 +1101,26 @@ def ai_gateway_call(
                                             used_model = model
                                             break
                             if parsed_result is not None:
+                                _MODEL_BREAKER.record_success(model)
                                 break
                         elif resp.status_code == 404:
                             continue
                         else:
+                            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                                retry_after = resp.headers.get("Retry-After") if resp.status_code == 429 else None
+                                _MODEL_BREAKER.record_failure(model, retry_after=retry_after)
                             print(f"[WARN AI_GATEWAY] HTTP {resp.status_code} en {model}: {_redact(resp.text[:120])}")
                     except Exception as e:
+                        if isinstance(e, (TimeoutError, std_requests.Timeout, requests.exceptions.Timeout)):
+                            _MODEL_BREAKER.record_failure(model)
                         print(f"[WARN AI_GATEWAY] Excepción Gemini ({model}): {_redact(e)}")
                         continue
 
             # 7. Intento con OpenRouter Fallback
             if parsed_result is None and OPENROUTER_API_KEY:
                 for fallback_model in openrouter_models:
+                    if not _MODEL_BREAKER.allow(fallback_model):
+                        continue
                     user_content = [{"type": "text", "text": prompt}]
                     if images_b64:
                         for b64_img in images_b64:
@@ -1029,34 +1141,59 @@ def ai_gateway_call(
                         "HTTP-Referer": "https://homelab.local",
                         "X-Title": "Boti Sniper Gateway"
                     }
+                    attempt_timeout = remaining_timeout()
+                    if attempt_timeout is None:
+                        break
                     try:
-                        resp = HTTP_SESSION.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=timeout)
+                        resp = _AI_HTTP_SESSION.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
                             resp_json = resp.json()
+                            if "error" in resp_json:
+                                error = resp_json["error"]
+                                message = error.get("message", "") if isinstance(error, dict) else str(error)
+                                print(f"[WARN AI_GATEWAY] OpenRouter error ({fallback_model}): {_redact(str(message)[:200])}")
+                                _MODEL_BREAKER.record_failure(fallback_model, retry_after=resp.headers.get("Retry-After"))
+                                continue
                             usage = resp_json.get("usage", {})
                             p_tokens = usage.get("prompt_tokens", 0)
                             c_tokens = usage.get("completion_tokens", 0)
-                            log_ai_cost(active_conn, platform, radar_id, fallback_model, call_type, p_tokens, c_tokens)
+                            log_ai_cost(active_conn, platform, radar_id, fallback_model, call_type, p_tokens, c_tokens,
+                                        deadline=deadline)
 
+                            finish = resp_json["choices"][0].get("finish_reason")
+                            if finish in ("length", "MAX_TOKENS"):
+                                print(f"[AI_GATEWAY] MAX_TOKENS {fallback_model} out={c_tokens}")
+                                _MODEL_BREAKER.record_failure(fallback_model)
+                                continue
                             raw_text = resp_json["choices"][0]["message"].get("content", "")
                             raw_parsed = repair_and_parse_json(raw_text, schema_defaults=None)
                             if raw_parsed is not None:
                                 parsed_result = repair_and_parse_json(raw_text, schema_defaults=schema_defaults)
                                 used_model = fallback_model
+                                _MODEL_BREAKER.record_success(fallback_model)
                                 break
+                        else:
+                            if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                                retry_after = resp.headers.get("Retry-After") if resp.status_code == 429 else None
+                                _MODEL_BREAKER.record_failure(fallback_model, retry_after=retry_after)
+                            print(f"[WARN AI_GATEWAY] HTTP {resp.status_code} en {fallback_model}: {_redact(resp.text[:120])}")
                     except Exception as e:
+                        if isinstance(e, (TimeoutError, std_requests.Timeout, requests.exceptions.Timeout)):
+                            _MODEL_BREAKER.record_failure(fallback_model)
                         print(f"[WARN AI_GATEWAY] Excepción OpenRouter ({fallback_model}): {_redact(e)}")
                         continue
 
             # 8. Si obtuvimos resultado válido de una API real, guardar en ai_prompt_cache
             if parsed_result is not None and used_model is not None and active_conn:
                 try:
+                    _limit_ai_db_wait(active_conn, deadline)
                     c = active_conn.cursor()
                     c.execute(
                         """INSERT OR REPLACE INTO ai_prompt_cache (prompt_hash, result_json, model, call_type, created_at)
                            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
                         (prompt_hash, json.dumps(parsed_result, ensure_ascii=False), used_model, call_type)
                     )
+                    _limit_ai_db_wait(active_conn, deadline)
                     active_conn.commit()
                 except Exception:
                     pass
@@ -1068,6 +1205,8 @@ def ai_gateway_call(
         finally:
             _AI_GATEWAY_SEMAPHORE.release()
     finally:
+        if active_conn is not None and original_busy_timeout is not None:
+            active_conn.execute(f"PRAGMA busy_timeout={original_busy_timeout}")
         if close_conn_after and active_conn:
             try:
                 active_conn.close()
@@ -3917,7 +4056,8 @@ def prescreen_item_text(platform, title, description, price, landed_cost, target
             platform=platform,
             radar_id=radar_id,
             call_type="prescreen",
-            timeout=12,
+            timeout=6,
+            deadline_s=10,
             enforce_budget=True,
             schema_defaults=None
         )
@@ -4430,7 +4570,8 @@ def analyze_and_generate_kit(
             platform=platform,
             radar_id=radar_id,
             call_type=call_type,
-            timeout=15,
+            timeout=12,
+            deadline_s=20,
             enforce_budget=True,
             schema_defaults=None
         )

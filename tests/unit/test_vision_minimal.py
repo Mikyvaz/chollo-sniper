@@ -77,7 +77,7 @@ class TestTokensByModality(unittest.TestCase):
         r.text = json.dumps(payload)
         with mock.patch.object(ce, "GEMINI_API_KEY", "test-key"), \
                 mock.patch.object(ce, "OPENROUTER_API_KEY", ""), \
-                mock.patch("core_engine.HTTP_SESSION.post", return_value=r), \
+                mock.patch("core_engine._AI_HTTP_SESSION.post", return_value=r), \
                 redirect_stdout(io.StringIO()):
             ce.ai_gateway_call(prompt="p t113", images_b64=["AAAA"],
                                candidate_models=["gemini-3.5-flash-lite"], openrouter_models=[],

@@ -149,7 +149,7 @@ def test_punto6_complete():
     }
 
     t = {"id": "switch_test", "name": "Switch Lite", "max_price": 90}
-    with mock.patch("core_engine.HTTP_SESSION.post", return_value=broken_gemini_resp):
+    with mock.patch("core_engine._AI_HTTP_SESSION.post", return_value=broken_gemini_resp):
         dec, reason, conf, from_cache = ce.prescreen_item_text(
             "WALLAPOP", "Nintendo Switch Lite", "Caja y cargador", 65.0, 70.0, t, conn=mem_conn
         )

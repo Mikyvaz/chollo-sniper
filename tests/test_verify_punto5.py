@@ -85,7 +85,7 @@ def test_punto5_complete():
         }]
     }
 
-    with mock.patch("core_engine.HTTP_SESSION.post", return_value=mock_resp) as mock_post:
+    with mock.patch("core_engine._AI_HTTP_SESSION.post", return_value=mock_resp) as mock_post:
         res1 = ce.ai_gateway_call(
             prompt=test_prompt,
             conn=mem_conn,
@@ -96,7 +96,7 @@ def test_punto5_complete():
         assert mock_post.call_count == 1, "La primera llamada debió consultar la API remota"
 
     # Segunda llamada: DEBE responder desde ai_prompt_cache con 0 peticiones de red
-    with mock.patch("core_engine.HTTP_SESSION.post") as mock_post_blocked:
+    with mock.patch("core_engine._AI_HTTP_SESSION.post") as mock_post_blocked:
         mock_post_blocked.side_effect = AssertionError("¡No debe hacer llamadas de red en cache hit!")
         res2 = ce.ai_gateway_call(
             prompt=test_prompt,
@@ -124,7 +124,7 @@ def test_punto5_complete():
         }]
     }
 
-    with mock.patch("core_engine.HTTP_SESSION.post", return_value=mock_prescreen_resp) as mock_post:
+    with mock.patch("core_engine._AI_HTTP_SESSION.post", return_value=mock_prescreen_resp) as mock_post:
         dec1, reason1, conf1, from_cache1 = ce.prescreen_item_text(
             "WALLAPOP", ad_title, ad_desc, ad_price, ad_landed, t, conn=mem_conn
         )
@@ -141,7 +141,7 @@ def test_punto5_complete():
     assert row[0] == "proceed"
 
     # Segunda llamada: Debe devolver from_cache=True directamente desde BD
-    with mock.patch("core_engine.HTTP_SESSION.post") as mock_post_blocked:
+    with mock.patch("core_engine._AI_HTTP_SESSION.post") as mock_post_blocked:
         mock_post_blocked.side_effect = AssertionError("No debe haber llamadas HTTP en cache hit")
         dec2, reason2, conf2, from_cache2 = ce.prescreen_item_text(
             "WALLAPOP", ad_title, ad_desc, ad_price, ad_landed, t, conn=mem_conn

@@ -31,6 +31,9 @@ def _resp(payload, status=200):
 
 class TestAiGateway(unittest.TestCase):
     def setUp(self):
+        breaker = mock.patch.object(ce, "_MODEL_BREAKER", ce.ModelBreaker())
+        breaker.start()
+        self.addCleanup(breaker.stop)
         self.conn = sqlite3.connect(":memory:")
         ce.init_db(self.conn)
         self.calls = []
@@ -48,7 +51,7 @@ class TestAiGateway(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(ce, "GEMINI_API_KEY", "test-key"), \
                 mock.patch.object(ce, "OPENROUTER_API_KEY", ""), \
-                mock.patch("core_engine.HTTP_SESSION.post", side_effect=fake_post), \
+                mock.patch("core_engine._AI_HTTP_SESSION.post", side_effect=fake_post), \
                 redirect_stdout(buf):
             res = ce.ai_gateway_call(
                 prompt=f"prompt de prueba {self._n} {call_type}", candidate_models=models,

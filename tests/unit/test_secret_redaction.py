@@ -37,7 +37,7 @@ class TestSecretRedaction(unittest.TestCase):
         resp.text = json.dumps(GOOD)
         with mock.patch.object(ce, "GEMINI_API_KEY", "SECRETKEY"), \
                 mock.patch.object(ce, "OPENROUTER_API_KEY", ""), \
-                mock.patch("core_engine.HTTP_SESSION.post", return_value=resp) as post, \
+                mock.patch("core_engine._AI_HTTP_SESSION.post", return_value=resp) as post, \
                 redirect_stdout(io.StringIO()):
             ce.ai_gateway_call(prompt="p t17", candidate_models=["gemini-3.5-flash-lite"],
                                openrouter_models=[], max_tokens=200, conn=conn, platform="WALLAPOP",
@@ -55,7 +55,7 @@ class TestSecretRedaction(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(ce, "GEMINI_API_KEY", "SECRETKEY"), \
                 mock.patch.object(ce, "OPENROUTER_API_KEY", ""), \
-                mock.patch("core_engine.HTTP_SESSION.post", side_effect=err), \
+                mock.patch("core_engine._AI_HTTP_SESSION.post", side_effect=err), \
                 redirect_stdout(buf):
             ce.ai_gateway_call(prompt="p t17b", candidate_models=["gemini-3.5-flash-lite"],
                                openrouter_models=[], max_tokens=200, conn=conn, platform="WALLAPOP",
