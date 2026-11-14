@@ -35,7 +35,7 @@ from core_engine import (
     record_fraud_sample,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, is_ai_budget_paused,
-    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin
+    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, estimate_cex_from_title
 )
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "8"))
@@ -562,6 +562,8 @@ def main():
                     item["platform"] = "WALLAPOP"
                     t["enrich"] = time.perf_counter()
                     enrich_seller_profile(item, http_session=None, conn=conn, health_monitor=health_monitor)
+                    item["landed_cost"] = landed_cost
+                    item["_pre_cex"] = estimate_cex_from_title(conn, title, desc, target)
                     seller = item.get("seller")
                     current_seller_id = ""
                     if isinstance(seller, dict):
@@ -572,7 +574,7 @@ def main():
                     fraud_eval = evaluate_fraud_risk(
                         title, desc, price, radar_id=target.get("id", ""),
                         conn=conn, platform="WALLAPOP", item_id=item_id,
-                        seller=seller
+                        seller=seller, cex_cash=item["_pre_cex"].get("cash", 0)
                     )
 
                     if fraud_eval.get("is_fraud") or fraud_eval.get("should_block") or fraud_eval.get("risk", 0) >= 4:
@@ -717,7 +719,7 @@ def main():
                         t["vision"] = time.perf_counter()
                         ai_data = analyze_and_generate_kit(
                             "WALLAPOP", title, desc, price, landed_cost, is_foreign, target=target,
-                            conn=conn, health_monitor=health_monitor, raw_images=raw_photos, call_type="vision"
+                            conn=conn, health_monitor=health_monitor, raw_images=raw_photos, call_type="vision", pre_cex=item["_pre_cex"]
                         )
 
                         # Reintento con 3 fotos si la IA aprueba pero duda visualmente y hay más fotos disponibles
@@ -727,7 +729,7 @@ def main():
                             if len(more_photos) > 1:
                                 ai_data_retry = analyze_and_generate_kit(
                                     "WALLAPOP", title, desc, price, landed_cost, is_foreign, target=target,
-                                    conn=conn, health_monitor=health_monitor, raw_images=more_photos, call_type="vision_retry"
+                                    conn=conn, health_monitor=health_monitor, raw_images=more_photos, call_type="vision_retry", pre_cex=item["_pre_cex"]
                                 )
                                 if ai_data_retry:
                                     ai_data = ai_data_retry

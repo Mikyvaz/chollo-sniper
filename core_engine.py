@@ -4181,6 +4181,85 @@ def resolve_min_profit(target, config=None, default=35.0):
     return float(default)
 
 
+_pre_cex_vocab_cache = {}
+_pre_cex_vocab_lock = threading.Lock()
+_PRE_CEX_NOISE = set("de la el los las un una con sin y en para por como nueva nuevo nuevas nuevos "
+                     "perfecto perfecta estado vendo venta urge urgente envio consola console precintado "
+                     "precintada juegos juego mando mandos pack lote bundle completa completo "
+                     "funciona funcionando buen muy solo mas incluye regalo euros euro "
+                     "avec manette manettes dualsense accesorios disco disque version lector "
+                     "ssd lcd a vendre generacion génération generation th ª º".split())
+
+
+def _cex_model_tokens(text):
+    text = _normalize_cex_text(text or "")
+    text = re.sub(r"\b(\d+)\s*(gb|go|tb|to)\b", lambda m: m[1] + ("tb" if m[2] in ("tb", "to") else "gb"), text)
+    text = re.sub(r"\b(\d+)\s*(?:mandos?|manettes?|juegos?|jeux|games?|controllers?)\b", " ", text)
+    text = re.sub(r"\bsony\b(?=.*\b(?:playstation|ps\s*5|ps\s*4)\b)", " ", text)
+    text = re.sub(r"\b(\d+)(?:th|st|nd|rd|ª|º)\b", r"\1", text)
+    for pattern, replacement in ((r"\bps\s*5\b", "playstation 5"), (r"\bps\s*4\b", "playstation 4"),
+                                 (r"\bpsvita\b", "ps vita"), (r"\bswitch\b", "nintendo switch"),
+                                 (r"\bdeck\b", "steam deck")):
+        text = re.sub(pattern, replacement, text)
+    return list(dict.fromkeys(t for t in re.findall(r"\w+", text) if t not in _PRE_CEX_NOISE))
+
+
+def cex_product_family(text):
+    """Familia de hardware explícita; también se usa al medir el replay, sin inferirla del radar."""
+    text = " ".join(_cex_model_tokens(text))
+    patterns = ((r"playstation 5", "ps5"), (r"playstation 4", "ps4"), (r"ps vita", "ps_vita"),
+                (r"nintendo switch", "switch"), (r"3ds", "3ds"), (r"2ds", "2ds"),
+                (r"steam deck", "steam_deck"), (r"rog ally", "rog_ally"), (r"legion go", "legion_go"),
+                (r"xbox series", "xbox_series"), (r"xbox one", "xbox_one"), (r"ipad", "ipad"),
+                (r"iphone", "iphone"), (r"mac\s*mini", "mac_mini"), (r"macbook", "macbook"),
+                (r"rtx\s*\d+", "rtx"), (r"rx\s*\d+", "radeon"), (r"g29|g920|g923|t300", "simracing"))
+    families = {family for pattern, family in patterns if re.search(r"\b(?:" + pattern + r")\b", text)}
+    return next(iter(families)) if len(families) == 1 else ""
+
+
+def estimate_cex_from_title(conn, title, desc, target):
+    """Referencia determinista del espejo fresco. Nunca consulta Algolia ni proveedores de IA."""
+    low = {"confidence": "baja", "cash": 0.0, "sell": 0.0, "box_name": ""}
+    if conn is None:
+        return low
+    try:
+        key = _cost_cache_key(conn)
+        now = time.monotonic()
+        with _pre_cex_vocab_lock:
+            hit = _pre_cex_vocab_cache.get(key) if isinstance(key, str) else None
+        if hit and now - hit[0] < 43200:
+            vocabulary = hit[1]
+        else:
+            rows = conn.execute("SELECT box_name FROM cex_catalog_mirror "
+                                "WHERE last_synced >= datetime('now', '-36 hours')").fetchall()
+            vocabulary = frozenset(t for row in rows for t in _cex_model_tokens(row[0]))
+            if isinstance(key, str):
+                with _pre_cex_vocab_lock:
+                    _pre_cex_vocab_cache[key] = (now, vocabulary)
+        tokens = [t for t in _cex_model_tokens(title) if t in vocabulary]
+        if len(tokens) < 2:
+            return low
+        query = " ".join(tokens)
+        candidates = lookup_cex_catalog_mirror(conn, query, target=target,
+                                               title_context=title, desc_context=desc,
+                                               return_all_variants=True) or []
+        # El fallback SQL de T1.3 puede omitir tokens cortos: confirmar también números y variantes.
+        candidates = [b for b in candidates if set(tokens).issubset(_cex_model_tokens(b["box_name"]))]
+        families = {cex_product_family(b["box_name"]) for b in candidates}
+        if len(families) != 1 or "" in families:
+            return low
+        best = _score_cex_candidate(candidates, clean_q=query, radar_id=(target or {}).get("id", ""),
+                                    full_ctx=f"{title} {desc}")
+        if not best:
+            return low
+        return dict(best, confidence="alta" if len(candidates) == 1 else "media", query=query,
+                    family=next(iter(families)), max_cash=max(b["cash"] for b in candidates),
+                    max_sell=max(b["sell"] for b in candidates))
+    except Exception as exc:
+        print(f"[PRE-CEX] Referencia no disponible: {_redact(exc)}")
+        return low
+
+
 def pre_gate_cex_offer_margin(conn, item, target, config=None):
     """
     Pre-Gating Matemático CeX (TASK-03) antes de Puerta 1 / Puerta 2.
@@ -4199,9 +4278,8 @@ def pre_gate_cex_offer_margin(conn, item, target, config=None):
         price = 0.0
     direct_max = float(target.get("direct_buy_max_price") or target.get("max_price") or 0.0)
 
-    # 1. Si está en zona de compra directa (<= direct_buy_max_price), proceder siempre
-    if price <= direct_max or price <= 0.0:
-        return True, "direct_zone"
+    if price <= 0.0 or target.get("mode") == "personal":
+        return True, "personal_or_no_price"
 
     title = str(item.get("title") or "")
     desc = str(item.get("description") or item.get("desc") or "")
@@ -4217,7 +4295,24 @@ def pre_gate_cex_offer_margin(conn, item, target, config=None):
         return True, "no_db_conn"
 
     try:
+        ref = item.get("_pre_cex") or estimate_cex_from_title(conn, title, desc, target)
+        if price <= direct_max:
+            if ref.get("confidence") not in ("media", "alta"):
+                return True, "pre_cex_low_confidence"
+            # El coste ya incluye país, seguro y envío reales calculados por cada escáner.
+            if item.get("landed_cost") is None:
+                return True, "landed_cost_unknown"
+            landed = float(item["landed_cost"])
+            cash = float(ref.get("max_cash", ref.get("cash", 0)))
+            sell = float(ref.get("max_sell", ref.get("sell", 0)))
+            minimum = resolve_min_profit(target, config=config)
+            if cash - landed < -20 and sell * .70 - landed < minimum * .5:
+                return False, "pre_gate_direct_margin_impossible"
+            return True, "direct_margin_viable"
         mirror_match = lookup_cex_catalog_mirror(conn, title, target=target)
+        if ref.get("confidence") in ("media", "alta"):
+            mirror_match = dict(ref, cash=ref.get("max_cash", ref["cash"]),
+                                sell=ref.get("max_sell", ref["sell"]))
         if not mirror_match:
             return True, "no_mirror_match"
 
@@ -4467,7 +4562,7 @@ def select_multimodal_model(item_or_price=None, target_or_title=None, desc="", t
 
 def analyze_and_generate_kit(
     platform, title, description, price, landed_cost, is_foreign, target,
-    conn=None, health_monitor=None, extra_meta="", raw_images=None, call_type="vision"
+    conn=None, health_monitor=None, extra_meta="", raw_images=None, call_type="vision", pre_cex=None
 ):
     if not GEMINI_API_KEY and not OPENROUTER_API_KEY:
         print("[ERROR] Falta GEMINI_API_KEY u OPENROUTER_API_KEY.")
@@ -4490,8 +4585,14 @@ def analyze_and_generate_kit(
     if raw_images and len(raw_images) > 0 and raw_images[0]:
         img_sig = hashlib.sha256(raw_images[0][:4096]).hexdigest()[:16]
 
-    # v46: prompt de salida mínima (T1.13); v45 invalidó el prompt que anclaba la reventa a la mediana de compra (A-003)
-    cache_key = build_robust_cache_key(radar_id, clean_title_str, clean_desc, price, img_sig=img_sig, prefix="v46")
+    pre_cex = pre_cex if pre_cex is not None else estimate_cex_from_title(conn, title, description, target)
+    cex_reference = ""
+    cache_prefix = "v46"
+    if pre_cex.get("confidence") in ("media", "alta"):
+        cex_reference = (f"Referencia CeX: efectivo {pre_cex['cash']:.0f} €, PVP {pre_cex['sell']:.0f} € "
+                         f"(ficha {pre_cex['box_name']}). Referencia por título; confirma el modelo en fotos.\n")
+        cache_prefix = "v47:" + hashlib.sha256(cex_reference.encode()).hexdigest()[:16]
+    cache_key = build_robust_cache_key(radar_id, clean_title_str, clean_desc, price, img_sig=img_sig, prefix=cache_prefix)
 
     if conn:
         try:
@@ -4558,6 +4659,7 @@ def analyze_and_generate_kit(
             f"Radar: {target_name} | Ítem: {clean_title_str} | {price:.0f}€ (Casa: {landed_cost:.0f}€){meta_suffix}\n"
             f"Desc: {clean_desc or 'Sin descripción'} | Fotos: {num_imgs}\n"
             f"Guía: {valuation_rules}\n\n"
+            f"{cex_reference}"
             f"REGLAS INSPECCIÓN:\n"
             f"1. FOTOS: Si solo hay juego/funda/caja vacía o consola incompleta (ej: Switch sin Joy-Cons) -> is_valid_deal=false, has_defect_or_missing_parts=true.\n"
             f"2. DEFECTOS/ESTAFAS: Pago externo (bizum, virement, wasap), iCloud, drift, avería -> is_valid_deal=false.\n"

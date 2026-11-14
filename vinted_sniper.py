@@ -36,7 +36,7 @@ from core_engine import (
     record_fraud_sample,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, is_ai_budget_paused,
-    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin,
+    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, estimate_cex_from_title,
     parse_relative_age_minutes
 )
 
@@ -816,12 +816,14 @@ def main():
                     item["platform"] = "VINTED"
                     t["enrich"] = time.perf_counter()
                     enrich_seller_profile(item, http_session=vinted.session if 'vinted' in locals() else None)
+                    item["landed_cost"] = landed_cost
+                    item["_pre_cex"] = estimate_cex_from_title(conn, title, desc, target)
 
                     # EVALUACIÓN DE FRAUDE DETERMINISTA EN CAPAS (P2)
                     fraud_eval = evaluate_fraud_risk(
                         title, desc, base_price, radar_id=target.get("id", ""),
                         conn=conn, platform="VINTED", item_id=item_id,
-                        seller=item.get("seller")
+                        seller=item.get("seller"), cex_cash=item["_pre_cex"].get("cash", 0)
                     )
 
                     if fraud_eval.get("is_fraud") or fraud_eval.get("should_block") or fraud_eval.get("risk", 0) >= 4:
@@ -968,7 +970,7 @@ def main():
                             "VINTED", title, desc, base_price, landed_cost, False, target=target,
                             conn=conn, health_monitor=health_monitor,
                             extra_meta=f"(Marca: {brand} | Estado: {status_cond})",
-                            raw_images=raw_photos, call_type="vision"
+                            raw_images=raw_photos, call_type="vision", pre_cex=item["_pre_cex"]
                         )
 
                         # Reintento con 3 fotos si la IA aprueba pero duda visualmente y hay más fotos disponibles
@@ -980,7 +982,7 @@ def main():
                                     "VINTED", title, desc, base_price, landed_cost, False, target=target,
                                     conn=conn, health_monitor=health_monitor,
                                     extra_meta=f"(Marca: {brand} | Estado: {status_cond})",
-                                    raw_images=more_photos, call_type="vision_retry"
+                                    raw_images=more_photos, call_type="vision_retry", pre_cex=item["_pre_cex"]
                                 )
                                 if ai_data_retry:
                                     ai_data = ai_data_retry

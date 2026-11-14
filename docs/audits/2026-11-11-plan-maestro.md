@@ -143,7 +143,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.8 | [x] | Argon 4 | Embeds de salud asíncronos + locks | Encolado <5 ms; envío fuera del bucle | S | T1.5 |
 | T2.9 | [x] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
 | T3.1 | [x] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
-| T3.2 | [ ] | Argon 4 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
+| T3.2 | [ ] | Argon 4 | Pre-CeX implementado y probado; revisión independiente pendiente | Replay 372/517 familias (71,95 %) | M | T1.3 |
 | T3.3 | [ ] | Argon 4 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
 | T3.4 | [x] | Gemini 3.8 Max | Vinted: envío según país | Margen real | S | — |
 | T3.5 | [x] | Gemini 3.8 Max | Re-chequeo de reservados | Recupera oportunidades | S | — |
@@ -944,6 +944,8 @@ Tras el despliegue, ninguna línea `DEDUP SEMÁNTICA RECHAZO` entre vendedores d
 - Tests de normalización y alias.
 - Test: una PS5 a 90 € de un vendedor con 0 valoraciones genera `ANOMALOUS_BELOW_CEX_CASH_NEW_SELLER` antes de la IA.
 - KPI: los rechazos visuales por «precio irreal» en Vinted bajan un 50 % o más.
+
+Implementación 2026-11-14: referencia solo del espejo fresco (36 h), vocabulario por BD en RAM 12 h con lock; alias y cantidades de extras normalizados. Integrado tras enriquecimiento y antes del antifraude en los tres escáneres; pre-gate directo usa el coste puesto en casa real y ambas condiciones, conservando lotes y compra personal. Prompt con referencia y clave de caché dependiente de ella. 6 tests específicos, suite 251/251 y compilación OK. `tools/replay_pre_cex.py`: 372/517 = 71,95 % sobre **todos** los deals con CeX, sin excluir los que no producen estimación; 372/372 coinciden entre los cubiertos. Falta revisión independiente (cuota agotada) y KPI posterior al despliegue. Sin desplegar.
 
 ### T3.3 — Valoración P2P anclada y con confianza
 
