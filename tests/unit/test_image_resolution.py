@@ -20,6 +20,35 @@ def _make_jpeg_bytes(width=1200, height=900):
 
 
 class TestImageResolution(unittest.TestCase):
+    def test_ab_live_sends_key_as_header_and_accounts_for_paid_call(self):
+        from tools import ab_image_resolution as ab
+        response = mock.Mock()
+        response.json.return_value = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"text": '{"is_valid_deal": true}'}]}}],
+            "usageMetadata": {"promptTokenCount": 200, "candidatesTokenCount": 10,
+                              "promptTokensDetails": [{"modality": "IMAGE", "tokenCount": 150}]}}
+        db = mock.Mock()
+        with mock.patch.object(ce, "get_db", return_value=db), \
+                mock.patch.object(ce, "_assert_ai_budget_available") as budget, \
+                mock.patch.object(ce, "log_ai_cost") as accounting, \
+                mock.patch.object(ce._AI_HTTP_SESSION, "post", return_value=response) as post:
+            result = ab._default_gemini_vision_call("prompt", "AAAA", "gemini-test-lite", "fake-key")
+        self.assertNotIn("key=", post.call_args.args[0])
+        self.assertEqual(post.call_args.kwargs["headers"]["x-goog-api-key"], "fake-key")
+        budget.assert_called_once_with(db)
+        self.assertEqual(accounting.call_args.kwargs["tokens_img"], 150)
+        self.assertEqual(result["tokens_img"], 150)
+        db.close.assert_called_once_with()
+
+    def test_ab_live_obeys_monthly_budget_before_http(self):
+        from tools import ab_image_resolution as ab
+        with mock.patch.object(ce, "get_db", return_value=mock.Mock()), \
+                mock.patch.object(ce, "_assert_ai_budget_available", side_effect=ce.BudgetExceededError("mes agotado")), \
+                mock.patch.object(ce._AI_HTTP_SESSION, "post") as post, \
+                self.assertRaises(ce.BudgetExceededError):
+            ab._default_gemini_vision_call("prompt", "AAAA", "gemini-test-lite", "fake-key")
+        post.assert_not_called()
+
     def test_resolve_image_max_dim_reads_config_and_handles_degraded(self):
         self.assertEqual(ce.resolve_image_max_dim({"ai": {"image_max_dim": 768}}, is_lite=True, budget_status="OK"), 768)
         self.assertEqual(ce.resolve_image_max_dim({"ai": {"image_max_dim": 384}}, is_lite=True, budget_status="OK"), 384)

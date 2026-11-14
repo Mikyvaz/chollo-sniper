@@ -1093,6 +1093,8 @@ Implementación 2026-11-14: 8 tests específicos y suite 259/259 OK; compilació
 - Informe del A/B con los tokens por imagen y la concordancia de veredictos.
 - Test unitario: `target_img_dim` se lee de la configuración.
 
+Soporte revisado 2026-11-14: clave Gemini en cabecera, transporte con timeout total y contabilidad/presupuesto mensual compartidos también para A/B. Tests de imagen 6/6 y suite conjunta 263/263 OK; simulación selecciona 20 fotos sin red. Se conserva `image_max_dim=384`. A/B real **pendiente de aprobación** y actualmente sin presupuesto mensual disponible (tope acordado 0,10 USD). Falta revisión independiente de esta corrección; no se ha medido ratio ni concordancia con servicios reales.
+
 ### T3.11 — Coherencia de umbrales y documentación
 
 **Archivos:** `core_engine.py` (`pre_gate_cex_offer_margin` L3562, `passes_filters` L1844-1846, `select_multimodal_model` L3761-3772) y `AGENTS.md`.

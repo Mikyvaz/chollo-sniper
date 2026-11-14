@@ -48,8 +48,8 @@ def _parse_verdict_json(raw_text: str) -> bool:
 
 
 def _default_gemini_vision_call(prompt: str, img_b64: str, model: str, api_key: str) -> dict:
-    """Llamada directa a Gemini REST v1beta sin thinkingConfig (Invariante 1)."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    """REST v1beta con el presupuesto del proyecto y registro de cada llamada facturada."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "contents": [{
             "parts": [
@@ -59,15 +59,28 @@ def _default_gemini_vision_call(prompt: str, img_b64: str, model: str, api_key: 
         }],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 200},
     }
-    resp = ce.HTTP_SESSION.post(url, json=payload, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    usage = data.get("usageMetadata") or {}
-    tokens_img, _tokens_text = ce._prompt_tokens_by_modality(usage)
-    candidates = data.get("candidates") or []
-    parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
-    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
-    return {"tokens_img": int(tokens_img or 0), "is_valid_deal": _parse_verdict_json(text)}
+    conn = ce.get_db()
+    try:
+        ce._assert_ai_budget_available(conn)
+        resp = ce._AI_HTTP_SESSION.post(url, json=payload, timeout=20,
+                                       headers={"x-goog-api-key": api_key, "Content-Type": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+        usage = data.get("usageMetadata") or {}
+        tokens_img, tokens_text = ce._prompt_tokens_by_modality(usage)
+        candidates = data.get("candidates") or []
+        finish = candidates[0].get("finishReason") if candidates else None
+        ce.log_ai_cost(conn, "IMAGE_AB", "image_resolution", model, "image_ab",
+                       usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0),
+                       usage.get("thoughtsTokenCount", 0), finish_reason=finish,
+                       tokens_img=tokens_img, tokens_text=tokens_text)
+        if finish == "MAX_TOKENS" or not candidates:
+            raise RuntimeError("A/B incompleto: respuesta sin candidato o truncada; coste contabilizado.")
+        parts = ((candidates[0].get("content") or {}).get("parts") or [])
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and not p.get("thought"))
+        return {"tokens_img": int(tokens_img or 0), "is_valid_deal": _parse_verdict_json(text)}
+    finally:
+        conn.close()
 
 
 def evaluate_ab_results(records: list[dict]) -> dict:
