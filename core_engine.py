@@ -23,7 +23,8 @@ import sqlite3
 import urllib.parse
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from email.utils import parsedate_to_datetime
 import requests as std_requests
 from requests.adapters import HTTPAdapter
@@ -80,6 +81,7 @@ KITS_DIR = os.getenv("KITS_DIR", "/app/kits" if os.path.exists("/app") else "./k
 PIPELINE_VERSION = "2026.11.11-f1"
 
 AI_DAILY_BUDGET_USD = float(os.getenv("AI_DAILY_BUDGET_USD", "0.10"))
+AI_MONTHLY_BUDGET_USD = float(os.getenv("AI_MONTHLY_BUDGET_USD", "0.10"))
 AI_PRESCREEN_SHADOW_MODE = os.getenv("AI_PRESCREEN_SHADOW_MODE", "false").strip().lower() in ("true", "1", "yes")
 
 _budget_notified_80 = False
@@ -696,9 +698,13 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
                 if key in _today_cost_cache:
                     ts, total = _today_cost_cache[key]
                     _today_cost_cache[key] = (ts, total + float(usd or 0.0))
+                for month_key in [k for k in _month_cost_cache if k[0] == key]:
+                    del _month_cost_cache[month_key]
         except Exception:
             pass
     except Exception as e:
+        with _today_cost_lock:
+            _ai_accounting_failed.add(_cost_cache_key(conn))
         print(f"[WARN] Error registrando coste IA: {_redact(e)}; "
               f"no persistido model={_redact(model)} tokens_in={tokens_in} "
               f"tokens_out={tokens_out} thoughts={thoughts_tokens}")
@@ -710,6 +716,8 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
 _TODAY_COST_TTL_S = 60.0
 _today_cost_cache = {}  # clave de BD -> (monotonic, gasto del día local)
 _today_cost_lock = threading.Lock()
+_month_cost_cache = {}
+_ai_accounting_failed = set()  # detener gasto si una llamada facturada no pudo contabilizarse
 
 
 def _cost_cache_key(conn):
@@ -744,6 +752,52 @@ def get_today_ai_cost(conn):
     with _today_cost_lock:
         _today_cost_cache[key] = (now, total)
     return total
+
+
+def _ai_budget_now():
+    return datetime.now(ZoneInfo("Europe/Madrid"))
+
+
+def get_month_ai_cost(conn, refresh=False):
+    """Mes civil de Madrid; refresh evita cachés obsoletas de otros procesos antes de pagar."""
+    if conn is None:
+        return 0.0
+    local_now = _ai_budget_now().astimezone(ZoneInfo("Europe/Madrid"))
+    start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = (start.replace(year=start.year + 1, month=1) if start.month == 12 else
+           start.replace(month=start.month + 1))
+    db_key = _cost_cache_key(conn)
+    cache_key = (db_key, start.strftime("%Y-%m"))
+    now = time.monotonic()
+    with _today_cost_lock:
+        if db_key in _ai_accounting_failed:
+            return math.inf
+        hit = _month_cost_cache.get(cache_key)
+        if not refresh and isinstance(db_key, str) and hit and now - hit[0] < 60:
+            return hit[1]
+    try:
+        bounds = tuple(d.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") for d in (start, end))
+        total = float(conn.execute("SELECT COALESCE(SUM(usd), 0) FROM ai_cost_log "
+                                   "WHERE created_at >= ? AND created_at < ?", bounds).fetchone()[0])
+    except Exception as exc:
+        print(f"[BUDGET] No se puede consultar el gasto mensual: {_redact(exc)}. IA pausada.")
+        return math.inf
+    with _today_cost_lock:
+        # Solo conservar un mes por BD; no arrastrar una caché de noviembre a diciembre.
+        for old in [k for k in _month_cost_cache if k[0] == db_key]:
+            del _month_cost_cache[old]
+        _month_cost_cache[cache_key] = (now, total)
+    return total
+
+
+def _assert_ai_budget_available(conn):
+    if conn is None:
+        raise BudgetExceededError("IA pausada: no hay conexión para contabilizar el gasto.")
+    month_cost = get_month_ai_cost(conn, refresh=True)
+    if month_cost >= AI_MONTHLY_BUDGET_USD or not math.isfinite(AI_MONTHLY_BUDGET_USD):
+        raise BudgetExceededError(f"Presupuesto IA mensual alcanzado ({month_cost:.6f}$ / {AI_MONTHLY_BUDGET_USD:.2f}$).")
+    if get_today_ai_cost(conn) >= AI_DAILY_BUDGET_USD:
+        raise BudgetExceededError("Presupuesto IA diario alcanzado.")
 
 
 AI_MAX_CONCURRENCY = int(os.getenv("AI_MAX_CONCURRENCY", "3"))
@@ -929,7 +983,7 @@ def ai_gateway_call(
 ):
     """
     AI Gateway Centralizado con Cortafuegos de Presupuesto (CORRECION_FALLOS.md 3.1 & 2.4 & 3.2):
-    1. Hard Limit Diario: Valida el gasto diario acumulado contra AI_DAILY_BUDGET_USD (0.10$). Si se supera,
+    1. Límites mensual y diario: valida el gasto acumulado (0.10 USD/mes por defecto). Si se supera,
        lanza BudgetExceededError bloqueando cualquier llamada adicional de inmediato.
     2. Control de Concurrencia y Abort Timeout: Limita llamadas concurrentes a AI_MAX_CONCURRENCY con timeout estricto.
     3. Parámetro max_tokens estricto: Todo llamado fuerza un maxOutputTokens acotado (150-450) para evitar
@@ -993,16 +1047,9 @@ def ai_gateway_call(
                 pass
 
         # 2. Cortafuegos de Presupuesto Diario (Hard Limit)
-        if enforce_budget and active_conn:
+        if enforce_budget:
             _limit_ai_db_wait(active_conn, deadline)
-            today_cost = get_today_ai_cost(active_conn)
-            if today_cost >= AI_DAILY_BUDGET_USD:
-                err_msg = (
-                    f"🛑 CORTAFUEGOS IA ACTIVO: Gasto acumulado hoy ({today_cost:.4f}$) "
-                    f"ha alcanzado o superado el Hard Limit diario ({AI_DAILY_BUDGET_USD:.4f}$)."
-                )
-                print(f"[AI_GATEWAY] {err_msg}")
-                raise BudgetExceededError(err_msg)
+            _assert_ai_budget_available(active_conn)
 
         # 3. Control de Concurrencia y Abort Timeout (Punto 6)
         slot_acquired = _AI_GATEWAY_SEMAPHORE.acquire(
@@ -1014,8 +1061,8 @@ def ai_gateway_call(
         try:
             # El gasto puede haber cambiado mientras este hilo esperaba el semáforo.
             _limit_ai_db_wait(active_conn, deadline)
-            if enforce_budget and active_conn and get_today_ai_cost(active_conn) >= AI_DAILY_BUDGET_USD:
-                raise BudgetExceededError("Cortafuegos IA activo tras esperar el slot de concurrencia.")
+            if enforce_budget:
+                _assert_ai_budget_available(active_conn)
             # 4. Control de max_tokens duro
             max_tokens = int(max_tokens or 300)
             if max_tokens <= 0:
@@ -1071,6 +1118,8 @@ def ai_gateway_call(
                     attempt_timeout = remaining_timeout()
                     if attempt_timeout is None:
                         break
+                    if enforce_budget:
+                        _assert_ai_budget_available(active_conn)
                     try:
                         resp = _AI_HTTP_SESSION.post(url, json=payload, headers=gemini_headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
@@ -1144,6 +1193,8 @@ def ai_gateway_call(
                     attempt_timeout = remaining_timeout()
                     if attempt_timeout is None:
                         break
+                    if enforce_budget:
+                        _assert_ai_budget_available(active_conn)
                     try:
                         resp = _AI_HTTP_SESSION.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
@@ -1216,20 +1267,26 @@ def ai_gateway_call(
 
 def check_ai_budget_status(conn, health_monitor=None):
     global _budget_notified_80, _budget_notified_100, _budget_notified_120, _last_budget_check_day
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    cost_today = get_today_ai_cost(conn)
+    cost_month = get_month_ai_cost(conn)
+    day_ratio = cost_today / AI_DAILY_BUDGET_USD if AI_DAILY_BUDGET_USD > 0 else math.inf
+    month_ratio = cost_month / AI_MONTHLY_BUDGET_USD if AI_MONTHLY_BUDGET_USD > 0 else math.inf
+    if month_ratio >= day_ratio:
+        ratio, cost, limit, period = month_ratio, cost_month, AI_MONTHLY_BUDGET_USD, "mes"
+        today_str = "mes:" + _ai_budget_now().strftime("%Y-%m")
+    else:
+        ratio, cost, limit, period = day_ratio, cost_today, AI_DAILY_BUDGET_USD, "día"
+        today_str = "día:" + _ai_budget_now().strftime("%Y-%m-%d")
     if _last_budget_check_day != today_str:
         _last_budget_check_day = today_str
         _budget_notified_80 = False
         _budget_notified_100 = False
         _budget_notified_120 = False
 
-    cost_today = get_today_ai_cost(conn)
-    ratio = cost_today / max(0.01, AI_DAILY_BUDGET_USD)
-
     if ratio >= 1.0:
         if not _budget_notified_100:
             _budget_notified_100 = True
-            msg = f"🚨 **CORTAFUEGOS IA ACTIVO (100% Presupuesto)**: Gastado hoy {cost_today:.4f}$ / {AI_DAILY_BUDGET_USD:.4f}$. Visión pausada preventivamente."
+            msg = f"🚨 **CORTAFUEGOS IA ACTIVO (100% Presupuesto)**: Gastado este {period} {cost:.4f}$ / {limit:.4f}$. IA pausada preventivamente."
             print(f"[BUDGET ALERTA] {msg}")
             if health_monitor and hasattr(health_monitor, "send_health_embed"):
                 health_monitor.send_health_embed("🚨 Cortafuegos Presupuesto IA", msg, 0xE74C3C)
@@ -1237,7 +1294,7 @@ def check_ai_budget_status(conn, health_monitor=None):
     elif ratio >= 0.80:
         if not _budget_notified_80:
             _budget_notified_80 = True
-            msg = f"🟡 **PRESUPUESTO IA AL 80%**: Gastado hoy {cost_today:.4f}$ / {AI_DAILY_BUDGET_USD:.4f}$."
+            msg = f"🟡 **PRESUPUESTO IA AL 80%**: Gastado este {period} {cost:.4f}$ / {limit:.4f}$."
             print(f"[BUDGET AVISO] {msg}")
             if health_monitor and hasattr(health_monitor, "send_health_embed"):
                 health_monitor.send_health_embed("🟡 Aviso de Presupuesto IA", msg, 0xF1C40F)
@@ -1246,7 +1303,7 @@ def check_ai_budget_status(conn, health_monitor=None):
 
 
 def is_ai_budget_paused(conn):
-    """True mientras el cortafuegos diario de IA está activo. Los escáneres lo usan
+    """True mientras el cortafuegos mensual o diario está activo. Los escáneres lo usan
     para aplazar anuncios en vez de rechazarlos (A-001)."""
     try:
         status, _ = check_ai_budget_status(conn)
@@ -1268,8 +1325,8 @@ def _budget_pause_verdict(title):
         "identified_model": title,
         "cex_search_query": title,
         "bundled_games_queries": [],
-        "visual_notes": "⚠️ Presupuesto IA diario alcanzado. Pausado preventivamente.",
-        "reject_reason": "Presupuesto IA diario alcanzado (pausa preventiva)",
+        "visual_notes": "⚠️ Presupuesto IA mensual o diario alcanzado. Pausado preventivamente.",
+        "reject_reason": "Presupuesto IA alcanzado (pausa preventiva)",
         "estimated_resale_price": 0,
         "value_add_tip": "Presupuesto IA en pausa",
         "fast_buy_message": ""

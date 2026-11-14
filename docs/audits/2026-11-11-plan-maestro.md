@@ -515,21 +515,24 @@ Tras el despliegue: §8, KPI «visión flash con `MAX_TOKENS`».
 - `_redact("https://x/y?key=AIzaXYZ") == "https://x/y?key=***"`.
 - `grep -n 'key={GEMINI_API_KEY}' core_engine.py` no devuelve nada.
 
-### T1.8 — Cortafuegos de presupuesto de IA: tope y día local
+### T1.8 — Cortafuegos de presupuesto de IA: tope mensual y día local
 
-**Archivos:** `.env` (`AI_DAILY_BUDGET_USD`; **decisión del usuario**), y en `core_engine.py`, `get_today_ai_cost` (L585-594) y `check_ai_budget_status` (L934-962).
+**Archivos:** `.env` y `.env.example` (`AI_MONTHLY_BUDGET_USD`, `AI_DAILY_BUDGET_USD`), y en `core_engine.py`, contabilidad y comprobaciones de presupuesto del gateway; `tests/unit/test_monthly_budget.py`.
 
 **Problema:**
 - Con 0,10 $ al día el embudo ya se pausó una vez (A-001). El gasto actual roza el tope y las Fases 1 y 2 aumentarán el volumen evaluado.
 - El día se corta a medianoche UTC (`date('now','start of day')`), una hora antes que en Madrid.
 
 **Solución:**
-- Proponer al usuario `AI_DAILY_BUDGET_USD=0.50`: una sola compra de +40 € cubre más de un año de IA.
+- **Decisión del usuario (2026-11-14): 0,10 USD al mes.** Sustituye la propuesta anterior de 0,50 USD/día. `AI_MONTHLY_BUDGET_USD=0.10`; conservar el límite diario adicional sin aumentarlo.
+- Contar el mes civil en `Europe/Madrid`, con límites UTC y cambio de mes sin esperar al TTL. El gateway relee el gasto mensual antes de cada proveedor/fallback y después del semáforo; si falta contabilidad, pausar.
 - Contar el día local: `WHERE created_at >= datetime('now','localtime','start of day','utc')`.
 - Memorizar el gasto del día durante 60 s, para no ejecutar un `SUM` en cada llamada.
 - Mantener el aviso al 80 %.
 
 **Verificación:** test con BD temporal y `TZ=Europe/Madrid`. Un coste registrado a las 23:30 UTC del día anterior (00:30 en Madrid) cuenta como «hoy», y `check_ai_budget_status` devuelve `PAUSED` al superar el tope.
+
+Ampliación mensual: 7/7 tests nuevos; suite 245/245 OK. `.env` guarda solo la nueva asignación mensual, sin mostrar secretos ni reiniciar. Límite basado en la contabilidad estimada del proyecto, comprobado antes de llamar; las llamadas ya en curso pueden terminar y el coste final facturado depende del proveedor. Falta revisión independiente de esta ampliación (cuota de subagentes agotada).
 
 ### T1.9 — Wallapop: no duplicar la petición ante 403/429 y respetar `Retry-After`
 
