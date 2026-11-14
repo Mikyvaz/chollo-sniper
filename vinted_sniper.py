@@ -1055,7 +1055,7 @@ def main():
                     approved, score, optimal_price, best_net_profit, charger_penalty, reject_msg = evaluate_deal_math_and_score(
                         price=base_price, landed_cost=landed_cost, target=target, ai_data=ai_data, cex_data=cex_data,
                         min_profit=min_profit, min_personal_savings=min_personal_savings, min_score=min_score,
-                        filter_pro_seller=True
+                        filter_pro_seller=True, conn=conn
                     )
                     if not approved:
                         print(f"[VINTED DESCARTADO - {score}/10] {title} ({base_price:.0f}€ | Casa: {landed_cost:.0f}€) -> {reject_msg}")

@@ -144,7 +144,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.9 | [x] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
 | T3.1 | [x] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
 | T3.2 | [ ] | Argon 4 | Pre-CeX implementado y probado; revisión independiente pendiente | Replay 372/517 familias (71,95 %) | M | T1.3 |
-| T3.3 | [ ] | Argon 4 | Valoración anclada + confianza | Beneficios creíbles | M | T3.2 |
+| T3.3 | [ ] | Argon 4 | Valoración anclada implementada y probada; revisión independiente pendiente | CeX × 0,85 / p75 × 1,15 y confianza explícita | M | T3.2 |
 | T3.4 | [x] | Gemini 3.8 Max | Vinted: envío según país | Margen real | S | — |
 | T3.5 | [x] | Gemini 3.8 Max | Re-chequeo de reservados | Recupera oportunidades | S | — |
 | T3.6 | [x] | Gemini 3.8 Max | Payload: primera línea útil y sin deeplinks rotos | Acción en un toque | S | T1.5, T1.12 |
@@ -971,6 +971,8 @@ Implementación 2026-11-14: referencia solo del espejo fresco (36 h), vocabulari
   - sin CeX ni histórico → confianza `baja`;
   - el caso ID-03 de `AUDIT_CONCLUSION.md` (Switch OLED a 110 €) sigue devolviendo `OPORTUNIDAD_OFERTA` con beneficio de 35 € o más.
 - Replay sobre `deals`: informe de qué alertas cambiarían de tipo o de beneficio (es informativo, no un criterio de aceptación).
+
+Implementación 2026-11-14: 8 tests específicos y suite 259/259 OK; compilación aislada OK. CeX 300 €/IA 400 € → 255 €, p75 interpolado solo con ≥5 observaciones del submodelo en 14 días; confianza alta/media/baja y contexto `valuation` persistido. Discord muestra el precio anclado y confianza. Confianza baja multiplica el mínimo sonoro por 1,5 sin reducir el umbral especial de ofertas; compra personal conservada. `tools/replay_valuation.py`: reconstrucción informativa de 624 reventas, 22 precios óptimos cambian; 360 beneficios y 61 rechazos bajo la configuración actual. No hay estimación IA original de todas las alertas: se usa el óptimo guardado como proxy; estos cambios no son atribuibles solo al ancla. Falta revisión independiente (cuota agotada). Sin desplegar.
 
 ### T3.4 — Vinted: coste puesto en casa según el país
 

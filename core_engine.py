@@ -4404,6 +4404,10 @@ def get_local_market_stats(radar_name, days=14, conn=None):
             "median": round(median_val, 2),
             "mean": round(mean_val, 2),
             "std": round(std_val, 2),
+            # Percentil interpolado de precios pedidos (no precios de cierre).
+            "p75": round(rows[int((n - 1) * .75)] +
+                         (rows[math.ceil((n - 1) * .75)] - rows[int((n - 1) * .75)]) *
+                         (((n - 1) * .75) % 1), 2),
             "count": n
         }
     except Exception as e:
@@ -4868,7 +4872,7 @@ def classify_deal_tier(
 def evaluate_deal_math_and_score(
     price, landed_cost, target, ai_data, cex_data,
     min_profit=None, min_personal_savings=25.0, min_score=8, filter_pro_seller=True,
-    config=None
+    config=None, conn=None
 ):
     """
     Motor Matemático Dual v4.3 (Compra Directa >=8/10 + Oportunidad de Chollo mediante Oferta 6-7/10):
@@ -4979,14 +4983,21 @@ def evaluate_deal_math_and_score(
     ai_data["case_penalty"] = case_penalty
 
     cex_sell_effective = max(0.0, cex_sell - case_penalty)
-    cex_realistic_cap = round(cex_sell_effective * 0.84) if cex_sell_effective > 0 else 0.0
-
-    if ai_est_price > 0:
-        optimal_price = ai_est_price
-    elif cex_realistic_cap > 0:
-        optimal_price = max(max(0.0, cex_cash - case_penalty), cex_realistic_cap)
+    if cex_sell_effective > 0:
+        optimal_price = round(min(ai_est_price if ai_est_price > 0 else math.inf, cex_sell_effective * .85), 2)
+        valuation_anchor, valuation_confidence = "cex_sell", "alta"
     else:
-        optimal_price = price
+        submodel_key = f"{target.get('id', '')}:{identified.strip().lower()}"
+        stats = get_local_market_stats(submodel_key, days=14, conn=conn) if identified else {}
+        if stats.get("count", 0) >= 5 and stats.get("p75", 0) > 0:
+            optimal_price = round(min(ai_est_price if ai_est_price > 0 else math.inf, stats["p75"] * 1.15), 2)
+            valuation_anchor, valuation_confidence = "asking_p75", "media"
+        else:
+            optimal_price = ai_est_price
+            valuation_anchor, valuation_confidence = "ai_only", "baja"
+    ai_data["valuation_confidence"] = valuation_confidence
+    ai_data["valuation"] = {"ai_est": ai_est_price, "cex_sell": cex_sell, "cex_cash": cex_cash,
+                            "anchor": valuation_anchor, "optimal": optimal_price, "confidence": valuation_confidence}
 
     vis_score_num = 10 if vis_conf == "alta" else (8 if vis_conf == "media" else 4)
     fraud_risk_num = int(ai_data.get("fraud_risk_score", 0) or 0)
@@ -5555,7 +5566,7 @@ def _seller_review_count(seller):
     return None
 
 
-def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", seller=None):
+def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", seller=None, valuation_confidence=None):
     """Decide si una alerta final debe sonar. Devuelve (push: bool, motivo_silencio: str)."""
     pol = get_notification_policy()
     plat = str(platform or "").upper()
@@ -5567,11 +5578,14 @@ def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", sell
     # T1.4: solo un 0 confirmado silencia; reviews None (perfil no consultado) no.
     if not is_shop and reviews == 0 and not pol.get("push_zero_review_sellers"):
         return False, "vendedor sin valoraciones"
+    required = float(pol.get("push_min_profit_eur", 40))
+    if str(valuation_confidence).lower() == "baja" and mode != "personal":
+        required *= 1.5
     if deal_type == "offer_opportunity":
-        if profit < float(pol.get("push_offer_min_profit_eur", 80)):
-            return False, f"regateo con margen < {pol.get('push_offer_min_profit_eur')}€"
-    elif profit < float(pol.get("push_min_profit_eur", 40)):
-        return False, f"margen < {pol.get('push_min_profit_eur')}€"
+        required = max(required, float(pol.get("push_offer_min_profit_eur", 80)))
+    if profit < required:
+        reason = "regateo con margen" if deal_type == "offer_opportunity" else "margen"
+        return False, f"{reason} < {required:g}€"
     try:
         recent = conn.execute(
             "SELECT COUNT(*) FROM deals WHERE created_at >= datetime('now', '-1 hour') "
@@ -5822,6 +5836,8 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
             "pipeline_version": PIPELINE_VERSION,
             "pipeline_ms": compute_pipeline_ms(raw_pms) if raw_pms is not None else compute_pipeline_ms({}),
         }
+        if isinstance(a.get("valuation"), dict):
+            ctx["valuation"] = a["valuation"]
         if extra:
             for k, v in extra.items():
                 if k == "pipeline_ms" and isinstance(v, dict):
@@ -6513,7 +6529,8 @@ def send_discord_alert(
         kit_folder, seller_city=seller_city, is_local=is_local, image_urls=image_urls,
         item_vec=item_vec, seller_id=s_id
     )
-    should_push, quiet_reason = decide_alert_push(conn, plat, deal_type, net_profit, mode=mode, seller=seller)
+    should_push, quiet_reason = decide_alert_push(conn, plat, deal_type, net_profit, mode=mode, seller=seller,
+                                                valuation_confidence=ai_data.get("valuation_confidence"))
     ai_data["_alert_push"] = should_push
     save_alert_context(conn, deal_id, seller=seller, ai_data=ai_data, fraud_banner=fraud_banner,
                        country_tag=country_tag,
@@ -6642,10 +6659,12 @@ def send_discord_alert(
 
     p2p_net = float(ai_data.get("p2p_net_profit", net_profit))
     p2p_roi = float(ai_data.get("p2p_roi_pct", round((p2p_net / max(1.0, landed_cost)) * 100.0, 1)))
-    p2p_market = float(ai_data.get("estimated_resale_price", optimal_price))
+    p2p_market = float(optimal_price)
     sign_p = "+" if p2p_net >= 0 else ""
 
     verdict_parts = [f"⭐ {score}/10 · Confianza {vis_conf}"]
+    if ai_data.get("valuation_confidence"):
+        verdict_parts.append(f"Valoración P2P: confianza {ai_data['valuation_confidence']}")
     if price_drop_info:
         verdict_parts.append(f"📉 Bajada -{price_drop_info['drop_eur']:.0f} € (antes {price_drop_info['old_price']:.0f} €)")
     if deal_type == "high_risk_opportunity" or ai_data.get("is_anomalously_low"):
