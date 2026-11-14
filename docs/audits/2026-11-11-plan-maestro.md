@@ -127,7 +127,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T1.5 | [x] | — | Discord sin pérdidas + `message_id` | 0 alertas perdidas en silencio | M | T1.0 |
 | T1.6 | [x] | — | Gemini: detectar `MAX_TOKENS` y presupuesto de salida por modelo | Fin del pago doble | S | T1.0 |
 | T1.7 | [x] | — | API key en cabecera + redacción en logs | Seguridad | S | — |
-| T1.8 | [x] | — | Presupuesto de IA: tope y día local (código listo; tope en `.env` pendiente usuario) | Sin pausas del embudo | S | Decisión del usuario |
+| T1.8 | [ ] | — | Tope mensual 0,10 USD decidido, implementado y probado; revisión de ampliación pendiente | Gasto mensual acorde a decisión del usuario | S | Decisión recibida 2026-11-14 |
 | T1.9 | [x] | — | Wallapop: sin segunda petición en 403/429 + `Retry-After` | Menos bloqueos | S | T1.0 |
 | T1.10 | [x] | — | *Circuit breaker* exponencial por tienda | −90 % de sondeo al WAF y de spam de salud | S | T1.0 |
 | T1.11 | [x] | — | eBay: precios ≥ 1.000 € y precio tachado | Sin falsos candidatos | S | T1.0 |
@@ -532,7 +532,7 @@ Tras el despliegue: §8, KPI «visión flash con `MAX_TOKENS`».
 
 **Verificación:** test con BD temporal y `TZ=Europe/Madrid`. Un coste registrado a las 23:30 UTC del día anterior (00:30 en Madrid) cuenta como «hoy», y `check_ai_budget_status` devuelve `PAUSED` al superar el tope.
 
-Ampliación mensual: 7/7 tests nuevos; suite 245/245 OK. `.env` guarda solo la nueva asignación mensual, sin mostrar secretos ni reiniciar. Límite basado en la contabilidad estimada del proyecto, comprobado antes de llamar; las llamadas ya en curso pueden terminar y el coste final facturado depende del proveedor. Falta revisión independiente de esta ampliación (cuota de subagentes agotada).
+Ampliación mensual: 9/9 tests nuevos; suite final conjunta 263/263 OK. `.env` guarda solo la nueva asignación mensual, sin mostrar secretos ni reiniciar. Límite basado en la contabilidad estimada del proyecto, comprobado antes de llamar; las llamadas ya en curso pueden terminar y el coste final facturado depende del proveedor. La copia de BD registra aproximadamente 1,13 USD este mes: al desplegar quedará pausada la IA hasta el próximo mes. Falta revisión independiente de esta ampliación (cuota de subagentes agotada).
 
 ### T1.9 — Wallapop: no duplicar la petición ante 403/429 y respetar `Retry-After`
 

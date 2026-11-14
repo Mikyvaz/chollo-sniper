@@ -86,3 +86,15 @@ class TestMonthlyBudget(unittest.TestCase):
                 self.assertRaises(ce.BudgetExceededError):
             ce.ai_gateway_call("no accounting", conn=None)
         post.assert_not_called()
+
+    def test_unpersisted_cost_pauses_following_calls_even_after_table_recovers(self):
+        self.conn.execute("DROP TABLE ai_cost_log")
+        with redirect_stdout(io.StringIO()):
+            ce.log_ai_cost(self.conn, "TEST", "budget", "gemini-test-lite", "test", 10, 10)
+        self.conn.execute("CREATE TABLE ai_cost_log (usd REAL, created_at TIMESTAMP)")
+        with self.assertRaises(ce.BudgetExceededError):
+            ce._assert_ai_budget_available(self.conn)
+
+    def test_zero_monthly_budget_stops_all_paid_calls(self):
+        with mock.patch.object(ce, "AI_MONTHLY_BUDGET_USD", 0), self.assertRaises(ce.BudgetExceededError):
+            ce._assert_ai_budget_available(self.conn)

@@ -704,7 +704,8 @@ def log_ai_cost(conn, platform, radar_id, model, call_type, tokens_in, tokens_ou
             pass
     except Exception as e:
         with _today_cost_lock:
-            _ai_accounting_failed.add(_cost_cache_key(conn))
+            failed_key = _cost_cache_key(conn)
+            _ai_accounting_failed.add(conn if isinstance(failed_key, int) else failed_key)
         print(f"[WARN] Error registrando coste IA: {_redact(e)}; "
               f"no persistido model={_redact(model)} tokens_in={tokens_in} "
               f"tokens_out={tokens_out} thoughts={thoughts_tokens}")
@@ -770,7 +771,7 @@ def get_month_ai_cost(conn, refresh=False):
     cache_key = (db_key, start.strftime("%Y-%m"))
     now = time.monotonic()
     with _today_cost_lock:
-        if db_key in _ai_accounting_failed:
+        if (conn if isinstance(db_key, int) else db_key) in _ai_accounting_failed:
             return math.inf
         hit = _month_cost_cache.get(cache_key)
         if not refresh and isinstance(db_key, str) and hit and now - hit[0] < 60:
@@ -790,12 +791,14 @@ def get_month_ai_cost(conn, refresh=False):
     return total
 
 
-def _assert_ai_budget_available(conn):
+def _assert_ai_budget_available(conn, deadline=None):
     if conn is None:
         raise BudgetExceededError("IA pausada: no hay conexión para contabilizar el gasto.")
+    _limit_ai_db_wait(conn, deadline)
     month_cost = get_month_ai_cost(conn, refresh=True)
     if month_cost >= AI_MONTHLY_BUDGET_USD or not math.isfinite(AI_MONTHLY_BUDGET_USD):
         raise BudgetExceededError(f"Presupuesto IA mensual alcanzado ({month_cost:.6f}$ / {AI_MONTHLY_BUDGET_USD:.2f}$).")
+    _limit_ai_db_wait(conn, deadline)
     if get_today_ai_cost(conn) >= AI_DAILY_BUDGET_USD:
         raise BudgetExceededError("Presupuesto IA diario alcanzado.")
 
@@ -861,7 +864,7 @@ _AI_HTTP_SESSION = _AIHTTPClient()
 
 
 class BudgetExceededError(RuntimeError):
-    """Lanzada cuando el gasto acumulado diario supera el hard limit de presupuesto."""
+    """Lanzada al alcanzar el límite mensual/diario o perder la contabilidad del gasto."""
     pass
 
 
@@ -1049,7 +1052,7 @@ def ai_gateway_call(
         # 2. Cortafuegos de Presupuesto Diario (Hard Limit)
         if enforce_budget:
             _limit_ai_db_wait(active_conn, deadline)
-            _assert_ai_budget_available(active_conn)
+            _assert_ai_budget_available(active_conn, deadline=deadline)
 
         # 3. Control de Concurrencia y Abort Timeout (Punto 6)
         slot_acquired = _AI_GATEWAY_SEMAPHORE.acquire(
@@ -1062,7 +1065,7 @@ def ai_gateway_call(
             # El gasto puede haber cambiado mientras este hilo esperaba el semáforo.
             _limit_ai_db_wait(active_conn, deadline)
             if enforce_budget:
-                _assert_ai_budget_available(active_conn)
+                _assert_ai_budget_available(active_conn, deadline=deadline)
             # 4. Control de max_tokens duro
             max_tokens = int(max_tokens or 300)
             if max_tokens <= 0:
@@ -1119,7 +1122,10 @@ def ai_gateway_call(
                     if attempt_timeout is None:
                         break
                     if enforce_budget:
-                        _assert_ai_budget_available(active_conn)
+                        _assert_ai_budget_available(active_conn, deadline=deadline)
+                    attempt_timeout = remaining_timeout()
+                    if attempt_timeout is None:
+                        break
                     try:
                         resp = _AI_HTTP_SESSION.post(url, json=payload, headers=gemini_headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
@@ -1194,7 +1200,10 @@ def ai_gateway_call(
                     if attempt_timeout is None:
                         break
                     if enforce_budget:
-                        _assert_ai_budget_available(active_conn)
+                        _assert_ai_budget_available(active_conn, deadline=deadline)
+                    attempt_timeout = remaining_timeout()
+                    if attempt_timeout is None:
+                        break
                     try:
                         resp = _AI_HTTP_SESSION.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, timeout=attempt_timeout)
                         if resp.status_code == 200:
@@ -4124,7 +4133,7 @@ def prescreen_item_text(platform, title, description, price, landed_cost, target
             confidence = str(res.get("confidence", "media")).lower()
             res_obtained = True
     except BudgetExceededError as e:
-        print(f"[PRESCREEN] Cortafuegos IA diario activo: {e}. Fail-open.")
+        print(f"[PRESCREEN] Cortafuegos IA activo: {e}. Fail-open.")
         return "proceed", "budget_exceeded_fail_open", "baja", False
     except Exception as e:
         print(f"[PRESCREEN] Error en llamada ai_gateway_call ({platform}): {_redact(e)}")
@@ -4611,7 +4620,7 @@ def analyze_and_generate_kit(
     # Control de Presupuesto Diario (P1-4)
     budget_status, budget_ratio = check_ai_budget_status(conn, health_monitor=health_monitor)
     if budget_status == "PAUSED":
-        print(f"[BUDGET PAUSA] Presupuesto diario alcanzado ({budget_ratio*100:.0f}%). Análisis aplazado para '{clean_title_str}'")
+        print(f"[BUDGET PAUSA] Presupuesto IA alcanzado ({budget_ratio*100:.0f}%). Análisis aplazado para '{clean_title_str}'")
         return _budget_pause_verdict(clean_title_str)
 
     preferred_gemini, preferred_openrouter = select_multimodal_model(
