@@ -12,6 +12,7 @@ Incluye:
 import os
 import json
 import heapq
+import queue
 import random
 import time
 import threading
@@ -318,9 +319,54 @@ default_rate_limiter = AdaptiveRateLimiter()
 
 # ==================== GESTOR DE COOLDOWN Y ALERTAS DISCORD ====================
 
+class HealthNotifier(threading.Thread):
+    """Despacha avisos fuera del escáner, con cola acotada y deduplicación de diez minutos."""
+
+    def __init__(self, webhook_url, *, start_worker=True):
+        super().__init__(name="HealthNotifier", daemon=True)
+        self.webhook_url = webhook_url
+        self._queue = queue.Queue(maxsize=100)
+        self._lock = threading.Lock()
+        self._clock = time.monotonic
+        self._last_title = {}
+        if webhook_url and start_worker:
+            self.start()
+
+    def enqueue(self, embed):
+        if not self.webhook_url:
+            return False
+        with self._lock:
+            now = self._clock()
+            self._last_title = {title: sent for title, sent in self._last_title.items() if now - sent < 600}
+            title = embed["title"]
+            if title in self._last_title:
+                return False
+            try:
+                self._queue.put_nowait(embed)
+            except queue.Full:
+                return False
+            self._last_title[title] = now
+        return True
+
+    def run(self):
+        while True:
+            embed = self._queue.get()
+            try:
+                if embed is None:
+                    return
+                # Import tardío: core_engine también importa antiban.
+                from core_engine import _discord_send
+                _discord_send("POST", self.webhook_url, json_payload={"embeds": [embed]})
+            except Exception as e:
+                print(f"[HEALTH MONITOR ERROR] Fallo enviando a Discord: {_redact(e)}")
+            finally:
+                self._queue.task_done()
+
+
 class AntiBanHealthMonitor:
     """Monitoriza bloqueos (403, 429), aplica cooldown preventivo y notifica a Discord (#incidencias)."""
     def __init__(self, service_name):
+        self._lock = threading.Lock()
         self.service_name = service_name
         self.consecutive_blocks = 0
         self.ok_streak_since_block = 0
@@ -328,9 +374,10 @@ class AntiBanHealthMonitor:
         self.in_cooldown = False
         self.cooldown_until = 0
         self.last_ai_alert = 0
+        self._notifier = HealthNotifier(HEALTH_WEBHOOK_URL) if HEALTH_WEBHOOK_URL else None
 
     def send_health_embed(self, title, description, color, fields=None):
-        if not HEALTH_WEBHOOK_URL:
+        if self._notifier is None:
             return
         footer_text = f"Boti Health Monitor v4.1 • {self.service_name} • {datetime.now().strftime('%H:%M:%S')}".replace("\n", " ").replace("\r", " ").strip()
         embed = {
@@ -341,10 +388,7 @@ class AntiBanHealthMonitor:
         }
         if fields:
             embed["fields"] = fields
-        try:
-            requests.post(HEALTH_WEBHOOK_URL, json={"embeds": [embed]}, timeout=10)
-        except Exception as e:
-            print(f"[HEALTH MONITOR ERROR] Fallo enviando a Discord: {_redact(e)}")
+        self._notifier.enqueue(embed)
 
     @staticmethod
     def _parse_retry_after(value, cap=6 * 3600):
@@ -356,86 +400,95 @@ class AntiBanHealthMonitor:
         return min(secs, cap) if secs > 0 else None
 
     def handle_http_response(self, status_code, url="", query="", retry_after=None):
-        if status_code in (429, 403, 401):
-            self.consecutive_blocks += 1
-            self.ok_streak_since_block = 0
-            self.in_cooldown = True
-            self.last_block_time = time.time()
+        notification = None
+        result = (False, 0)
+        with self._lock:
+            if status_code in (429, 403, 401):
+                self.consecutive_blocks += 1
+                self.ok_streak_since_block = 0
+                self.in_cooldown = True
+                self.last_block_time = time.time()
 
-            if self.consecutive_blocks == 1:
-                cooldown_secs = 420   # 7 minutos
-            elif self.consecutive_blocks == 2:
-                cooldown_secs = 900   # 15 minutos
-            else:
-                cooldown_secs = 1800  # 30 minutos
+                if self.consecutive_blocks == 1:
+                    cooldown_secs = 420   # 7 minutos
+                elif self.consecutive_blocks == 2:
+                    cooldown_secs = 900   # 15 minutos
+                else:
+                    cooldown_secs = 1800  # 30 minutos
 
-            # Retry-After en segundos: solo puede alargar el cooldown, nunca acortarlo.
-            ra = self._parse_retry_after(retry_after)
-            if ra:
-                cooldown_secs = max(cooldown_secs, ra)
+                # Retry-After en segundos: solo puede alargar el cooldown, nunca acortarlo.
+                ra = self._parse_retry_after(retry_after)
+                if ra:
+                    cooldown_secs = max(cooldown_secs, ra)
 
-            self.cooldown_until = max(self.cooldown_until, time.time() + cooldown_secs)
-            mins = cooldown_secs // 60
-            block_type = "Rate Limit (HTTP 429)" if status_code == 429 else f"Acceso Denegado / WAF (HTTP {status_code})"
+                self.cooldown_until = max(self.cooldown_until, time.time() + cooldown_secs)
+                mins = cooldown_secs // 60
+                block_type = "Rate Limit (HTTP 429)" if status_code == 429 else f"Acceso Denegado / WAF (HTTP {status_code})"
 
-            title = f"🚨 [ALERTA ANTIBAN] {self.service_name}: {block_type}"
-            desc = (
-                f"Se ha detectado una restricción temporal en la plataforma al consultar `{query}`.\n\n"
-                f"🛡️ **Medida preventiva de protección activada (P3-3 no bloqueante):**\n"
-                f"• **Cooldown registrado:** Se pausan peticiones a este origen durante **{mins} minutos**.\n"
-                f"• **El proceso permanece activo:** Continúa respondiendo al healthcheck y sirviendo otras tiendas/radares.\n"
-                f"• **Rotación automática:** Nueva huella TLS/JA3 y renovación de cookies al reanudar.\n"
-                f"• **Reincidencia acumulada:** `{self.consecutive_blocks}`"
-            )
-            self.send_health_embed(title, desc, 0xE74C3C)
-            return True, cooldown_secs
-
-        elif status_code == 200:
-            recovered_from_cooldown = False
-            if self.in_cooldown or (self.cooldown_until > 0 and time.time() >= self.cooldown_until):
-                self.in_cooldown = False
-                self.cooldown_until = 0
-                recovered_from_cooldown = True
-
-            if self.consecutive_blocks > 0:
-                self.ok_streak_since_block += 1
-                if self.ok_streak_since_block >= 10:
-                    self.consecutive_blocks = 0
-                    self.ok_streak_since_block = 0
-
-            if recovered_from_cooldown:
-                title = f"✅ [RECUPERADO] {self.service_name}: Conexión Normalizada"
+                title = f"🚨 [ALERTA ANTIBAN] {self.service_name}: {block_type}"
                 desc = (
-                    "La plataforma vuelve a responder correctamente con código **HTTP 200 OK** tras el enfriamiento.\n"
-                    "El escaneo continúa a ritmo normal."
+                    f"Se ha detectado una restricción temporal en la plataforma al consultar `{query}`.\n\n"
+                    f"🛡️ **Medida preventiva de protección activada (P3-3 no bloqueante):**\n"
+                    f"• **Cooldown registrado:** Se pausan peticiones a este origen durante **{mins} minutos**.\n"
+                    f"• **El proceso permanece activo:** Continúa respondiendo al healthcheck y sirviendo otras tiendas/radares.\n"
+                    f"• **Rotación automática:** Nueva huella TLS/JA3 y renovación de cookies al reanudar.\n"
+                    f"• **Reincidencia acumulada:** `{self.consecutive_blocks}`"
                 )
-                self.send_health_embed(title, desc, 0x2ECC71)
+                notification = (title, desc, 0xE74C3C)
+                result = (True, cooldown_secs)
 
-        return False, 0
+            elif status_code == 200:
+                recovered_from_cooldown = False
+                if self.in_cooldown or (self.cooldown_until > 0 and time.time() >= self.cooldown_until):
+                    self.in_cooldown = False
+                    self.cooldown_until = 0
+                    recovered_from_cooldown = True
+
+                if self.consecutive_blocks > 0:
+                    self.ok_streak_since_block += 1
+                    if self.ok_streak_since_block >= 10:
+                        self.consecutive_blocks = 0
+                        self.ok_streak_since_block = 0
+
+                if recovered_from_cooldown:
+                    title = f"✅ [RECUPERADO] {self.service_name}: Conexión Normalizada"
+                    desc = (
+                        "La plataforma vuelve a responder correctamente con código **HTTP 200 OK** tras el enfriamiento.\n"
+                        "El escaneo continúa a ritmo normal."
+                    )
+                    notification = (title, desc, 0x2ECC71)
+
+        if notification:
+            self.send_health_embed(*notification)
+        return result
 
     def is_in_cooldown(self):
         """Comprueba si el monitor se encuentra en período de cooldown activo (P3-3)."""
-        now = time.time()
-        if self.cooldown_until > now:
-            return True
-        if self.in_cooldown and now >= self.cooldown_until:
-            self.in_cooldown = False
-        return False
+        with self._lock:
+            now = time.time()
+            if self.cooldown_until > now:
+                return True
+            if self.in_cooldown and now >= self.cooldown_until:
+                self.in_cooldown = False
+            return False
 
     def get_remaining_cooldown(self):
         """Retorna los segundos restantes del cooldown de estado."""
-        return max(0, int(self.cooldown_until - time.time()))
+        with self._lock:
+            return max(0, int(self.cooldown_until - time.time()))
 
     def reset_cooldown(self):
         """Fuerza la finalización del cooldown."""
-        self.cooldown_until = 0
-        self.in_cooldown = False
+        with self._lock:
+            self.cooldown_until = 0
+            self.in_cooldown = False
 
     def notify_ai_error(self, status_code, response_text):
-        now = time.time()
-        if now - self.last_ai_alert < 1800:
-            return
-        self.last_ai_alert = now
+        with self._lock:
+            now = time.time()
+            if now - self.last_ai_alert < 1800:
+                return
+            self.last_ai_alert = now
         title = f"⚠️ [ALERTA MOTOR IA] {self.service_name}: HTTP {status_code}"
         desc = f"Respuesta del proveedor IA: `{str(response_text)[:300]}`"
         self.send_health_embed(title, desc, 0xF1C40F)

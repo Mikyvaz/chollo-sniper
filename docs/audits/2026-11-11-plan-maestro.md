@@ -140,7 +140,7 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T2.5 | [x] | Argon 4 | Vendedor Wallapop: identidad, límite y caché persistente | Menos peticiones y ningún falso «0 valoraciones» | S | T2.2, T1.4 |
 | T2.6 | [ ] | Argon 4 | Pipeline común + workers de evaluación | Fin del bloqueo de cabeza de cola | L | T2.1 (condicional) |
 | T2.7 | [ ] | Argon 4 | IA: *breaker* por modelo + plazo máximo por ítem | Peor caso por ítem de ≈ 150 s a 30 s o menos | S | T1.6 |
-| T2.8 | [ ] | Argon 4 | Embeds de salud asíncronos + locks | Sin pausas de 10 s en el bucle | S | T1.5 |
+| T2.8 | [x] | Argon 4 | Embeds de salud asíncronos + locks | Encolado <5 ms; envío fuera del bucle | S | T1.5 |
 | T2.9 | [x] | Gemini 3.8 Max | Frecuencia por tienda en multi-sniper | −70 % de peticiones de bajo valor | S | T1.10 |
 | T3.1 | [x] | Gemini 3.8 Max | Dedup sin herencia entre vendedores distintos | Recupera anuncios válidos | S | T1.0 |
 | T3.2 | [ ] | Argon 4 | Pre-CeX por título antes de la IA | Anzuelos detectados sin IA y referencia para el prompt | M | T1.3 |
@@ -155,6 +155,9 @@ Fuentes: BD copiada con la API de backup (31-oct → 11-nov), `metrics.jsonl` de
 | T3.11 | [x] | Gemini 3.8 Max | Coherencia de umbrales + `AGENTS.md` | Sin contradicciones entre código y documentación | S | — |
 
 ---
+
+
+> **Continuación 2026-11-14:** T2.8 implementada y revisada con suite aislada (236/236). T2.6 sigue sin activar: en las últimas 48 h, rondas con IA Wallapop 78/2790 (2,80 %), Vinted 115/1273 (9,03 %); no hay evidencia de espera de cola que justifique la condición del plan. Sin despliegue. ROADMAP.md está eliminado en el árbol de trabajo y se conserva ese cambio del usuario.
 
 ## 4. Fase 1 — Bugs críticos y ahorro de costes/API
 
