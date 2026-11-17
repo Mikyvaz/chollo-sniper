@@ -1,6 +1,6 @@
 # Velocidad de las alertas — 2026-11-17
 
-Trabajo en el árbol `/opt/wallapop-sniper/.worktrees/velocidad` (base `plan-fase-3` @ `48ef1da`). **Sin commit, sin desplegar y sin llamadas de pago.** Producción sigue con el código del 13/11.
+**Desplegado el 17/11/2026** en `plan-fase-3`: `29315a3` a las 15:45 y el ajuste A-052 a continuación. Copia previa de la BD: `data/backups/sniper_pre_velocidad_20261117.db`. Tope mensual de IA: **3 USD** (decisión del usuario), fijado en `docker-compose.yml` porque `.env` está protegido; `.env` puede seguir diciendo 0,10, pero el valor de `docker-compose.yml` prevalece.
 
 ## 1. Dónde se pierde el tiempo (medido en producción, 48-72 h)
 
@@ -48,6 +48,19 @@ Intervalo entre sondeos de las consultas más productivas: «playstation 5» en 
 
 El retraso de 4-6 min del índice de Wallapop sigue ahí: en Wallapop la mejora es de segundos sobre minutos. En Vinted, donde un chollo dura 1-2 min, 15 s menos sí cuentan.
 
+### Medido tras el despliegue (17/11, 15:45, primeros 7 min)
+
+| | Antes | Después |
+|---|---|---|
+| Captura → Puerta 1, Wallapop | mediana 2,0 s | **0,14-0,19 s** |
+| Consultas standard de día | nunca | Wallapop 122 s · Vinted 360 s |
+| Consultas hot, sondeo real | Wallapop 32 s · Vinted 73 s | Wallapop 32 s · Vinted 103 s (arranque) |
+| Errores / cooldowns / pausas de presupuesto | — | 0 / 0 / 0 |
+
+En Wallapop, el anuncio más nuevo de cada sondeo con novedades llevaba publicado **~2 min** (mediana) al verlo. El retraso de indexación es menor que los 4-6 min que sugería la sonda inicial.
+
+Lo que no salió como en la simulación: Wallapop hot no bajó de 32 s. En 11 consultas escasas se seguía pidiendo la 2.ª página porque «añadía» anuncios, pero eran siempre los mismos anuncios antiguos. Una sonda real en 4 consultas confirma que, con orden «más nuevos primero», la 2.ª página solo trae anuncios más antiguos que la 1.ª. Además, el plan contaba 1 token por sondeo e ignoraba los de fichas y perfiles. Ambas cosas están corregidas (A-052, segundo despliegue): la 2.ª página solo cuenta si trae algo más reciente, y el plan mide lo que gasta cada consulta.
+
 ## 4. Verificación hecha
 
 - `py_compile` de los 8 módulos y `config.json` (17 radares): OK.
@@ -55,11 +68,11 @@ El retraso de 4-6 min del índice de Wallapop sigue ahí: en Wallapop la mejora 
 - Parser de Vinted contra fichas reales: 4 de 4 vendedores coinciden con `/api/v2/users/{id}`.
 - `PIPELINE_VERSION = 2026.11.17-v1`, para comparar alertas antes y después.
 
-## 5. Antes de desplegar: el presupuesto de IA lo bloquea todo
+## 5. Presupuesto y despliegue
 
-`plan-fase-3` incluye el tope **mensual** de 0,10 USD (T1.8; por defecto en el código y, según el informe del 14/11, también en `.env`). Este mes ya van **1,29 USD**: en cuanto se cargue cualquier código de esta rama, la IA se pausa hasta el 1 de diciembre y **no saldrá ninguna alerta**. Al ritmo actual (0,05-0,08 USD/día), mantener la IA todo el mes cuesta ~2-2,5 USD. Hace falta subir `AI_MONTHLY_BUDGET_USD` (por ejemplo a 3) o aceptar la pausa.
+`plan-fase-3` incluye el tope **mensual** de IA (T1.8). Con el valor anterior (0,10 USD) y 1,29 USD ya gastados en noviembre, la IA se habría pausado hasta diciembre. Por eso se subió a 3 USD antes de desplegar. El tope diario no se ha tocado (por defecto, 0,10 USD).
 
-Despliegue propuesto, **solo con tu aprobación**: hacer commit en una rama, integrarla en `plan-fase-3` y, desde `/opt/wallapop-sniper`, ejecutar:
+Comando usado, desde `/opt/wallapop-sniper`:
 
 ```sh
 docker compose up -d --build wallapop-sniper vinted-sniper multi-sniper relister-bot outcome-tracker

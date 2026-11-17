@@ -682,6 +682,7 @@ class TokenBucket:
         self._success_streak = 0
         self._recent = deque()
         self.priority_grants = 0
+        self.grants = 0  # tokens normales concedidos (búsquedas y páginas extra)
 
     def set_base_rate(self, rate_per_s: float):
         with self._lock:
@@ -735,6 +736,7 @@ class TokenBucket:
                     self._recent.popleft()
 
             self._recent.append(token_ready)
+            self.grants += 1
             wait_s = max(0.0, token_ready - now)
 
         if wait_s > 0.0:
@@ -791,6 +793,8 @@ class QueryTask:
     yield_rate: float = field(default=0.0, compare=False)      # candidatos/s (media exponencial)
     last_done: float = field(default=0.0, compare=False)
     polls: int = field(default=0, compare=False)
+    cost: float = field(default=1.0, compare=False)            # tokens normales por sondeo (media exponencial)
+    grants_mark: int = field(default=-1, compare=False, repr=False)
 
     @property
     def effective_interval(self) -> float:
@@ -959,6 +963,8 @@ class QueryScheduler:
         self._wall_clock = wall_clock or time.time
         self._last_fit = None
         self._last_save = None
+        self._prio_mark = None   # (instante, priority_grants) del último ajuste
+        self.prio_rate = 0.0     # tokens/s que se llevan fichas y perfiles (media exponencial)
         self.plan = {}
         self._last_mtime = None
         if self.config_path and os.path.exists(self.config_path):
@@ -1043,14 +1049,24 @@ class QueryScheduler:
         """Calcula eff_interval_s de cada consulta: cabe en el cubo y, si procede, pondera por rendimiento."""
         with self._lock:
             tasks = list(self._all)
-        self._last_fit = float(self._clock())
+        now = float(self._clock())
+        self._last_fit = now
         if not tasks:
             self.plan = {}
             return
-        demand = sum(1.0 / max(0.5, float(t.interval_s)) for t in tasks)
+        # Los tokens a crédito de fichas/perfiles salen de la misma cuota: se descuentan del presupuesto.
+        if self.bucket is not None:
+            pg = int(getattr(self.bucket, "priority_grants", 0) or 0)
+            if self._prio_mark is not None and now - self._prio_mark[0] >= 1.0:
+                inst = max(0.0, (pg - self._prio_mark[1]) / (now - self._prio_mark[0]))
+                self.prio_rate += 0.5 * (inst - self.prio_rate)
+            self._prio_mark = (now, pg)
+        # Cada consulta cuesta lo que gasta de verdad (2.ª página incluida), no un token fijo.
+        demand = sum(max(1.0, float(t.cost)) / max(0.5, float(t.interval_s)) for t in tasks)
         budget = demand
         if self.bucket is not None:
-            budget = min(demand, float(self.bucket.base) * self.utilization)
+            cap = float(self.bucket.base) * self.utilization
+            budget = min(demand, max(cap * 0.5, cap - self.prio_rate))
         scale = (budget / demand) if demand > 0 else 1.0
         mults = [1.0] * len(tasks)
         ad = self.adaptive or {}
@@ -1059,14 +1075,18 @@ class QueryScheduler:
             lo = 1.0 / float(ad["max_factor"])
             hi = 1.0 / float(ad["min_factor"])
             prior = float(ad["prior_per_hour"])
-            weights = [math.sqrt(max(0.0, float(t.yield_rate)) * 3600.0 + prior) for t in tasks]
-            base_freqs = [scale / max(0.5, float(t.interval_s)) for t in tasks]
-            mults = balanced_multipliers(base_freqs, weights, budget, lo, hi)
+            # Frecuencia óptima ∝ √(rendimiento / coste): una consulta que gasta 2 tokens por sondeo
+            # necesita el doble de rendimiento para ganar la misma frecuencia.
+            weights = [math.sqrt((max(0.0, float(t.yield_rate)) * 3600.0 + prior) / max(1.0, float(t.cost)))
+                       for t in tasks]
+            token_rates = [scale * max(1.0, float(t.cost)) / max(0.5, float(t.interval_s)) for t in tasks]
+            mults = balanced_multipliers(token_rates, weights, budget, lo, hi)
         for t, g in zip(tasks, mults):
             t.eff_interval_s = max(0.5, float(t.interval_s)) / (scale * g)
         self.plan = {
             "demand_per_min": round(demand * 60.0, 2),
             "budget_per_min": round(budget * 60.0, 2),
+            "item_tokens_per_min": round(self.prio_rate * 60.0, 2),
             "scale": round(scale, 4),
             "oversubscribed": bool(scale < 0.999),
             "adaptive": adaptive_on,
@@ -1084,8 +1104,8 @@ class QueryScheduler:
         parts = [f"{tier}: {min(v):.0f}-{max(v):.0f}s (n={len(v)})" for tier, v in sorted(tiers.items())]
         fit = "sobre-suscrito, cadencias alargadas" if p.get("oversubscribed") else "cabe en la cuota"
         return (f"demanda {p['demand_per_min']:.1f}/min vs cuota {p['budget_per_min']:.1f}/min ({fit}, "
-                f"x{1.0 / max(1e-9, p['scale']):.2f}) | adaptativo={'sí' if p.get('adaptive') else 'no'} | "
-                + " | ".join(parts))
+                f"x{1.0 / max(1e-9, p['scale']):.2f}; fichas/perfiles {p.get('item_tokens_per_min', 0):.1f}/min) | "
+                f"adaptativo={'sí' if p.get('adaptive') else 'no'} | " + " | ".join(parts))
 
     def yield_score(self, candidates=0, alerts=0) -> float:
         """Rendimiento de un sondeo: candidatos reales más un extra por cada alerta enviada."""
@@ -1218,6 +1238,9 @@ class QueryScheduler:
                 task = due.pop(0)
                 for rem_t in due:
                     heapq.heappush(self._heap, rem_t)
+            if self.bucket is not None:
+                # El token de esta búsqueda ya está concedido: done() medirá lo que gastó el sondeo entero
+                task.grants_mark = int(getattr(self.bucket, "grants", 0) or 0) - 1
             return task
 
     def done(self, task: QueryTask, yield_count=0) -> QueryTask:
@@ -1227,6 +1250,10 @@ class QueryScheduler:
         locales). Alimenta el reparto adaptativo; con 0 o sin `adaptive` el comportamiento no cambia.
         """
         now = float(self._clock())
+        if self.bucket is not None and task.grants_mark >= 0:
+            used = int(getattr(self.bucket, "grants", 0) or 0) - task.grants_mark
+            task.cost += 0.25 * (min(4.0, max(1.0, float(used))) - task.cost)
+        task.grants_mark = -1
         self._observe_yield(task, yield_count, now)
         recompute_s = float((self.adaptive or {}).get("recompute_s") or ADAPTIVE_DEFAULTS["recompute_s"])
         if self._last_fit is None or (now - self._last_fit) >= recompute_s:
@@ -1295,6 +1322,7 @@ class QueryScheduler:
                     ft.yield_rate = prev.yield_rate
                     ft.last_done = prev.last_done
                     ft.polls = prev.polls
+                    ft.cost = prev.cost
                     merged.append(ft)
                 else:
                     new_only.append(ft)

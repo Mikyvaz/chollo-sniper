@@ -55,13 +55,41 @@ logger = setup_logger("WALLAPOP-SNIPER")
 default_rate_limiter.register_platform("WALLAPOP", SCAN_INTERVAL)
 
 
+def _created_ms(item):
+    try:
+        v = float((item or {}).get("created_at") or 0)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def count_newer_second_page_items(page1, page2):
+    """Anuncios de la 2.ª página que podrían ser nuevos: no están en la 1.ª y no son más antiguos que
+    el más antiguo de la 1.ª. Con `order_by=newest` la 2.ª página solo continúa la lista hacia atrás
+    (comprobado el 17/11/2026 en 4 consultas), así que normalmente devuelve 0. Sin fecha o con la 1.ª
+    vacía se cuentan, por prudencia."""
+    p1 = [it for it in (page1 or []) if isinstance(it, dict)]
+    p1_ids = {it.get("id") for it in p1}
+    p1_ts = [t for t in (_created_ms(it) for it in p1) if t is not None]
+    oldest_p1 = min(p1_ts) if p1_ts else None
+    count = 0
+    for it in page2 or []:
+        if not isinstance(it, dict) or it.get("id") in p1_ids:
+            continue
+        ts = _created_ms(it)
+        if oldest_p1 is None or ts is None or ts > oldest_p1:
+            count += 1
+    return count
+
+
 class SecondPagePolicy:
     """Decide si merece pedir la 2.ª página de una búsqueda que devolvió pocos resultados.
 
-    Con `order_by=newest` los anuncios nuevos entran por la 1.ª página; la 2.ª solo completa el fondo.
-    En las consultas escasas casi siempre llega vacía y cada petición gasta un token del cubo, es decir,
-    retrasa el siguiente sondeo. Tras `empty_streak` páginas sin nada nuevo se deja de pedir durante
-    `skip_polls` sondeos y luego se vuelve a comprobar.
+    Con `order_by=newest` los anuncios nuevos entran por la 1.ª página; la 2.ª solo trae anuncios más
+    antiguos, ya vistos, y cada petición gasta un token del cubo (retrasa el siguiente sondeo). Tras
+    `empty_streak` segundas páginas sin anuncios más recientes que la 1.ª se deja de pedir durante
+    `skip_polls` sondeos y luego se vuelve a comprobar (así también se ven, con retraso, las rebajas
+    de anuncios antiguos que quedan en la 2.ª página).
     """
 
     def __init__(self, empty_streak=2, skip_polls=40):
@@ -325,9 +353,7 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
                 if r2.status_code == 200:
                     d2 = r2.json()
                     items_p2 = d2.get("data", {}).get("section", {}).get("payload", {}).get("items") or []
-                    p1_ids = {it.get("id") for it in items if isinstance(it, dict)}
-                    added = sum(1 for it in items_p2 if isinstance(it, dict) and it.get("id") not in p1_ids)
-                    second_page_policy.record(keywords, added)
+                    second_page_policy.record(keywords, count_newer_second_page_items(items, items_p2))
                     items.extend(items_p2)
             except Exception:
                 pass
@@ -984,6 +1010,7 @@ def main():
             candidates=target_candidates,
             alerts=target_alerts,
             interval_eff_s=round(task.effective_interval, 1),
+            cost=round(task.cost, 2),
             yield_per_h=round(task.yield_rate * 3600.0, 3),
             fresh_new=fresh_n,
             fresh_age_min_s=fresh_min_s,

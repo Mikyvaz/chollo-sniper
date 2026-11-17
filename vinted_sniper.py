@@ -1212,6 +1212,7 @@ def main():
             candidates=target_candidates,
             alerts=target_alerts,
             interval_eff_s=round(task.effective_interval, 1),
+            cost=round(task.cost, 2),
             yield_per_h=round(task.yield_rate * 3600.0, 3),
             fresh_new=len(_fresh_sorted),
             fresh_age_min_s=round(_fresh_sorted[0], 1) if _fresh_sorted else None,

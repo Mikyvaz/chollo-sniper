@@ -256,6 +256,75 @@ class TestNoStarvation(unittest.TestCase):
         self.assertIn("cabe en la cuota", sched.describe())
 
 
+class TestCostAwarePlan(unittest.TestCase):
+    """El plan descuenta lo que se gasta de verdad: 2.ª página (token normal extra) y fichas/perfiles."""
+
+    def _run(self, extra_normal, prio_per_poll, seconds=3 * 3600.0):
+        from antiban import TokenBucket, QueryTask, QueryScheduler
+
+        clock = FakeClock()
+        bucket = TokenBucket(rate_per_s=1.0, burst=2, clock=clock, sleeper=clock.sleep, max_debt=3)
+        tasks = [QueryTask(0.0, f"hot_{i}", f"q{i}", 1, 2, 20.0, tier="hot") for i in range(21)]
+        sched = QueryScheduler(tasks, bucket=bucket, clock=clock, sleeper=clock.sleep, now_fn=clock.now_dt,
+                               rng=random.Random(4))
+        rng = random.Random(9)
+        execs = {}
+        grants0 = 0
+        while clock.now < seconds:
+            task = sched.next()
+            execs.setdefault(task.radar_id, []).append(clock.now)
+            for _ in range(extra_normal.get(task.radar_id, 0)):   # 2.ª página
+                bucket.acquire()
+            if rng.random() < prio_per_poll:                      # ficha + perfil de un candidato
+                bucket.acquire(priority=True)
+            sched.done(task)
+            if clock.now < 600.0:
+                grants0 = bucket.grants + bucket.priority_grants
+        total = bucket.grants + bucket.priority_grants - grants0
+        planned = {t.radar_id: t.effective_interval for t in sched.all_tasks}
+        real = {rid: _pct(_gaps(v[len(v) // 3:]), 50) for rid, v in execs.items()}
+        return sched, planned, real, total / ((seconds - 600.0) / 60.0)
+
+    def test_second_page_cost_is_learned_and_plan_matches_reality(self):
+        extra = {f"hot_{i}": 1 for i in range(11)}                # 11 de 21 consultas piden 2.ª página
+        sched, planned, real, tokens_min = self._run(extra, 0.0)
+        costs = {t.radar_id: t.cost for t in sched.all_tasks}
+        self.assertGreater(costs["hot_0"], 1.9)
+        self.assertLess(costs["hot_20"], 1.1)
+        for rid in ("hot_0", "hot_20"):
+            self.assertLess(abs(real[rid] - planned[rid]) / planned[rid], 0.12,
+                            f"{rid}: real {real[rid]:.1f}s vs plan {planned[rid]:.1f}s")
+        self.assertLessEqual(tokens_min, 60.5)
+        self.assertIn("cuota", sched.describe())
+
+    def test_item_tokens_reduce_the_search_budget(self):
+        sched, planned, real, tokens_min = self._run({}, 0.3)
+        self.assertGreater(sched.plan["item_tokens_per_min"], 10.0)
+        self.assertLess(sched.plan["budget_per_min"], 58.2 - 10.0)
+        self.assertLess(abs(real["hot_5"] - planned["hot_5"]) / planned["hot_5"], 0.12)
+        self.assertLessEqual(tokens_min, 60.5)
+
+    def test_cost_survives_config_reload(self):
+        from antiban import TokenBucket, QueryScheduler
+
+        clock = FakeClock(start=10.0)
+        bucket = TokenBucket(rate_per_s=1.0, burst=2, clock=clock, sleeper=clock.sleep)
+        cfg = {"scheduling": {"wallapop": {"hot_interval_s": 20, "rate_per_s": 1.0}},
+               "targets": [{"id": "r", "enabled": True, "tier": "hot", "platforms": ["wallapop"],
+                            "wallapop_keywords": ["uno"]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            os.utime(path, (1000, 1000))
+            sched = QueryScheduler.from_config(cfg, platform="wallapop", bucket=bucket, config_path=path,
+                                               clock=clock, sleeper=clock.sleep, now_fn=clock.now_dt)
+            sched.all_tasks[0].cost = 2.0
+            os.utime(path, (2000, 2000))
+            self.assertTrue(sched.reload_if_changed())
+            self.assertEqual(sched.all_tasks[0].cost, 2.0)
+
+
 class TestAdaptiveCadence(unittest.TestCase):
     def test_balanced_multipliers_conserve_budget_and_respect_clamps(self):
         from antiban import balanced_multipliers
@@ -487,6 +556,52 @@ class TestSecondPagePolicy(unittest.TestCase):
                 self.assertEqual([i["id"] for i in items], ["a1"])
         self.assertEqual(calls.count("p1"), 8)
         self.assertEqual(calls.count("p2"), 2, "tras 2 páginas vacías deja de gastar el token de la 2.ª página")
+
+
+class TestSecondPageOnlyOlderItems(unittest.TestCase):
+    """Con order_by=newest la 2.ª página solo trae anuncios más antiguos: no cuenta como útil."""
+
+    def test_count_newer_second_page_items(self):
+        import sniper
+
+        p1 = [{"id": "a", "created_at": 3000}, {"id": "b", "created_at": 2000}]
+        self.assertEqual(sniper.count_newer_second_page_items(p1, [{"id": "c", "created_at": 1000}]), 0)
+        self.assertEqual(sniper.count_newer_second_page_items(p1, [{"id": "a", "created_at": 3000}]), 0)
+        self.assertEqual(sniper.count_newer_second_page_items(p1, [{"id": "d", "created_at": 2500}]), 1)
+        self.assertEqual(sniper.count_newer_second_page_items(p1, [{"id": "e"}]), 1)          # sin fecha: se cuenta
+        self.assertEqual(sniper.count_newer_second_page_items([], [{"id": "f", "created_at": 10}]), 1)
+        self.assertEqual(sniper.count_newer_second_page_items(p1, []), 0)
+
+    def test_fetch_wallapop_stops_when_second_page_is_only_older_items(self):
+        import sniper
+        from unittest import mock
+
+        calls = []
+
+        class Resp:
+            def __init__(self, payload):
+                self.status_code = 200
+                self.headers = {}
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, headers, proxies, impersonate, timeout):
+            calls.append("p2" if "next_page=" in url else "p1")
+            if "next_page=" in url:   # el mismo anuncio antiguo de siempre (no está en la 1.ª página)
+                return Resp({"data": {"section": {"payload": {"items": [{"id": "viejo", "created_at": 1000}]}}}})
+            return Resp({"data": {"section": {"payload": {"items": [{"id": "a1", "created_at": 5000,
+                                                                     "price": {"amount": 50}}]}}},
+                         "meta": {"next_page": "tok"}})
+
+        with mock.patch.object(sniper, "_wallapop_http_get", side_effect=fake_get), \
+             mock.patch.object(sniper, "second_page_policy", sniper.SecondPagePolicy(empty_streak=2, skip_polls=10)), \
+             mock.patch.object(sniper.health_monitor, "is_in_cooldown", return_value=False), \
+             mock.patch.object(sniper.health_monitor, "handle_http_response", return_value=(False, 0)):
+            for _ in range(8):
+                sniper.fetch_wallapop("sony a6000", 100, 338)
+        self.assertEqual(calls.count("p2"), 2)
 
 
 class TestListingAge(unittest.TestCase):
