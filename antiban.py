@@ -12,6 +12,7 @@ Incluye:
 import os
 import json
 import heapq
+import math
 import queue
 import random
 import time
@@ -659,20 +660,28 @@ default_parser_tracker = ParserHealthTracker("DEFAULT")
 # ==================== TOKEN BUCKET Y PLANIFICADOR POR CONSULTA (T2.3) ====================
 
 class TokenBucket:
-    """Limitador de tasa thread-safe con penalización por bloqueo y recuperación gradual."""
+    """Limitador de tasa thread-safe con penalización por bloqueo y recuperación gradual.
 
-    def __init__(self, rate_per_s: float, burst: int = 2, *, clock=time.monotonic, sleeper=time.sleep):
+    `acquire(priority=True)` (fichas y perfiles de un anuncio recién detectado) no espera: toma el
+    token a crédito, hasta `max_debt`, y la deuda la pagan las siguientes búsquedas normales. La tasa
+    media no cambia; solo se evita que un chollo espere detrás de la cola de sondeos.
+    """
+
+    def __init__(self, rate_per_s: float, burst: int = 2, *, clock=time.monotonic, sleeper=time.sleep,
+                 max_debt: int = 3):
         self._lock = threading.Lock()
         self.base = max(0.01, float(rate_per_s))
         self.base_rate = self.base
         self.rate = self.base
         self.burst = max(1, int(burst))
+        self.max_debt = max(0, int(max_debt))
         self._clock = clock
         self._sleeper = sleeper
         self._tokens = float(self.burst)
         self._last = float(self._clock())
         self._success_streak = 0
         self._recent = deque()
+        self.priority_grants = 0
 
     def set_base_rate(self, rate_per_s: float):
         with self._lock:
@@ -683,14 +692,25 @@ class TokenBucket:
                 self.base_rate = new_base
                 self.rate = max(new_base * 0.25, min(new_base, new_base * ratio))
 
-    def acquire(self) -> float:
-        """Bloquea hasta disponer de 1 token; devuelve los segundos esperados."""
+    def acquire(self, priority: bool = False) -> float:
+        """Bloquea hasta disponer de 1 token; devuelve los segundos esperados.
+
+        Con `priority=True` concede el token al instante mientras la deuda no supere `max_debt`
+        (el saldo puede quedar negativo); agotado el crédito, se comporta como una petición normal.
+        """
         with self._lock:
             now = float(self._clock())
             if now > self._last:
                 elapsed = now - self._last
                 self._tokens = min(float(self.burst), self._tokens + elapsed * self.rate)
                 self._last = now
+
+            if priority and self.max_debt > 0 and (self._tokens - 1.0) >= -float(self.max_debt):
+                self._tokens -= 1.0
+                # Cuenta en la ventana de 60 s (retrasa a las normales siguientes) sin desordenarla.
+                self._recent.append(max(now, self._recent[-1]) if self._recent else now)
+                self.priority_grants += 1
+                return 0.0
 
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
@@ -742,6 +762,21 @@ class TokenBucket:
             return self.rate
 
 
+def acquire_item_token(bucket):
+    """Token para una petición de ficha o perfil de un anuncio recién detectado.
+
+    Es prioritario: no espera detrás de la cola de búsquedas (la deuda la pagan los sondeos
+    siguientes, así que la tasa media hacia la plataforma no cambia). Un cubo sin soporte de
+    prioridad recibe la petición normal. Devuelve los segundos esperados.
+    """
+    if bucket is None:
+        return 0.0
+    try:
+        return bucket.acquire(priority=True)
+    except TypeError:
+        return bucket.acquire()
+
+
 @dataclass(order=True)
 class QueryTask:
     next_due: float
@@ -749,9 +784,75 @@ class QueryTask:
     query: str = field(default="", compare=False)
     min_price: float = field(default=0.0, compare=False)
     max_price: float = field(default=9999.0, compare=False)
-    interval_s: float = field(default=20.0, compare=False)
+    interval_s: float = field(default=20.0, compare=False)  # cadencia deseada (config)
     tier: str = field(default="hot", compare=False)
     target: dict = field(default_factory=dict, compare=False, repr=False)
+    eff_interval_s: float = field(default=0.0, compare=False)  # cadencia real tras ajustar a la capacidad
+    yield_rate: float = field(default=0.0, compare=False)      # candidatos/s (media exponencial)
+    last_done: float = field(default=0.0, compare=False)
+    polls: int = field(default=0, compare=False)
+
+    @property
+    def effective_interval(self) -> float:
+        return float(self.eff_interval_s) if self.eff_interval_s and self.eff_interval_s > 0 else float(self.interval_s)
+
+
+ADAPTIVE_DEFAULTS = {
+    "enabled": False,
+    "min_factor": 0.5,       # la consulta más productiva baja como mucho a la mitad de su cadencia
+    "max_factor": 1.6,       # la menos productiva se alarga como mucho un 60 %
+    "tau_s": 10800.0,        # memoria de la media exponencial de candidatos (3 h)
+    "prior_per_hour": 0.5,   # suelo: una consulta sin candidatos recientes no se queda sin sondear
+    "alert_bonus": 6.0,      # una alerta enviada pesa como 1 + 6 candidatos (acerca el reparto a los chollos reales)
+    "recompute_s": 120.0,
+}
+
+
+def parse_adaptive_config(sched_cfg: dict, plat_cfg: dict = None) -> dict:
+    """Fusiona ADAPTIVE_DEFAULTS <- scheduling.adaptive <- scheduling.<plataforma>.adaptive."""
+    out = dict(ADAPTIVE_DEFAULTS)
+    for src in ((sched_cfg or {}).get("adaptive"), (plat_cfg or {}).get("adaptive")):
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if k not in out:
+                    continue
+                try:
+                    out[k] = bool(v) if k == "enabled" else float(v)
+                except (TypeError, ValueError):
+                    pass
+    out["min_factor"] = min(1.0, max(0.1, out["min_factor"]))
+    out["max_factor"] = max(1.0, min(10.0, out["max_factor"]))
+    out["tau_s"] = max(300.0, out["tau_s"])
+    out["prior_per_hour"] = max(1e-6, out["prior_per_hour"])
+    out["alert_bonus"] = max(0.0, min(50.0, out["alert_bonus"]))
+    out["recompute_s"] = max(10.0, out["recompute_s"])
+    return out
+
+
+def balanced_multipliers(base_freqs, weights, budget, lo, hi):
+    """Multiplicadores de frecuencia g_i = clamp(c * w_i, lo, hi) con c tal que sum(f_i * g_i) <= budget.
+
+    Reparte el mismo número total de peticiones (nunca más que `budget`) dando más frecuencia a las
+    consultas con más peso. Con pesos iguales devuelve 1.0 para todas.
+    """
+    n = len(base_freqs)
+    if n == 0:
+        return []
+    if n != len(weights) or min(weights) <= 0 or (max(weights) - min(weights)) < 1e-12:
+        return [1.0] * n
+    lo, hi = float(lo), float(hi)
+
+    def total(c):
+        return sum(f * min(hi, max(lo, c * w)) for f, w in zip(base_freqs, weights))
+
+    c_lo, c_hi = lo / max(weights), hi / min(weights)
+    for _ in range(60):
+        mid = math.sqrt(c_lo * c_hi)
+        if total(mid) > budget:
+            c_hi = mid
+        else:
+            c_lo = mid
+    return [min(hi, max(lo, c_lo * w)) for w in weights]
 
 
 def _extract_queries_for_platform(target: dict, platform: str):
@@ -807,7 +908,15 @@ def build_query_tasks_from_config(config: dict, platform: str = "wallapop", now:
 
 
 class QueryScheduler:
-    """Planificador heapq por consulta con escalonamiento inicial, prioridad por cadencia y recarga en caliente."""
+    """Planificador heapq por consulta con escalonamiento inicial y recarga en caliente.
+
+    - Ajusta la cadencia deseada de cada consulta a la capacidad real del cubo: si la configuración
+      pide más peticiones de las que caben, todas se alargan en la misma proporción (ninguna se queda
+      sin sondear).
+    - Entre las consultas vencidas elige la más atrasada en proporción a su propia cadencia.
+    - Opcional (`adaptive`): reparte el mismo número de peticiones dando más frecuencia a las consultas
+      que traen más candidatos reales, dentro de [min_factor, max_factor] de su cadencia.
+    """
 
     def __init__(
         self,
@@ -826,6 +935,10 @@ class QueryScheduler:
         heartbeat=None,
         rng=None,
         stagger_initial: bool = True,
+        utilization: float = 0.97,
+        adaptive: dict = None,
+        state_path: str = None,
+        wall_clock=None,
     ):
         self._lock = threading.Lock()
         self.platform = (platform or "wallapop").lower()
@@ -840,6 +953,13 @@ class QueryScheduler:
         self.night_end_hour = int(night_end_hour)
         self.config_path = config_path
         self.config = config or {}
+        self.utilization = min(1.0, max(0.5, float(utilization)))
+        self.adaptive = dict(adaptive) if isinstance(adaptive, dict) else dict(ADAPTIVE_DEFAULTS)
+        self.state_path = state_path
+        self._wall_clock = wall_clock or time.time
+        self._last_fit = None
+        self._last_save = None
+        self.plan = {}
         self._last_mtime = None
         if self.config_path and os.path.exists(self.config_path):
             try:
@@ -850,8 +970,11 @@ class QueryScheduler:
         raw_tasks = list(tasks) if tasks is not None else build_query_tasks_from_config(self.config, self.platform, self._clock())
         if stagger_initial and len(raw_tasks) > 1:
             self._stagger_tasks_in_place(raw_tasks)
+        self._all = list(raw_tasks)
         self._heap = list(raw_tasks)
         heapq.heapify(self._heap)
+        self._load_state()
+        self._fit_intervals()
 
     @classmethod
     def from_config(
@@ -866,6 +989,7 @@ class QueryScheduler:
         now_fn=None,
         heartbeat=None,
         rng=None,
+        state_path: str = None,
     ):
         plat = (platform or "wallapop").lower()
         sched_cfg = (config or {}).get("scheduling", {}) or {}
@@ -876,7 +1000,8 @@ class QueryScheduler:
         clk = clock or (bucket._clock if bucket is not None else time.monotonic)
         slp = sleeper or (bucket._sleeper if bucket is not None else time.sleep)
         if bucket is None:
-            bucket = TokenBucket(rate_per_s=rate_per_s, burst=2, clock=clk, sleeper=slp)
+            bucket = TokenBucket(rate_per_s=rate_per_s, burst=2, clock=clk, sleeper=slp,
+                                 max_debt=cls._cfg_number(plat_cfg, sched_cfg, "priority_burst", 3))
         else:
             bucket.set_base_rate(rate_per_s)
         tasks = build_query_tasks_from_config(config, plat, now=float(clk()))
@@ -892,7 +1017,130 @@ class QueryScheduler:
             now_fn=now_fn,
             heartbeat=heartbeat,
             rng=rng,
+            utilization=cls._cfg_number(plat_cfg, sched_cfg, "utilization", 0.97),
+            adaptive=parse_adaptive_config(sched_cfg, plat_cfg),
+            state_path=state_path,
         )
+
+    @staticmethod
+    def _cfg_number(plat_cfg, sched_cfg, key, default):
+        for src in (plat_cfg, sched_cfg):
+            if isinstance(src, dict) and src.get(key) is not None:
+                try:
+                    return float(src[key])
+                except (TypeError, ValueError):
+                    pass
+        return float(default)
+
+    # ---------- Ajuste a la capacidad y reparto por rendimiento ----------
+
+    @property
+    def all_tasks(self):
+        with self._lock:
+            return list(self._all)
+
+    def _fit_intervals(self):
+        """Calcula eff_interval_s de cada consulta: cabe en el cubo y, si procede, pondera por rendimiento."""
+        with self._lock:
+            tasks = list(self._all)
+        self._last_fit = float(self._clock())
+        if not tasks:
+            self.plan = {}
+            return
+        demand = sum(1.0 / max(0.5, float(t.interval_s)) for t in tasks)
+        budget = demand
+        if self.bucket is not None:
+            budget = min(demand, float(self.bucket.base) * self.utilization)
+        scale = (budget / demand) if demand > 0 else 1.0
+        mults = [1.0] * len(tasks)
+        ad = self.adaptive or {}
+        adaptive_on = bool(ad.get("enabled")) and len(tasks) > 1
+        if adaptive_on:
+            lo = 1.0 / float(ad["max_factor"])
+            hi = 1.0 / float(ad["min_factor"])
+            prior = float(ad["prior_per_hour"])
+            weights = [math.sqrt(max(0.0, float(t.yield_rate)) * 3600.0 + prior) for t in tasks]
+            base_freqs = [scale / max(0.5, float(t.interval_s)) for t in tasks]
+            mults = balanced_multipliers(base_freqs, weights, budget, lo, hi)
+        for t, g in zip(tasks, mults):
+            t.eff_interval_s = max(0.5, float(t.interval_s)) / (scale * g)
+        self.plan = {
+            "demand_per_min": round(demand * 60.0, 2),
+            "budget_per_min": round(budget * 60.0, 2),
+            "scale": round(scale, 4),
+            "oversubscribed": bool(scale < 0.999),
+            "adaptive": adaptive_on,
+            "tasks": len(tasks),
+        }
+
+    def describe(self) -> str:
+        """Resumen de una línea del plan vigente (para el log de arranque y los informes)."""
+        p = self.plan or {}
+        if not p:
+            return "sin consultas"
+        tiers = {}
+        for t in self.all_tasks:
+            tiers.setdefault(t.tier, []).append(t.effective_interval)
+        parts = [f"{tier}: {min(v):.0f}-{max(v):.0f}s (n={len(v)})" for tier, v in sorted(tiers.items())]
+        fit = "sobre-suscrito, cadencias alargadas" if p.get("oversubscribed") else "cabe en la cuota"
+        return (f"demanda {p['demand_per_min']:.1f}/min vs cuota {p['budget_per_min']:.1f}/min ({fit}, "
+                f"x{1.0 / max(1e-9, p['scale']):.2f}) | adaptativo={'sí' if p.get('adaptive') else 'no'} | "
+                + " | ".join(parts))
+
+    def yield_score(self, candidates=0, alerts=0) -> float:
+        """Rendimiento de un sondeo: candidatos reales más un extra por cada alerta enviada."""
+        bonus = float((self.adaptive or {}).get("alert_bonus", ADAPTIVE_DEFAULTS["alert_bonus"]))
+        return max(0.0, float(candidates or 0)) + bonus * max(0.0, float(alerts or 0))
+
+    def _observe_yield(self, task: QueryTask, yield_count, now: float):
+        """Actualiza la media exponencial de candidatos/s de la consulta con lo que trajo este sondeo."""
+        try:
+            count = max(0.0, float(yield_count or 0))
+        except (TypeError, ValueError):
+            count = 0.0
+        if task.last_done and task.last_done > 0 and now > task.last_done:
+            dt = max(1.0, now - task.last_done)
+            tau = float((self.adaptive or {}).get("tau_s") or ADAPTIVE_DEFAULTS["tau_s"])
+            alpha = 1.0 - math.exp(-dt / tau)
+            task.yield_rate += alpha * ((count / dt) - task.yield_rate)
+        task.last_done = now
+        task.polls += 1
+
+    def _load_state(self):
+        """Recupera el rendimiento aprendido antes del reinicio (si es reciente) para no partir de cero."""
+        if not self.state_path:
+            return
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_at = float(data.get("saved_at") or 0)
+            if self._wall_clock() - saved_at > 12 * 3600:
+                return
+            rates = data.get("rates") or {}
+            for t in self._all:
+                v = rates.get(f"{t.radar_id}|{t.query}")
+                if v is not None:
+                    t.yield_rate = max(0.0, float(v))
+        except Exception:
+            return
+
+    def save_state(self):
+        if not self.state_path:
+            return False
+        try:
+            payload = {
+                "saved_at": float(self._wall_clock()),
+                "platform": self.platform,
+                "rates": {f"{t.radar_id}|{t.query}": round(float(t.yield_rate), 9) for t in self.all_tasks},
+            }
+            tmp = f"{self.state_path}.tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, self.state_path)
+            self._last_save = float(self._clock())
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _stagger_tasks_in_place(tasks):
@@ -960,19 +1208,35 @@ class QueryScheduler:
             if not due:
                 task = heapq.heappop(self._heap)
             else:
-                # Entre las tareas ya vencidas, priorizar menor interval_s (hot antes que standard)
-                due.sort(key=lambda t: (float(t.interval_s), float(t.next_due)))
+                # Entre las vencidas, la más atrasada en proporción a su propia cadencia. Con prioridad
+                # estricta a 'hot' y el cubo saturado, las 'standard' no se sondeaban nunca de día.
+                due.sort(key=lambda t: (
+                    -(now_after - float(t.next_due)) / max(0.5, t.effective_interval),
+                    t.effective_interval,
+                    float(t.next_due),
+                ))
                 task = due.pop(0)
                 for rem_t in due:
                     heapq.heappush(self._heap, rem_t)
             return task
 
-    def done(self, task: QueryTask) -> QueryTask:
-        """Reprograma task con next_due = now + interval_s * mult * uniform(0.85, 1.15)."""
+    def done(self, task: QueryTask, yield_count=0) -> QueryTask:
+        """Reprograma task con next_due = now + cadencia_efectiva * mult * uniform(0.85, 1.15).
+
+        `yield_count`: candidatos reales que trajo este sondeo (anuncios nuevos que superan los filtros
+        locales). Alimenta el reparto adaptativo; con 0 o sin `adaptive` el comportamiento no cambia.
+        """
         now = float(self._clock())
+        self._observe_yield(task, yield_count, now)
+        recompute_s = float((self.adaptive or {}).get("recompute_s") or ADAPTIVE_DEFAULTS["recompute_s"])
+        if self._last_fit is None or (now - self._last_fit) >= recompute_s:
+            self._fit_intervals()
+            if self.state_path and (self._last_save is None or (now - self._last_save) >= 600.0):
+                self.save_state()
+                self._last_save = now
         mult = self.night_multiplier if self.is_night_time() else 1.0
         jitter = self._rng.uniform(0.85, 1.15)
-        task.next_due = now + float(task.interval_s) * mult * jitter
+        task.next_due = now + task.effective_interval * mult * jitter
         with self._lock:
             heapq.heappush(self._heap, task)
         return task
@@ -1015,25 +1279,32 @@ class QueryScheduler:
             self.night_multiplier = float(sched_cfg["night_multiplier"])
         if self.bucket is not None and "rate_per_s" in plat_cfg:
             self.bucket.set_base_rate(float(plat_cfg["rate_per_s"]))
+        self.utilization = min(1.0, max(0.5, self._cfg_number(plat_cfg, sched_cfg, "utilization", self.utilization)))
+        self.adaptive = parse_adaptive_config(sched_cfg, plat_cfg)
 
         now = float(self._clock())
         fresh_tasks = build_query_tasks_from_config(new_cfg, self.platform, now=now)
         with self._lock:
-            existing_by_key = {(t.radar_id, t.query): t for t in self._heap}
+            existing_by_key = {(t.radar_id, t.query): t for t in self._all}
             merged = []
             new_only = []
             for ft in fresh_tasks:
                 prev = existing_by_key.get((ft.radar_id, ft.query))
                 if prev is not None:
                     ft.next_due = prev.next_due
+                    ft.yield_rate = prev.yield_rate
+                    ft.last_done = prev.last_done
+                    ft.polls = prev.polls
                     merged.append(ft)
                 else:
                     new_only.append(ft)
             if len(new_only) > 1:
                 self._stagger_tasks_in_place(new_only)
             merged.extend(new_only)
+            self._all = list(merged)
             self._heap = merged
             heapq.heapify(self._heap)
+        self._fit_intervals()
         return True
 
 

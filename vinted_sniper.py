@@ -19,7 +19,8 @@ from curl_cffi import requests
 
 from antiban import (
     BrowserProfileRotator, AntiBanTiming, AntiBanHealthMonitor, ParserHealthTracker,
-    default_rate_limiter, TokenBucket, QueryScheduler, set_platform_bucket, get_platform_bucket
+    default_rate_limiter, TokenBucket, QueryScheduler, set_platform_bucket, get_platform_bucket,
+    acquire_item_token
 )
 from logger import setup_logger, log_metric, compute_pipeline_ms
 from core_engine import (
@@ -37,10 +38,11 @@ from core_engine import (
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, is_ai_budget_paused,
     CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, estimate_cex_from_title,
-    parse_relative_age_minutes
+    parse_relative_age_minutes, DB_PATH
 )
 
 SCAN_INTERVAL = int(os.getenv("VINTED_SCAN_INTERVAL_SECONDS", os.getenv("SCAN_INTERVAL_SECONDS", "45")))
+SCHEDULER_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "scheduler_state.vinted.json")
 
 rotator = BrowserProfileRotator(rotate_every_rounds=120)
 timing = AntiBanTiming(night_start_hour=2, night_end_hour=7)
@@ -164,20 +166,22 @@ class VintedClient:
 
             # 1. Extractor optimizado de array JSON en payload RSC ("items":[{"id":... "productItem":{...}}])
             marker = r'\"items\":['
-            idx = r.text.find(marker)
+            page_text = r.text  # ~3,7 MB: se resuelve una vez, no en cada carácter del bucle
+            idx = page_text.find(marker)
             if idx != -1:
                 try:
                     start_bracket = idx + len(marker) - 1
                     count = 0
                     end_bracket = start_bracket
-                    for i in range(start_bracket, len(r.text)):
-                        if r.text[i] == '[': count += 1
-                        elif r.text[i] == ']':
+                    for i in range(start_bracket, len(page_text)):
+                        ch = page_text[i]
+                        if ch == '[': count += 1
+                        elif ch == ']':
                             count -= 1
                             if count == 0:
                                 end_bracket = i + 1
                                 break
-                    raw_slice = r.text[start_bracket:end_bracket]
+                    raw_slice = page_text[start_bracket:end_bracket]
                     cleaned_json = raw_slice.replace(r'\"', '"').replace(r'\\', '\\')
                     raw_items_arr = json.loads(cleaned_json)
                     for raw_entry in raw_items_arr:
@@ -231,7 +235,9 @@ class VintedClient:
                                 "age_days": None,
                                 "listings_count": None,
                                 "rating": None,
-                                "sales": None
+                                "sales": None,
+                                **({"is_business": bool(user_data["isBusiness"])}
+                                   if user_data.get("isBusiness") is not None else {}),
                             }
                         }
                 except Exception:
@@ -355,8 +361,8 @@ class VintedClient:
         if self.is_in_cooldown():
             return None
         bkt = get_platform_bucket("VINTED")
-        if bkt is not None:
-            bkt.acquire()
+        # La ficha de un anuncio nuevo no espera detrás de la cola de búsquedas (token prioritario)
+        acquire_item_token(bkt)
         t0 = time.time()
         try:
             r = self.session.get(item_url, timeout=12)
@@ -411,26 +417,19 @@ class VintedClient:
             if m_uid:
                 seller_info["id"] = m_uid.group(1).strip()
 
-            # Extracción de reputación del vendedor en Vinted (JSON SSR y regex multilingüe)
-            m_fb = re.search(r'"feedback_count":\s*(\d+)', r.text)
-            if m_fb:
-                try:
-                    seller_info["sales"] = int(m_fb.group(1))
-                    seller_info["feedback_count"] = seller_info["sales"]
-                except Exception:
-                    pass
-
-            m_rep = re.search(r'"feedback_reputation":\s*([\d\.]+)', r.text)
-            if m_rep:
-                try:
-                    rep_val = float(m_rep.group(1))
-                    seller_info["feedback_reputation"] = rep_val
-                    if rep_val > 0:
-                        seller_info["rating"] = round(rep_val * 5.0, 1)
-                    elif seller_info["sales"] == 0:
-                        seller_info["rating"] = 0.0
-                except Exception:
-                    pass
+            # Reputación del vendedor desde el bloque de datos de la ficha (comillas escapadas en el payload RSC)
+            fb_count, fb_rep, fb_business = parse_vinted_seller_feedback(r.text)
+            if fb_count is not None:
+                seller_info["sales"] = fb_count
+                seller_info["feedback_count"] = fb_count
+            if fb_rep is not None:
+                seller_info["feedback_reputation"] = fb_rep
+                if fb_rep > 0:
+                    seller_info["rating"] = round(fb_rep * 5.0, 1)
+                elif fb_count == 0:
+                    seller_info["rating"] = 0.0
+            if fb_business is not None:
+                seller_info["is_business"] = fb_business
 
             # Fallback 1: Rating textual en aria-label (ES, FR, IT, EN)
             if seller_info["rating"] is None:
@@ -444,22 +443,12 @@ class VintedClient:
                     except Exception:
                         pass
 
-            # Fallback 2: Ventas/reseñas textuales en aria-label (ES, FR, IT, EN)
+            # Fallback 2: "sin valoraciones" solo si aparece junto al bloque de valoraciones del perfil.
+            # (El antiguo fallback cogía el primer número tras la etiqueta, que era el ancho del icono
+            # de estrella: «12» para casi todos los vendedores.) Si no hay dato fiable queda None y
+            # enrich_seller_profile consulta la API del usuario.
             if seller_info["sales"] is None:
-                m_revs = re.search(
-                    r'aria-label="[^"]*(?:valoraci[oó]n\s+total|note\s+globale|valutazione|overall\s+rating)[^"]*"[^>]*>.*?([1-9]\d*)',
-                    r.text, re.DOTALL | re.IGNORECASE
-                )
-                if m_revs:
-                    try:
-                        seller_info["sales"] = int(m_revs.group(1))
-                    except Exception:
-                        pass
-                elif re.search(
-                    r'data-testid="profile-ratings"[^>]*>.*?(?:Sin valoraciones|Pas encore d\'évaluations|0\s+évaluation|Nessuna recensione|0\s+recensioni|No reviews|0\s+reviews)',
-                    r.text, re.IGNORECASE
-                ):
-                    seller_info["sales"] = 0
+                seller_info["sales"] = parse_vinted_zero_reviews(r.text)
 
             # Fallback 3: Detección o extracción de país del vendedor
             if not seller_info.get("country_code"):
@@ -493,6 +482,64 @@ class VintedClient:
             return desc, clean_photos, upload_date, seller_info
         except Exception:
             return None
+
+
+_RSC_FEEDBACK_COUNT_RE = re.compile(r'\\?"feedback_count\\?"\s*:\s*(\d+)')
+_RSC_FEEDBACK_REP_RE = re.compile(r'\\?"feedback_reputation\\?"\s*:\s*(\d+(?:\.\d+)?)')
+_RSC_BUSINESS_RE = re.compile(r'\\?"business\\?"\s*:\s*(true|false)')
+_ZERO_REVIEWS_RE = re.compile(
+    r"(?:Sin valoraciones|Aún no hay valoraciones|Pas encore d.évaluations?|\b0\s+évaluations?|Nessuna recensione|"
+    r"\b0\s+recensioni|No reviews(?: yet)?|\b0\s+reviews)",
+    re.IGNORECASE,
+)
+
+
+def parse_vinted_seller_feedback(page):
+    """(valoraciones, reputación 0-1, es_profesional) del bloque del vendedor de la ficha de Vinted.
+
+    El payload RSC lleva las comillas escapadas (`\\"feedback_count\\":7`); se aceptan ambas formas.
+    Reputación y `business` se buscan cerca del contador para no mezclar datos de otro objeto.
+    Devuelve None en los campos que no aparezcan.
+    """
+    text = page or ""
+    m = _RSC_FEEDBACK_COUNT_RE.search(text)
+    if not m:
+        return None, None, None
+    window = text[max(0, m.start() - 400): m.end() + 400]
+    m_rep = _RSC_FEEDBACK_REP_RE.search(window)
+    m_bus = _RSC_BUSINESS_RE.search(window)
+    return (int(m.group(1)),
+            float(m_rep.group(1)) if m_rep else None,
+            (m_bus.group(1) == "true") if m_bus else None)
+
+
+def parse_vinted_zero_reviews(page):
+    """0 si el bloque de valoraciones del perfil dice explícitamente que no tiene ninguna; si no, None."""
+    text = page or ""
+    m = re.search(r'data-testid="profile-ratings"', text)
+    if not m:
+        return None
+    return 0 if _ZERO_REVIEWS_RE.search(text[m.end(): m.end() + 800]) else None
+
+
+def merge_catalog_seller(seller_info, item):
+    """Completa el vendedor leído en la ficha con lo que ya traía el catálogo.
+
+    El id numérico del catálogo (`productItem.user.id`) es el del vendedor de ESTE anuncio; el de la
+    ficha sale del primer enlace /member/ de la página, así que el del catálogo tiene prioridad.
+    """
+    cat = item.get("seller") if isinstance(item.get("seller"), dict) else {}
+    cat_id = str(cat.get("id") or "").strip()
+    if cat_id.isdigit():
+        seller_info["id"] = cat_id
+    if not seller_info.get("name") and cat.get("name"):
+        seller_info["name"] = cat["name"]
+        seller_info.setdefault("username", cat["name"])
+    if seller_info.get("is_business") is None and cat.get("is_business") is not None:
+        seller_info["is_business"] = bool(cat["is_business"])
+    if not seller_info.get("country_code") and item.get("country_code"):
+        seller_info["country_code"] = item["country_code"]
+    return seller_info
 
 
 def handle_vinted_details_result(conn, item_id, title, base_price, details_res, details_fail, max_retries=2):
@@ -633,10 +680,12 @@ def main():
     send_startup_ping(len(targets), min_profit, min_score)
 
     scheduler = QueryScheduler.from_config(
-        config, platform="vinted", config_path=CONFIG_PATH, heartbeat=touch_heartbeat
+        config, platform="vinted", config_path=CONFIG_PATH, heartbeat=touch_heartbeat,
+        state_path=SCHEDULER_STATE_PATH
     )
     bucket = scheduler.bucket
     set_platform_bucket("VINTED", bucket)
+    print(f"[PLANIFICADOR VINTED] {scheduler.describe()}")
 
     global_blacklist = config.get("global_blacklist", [])
     min_personal_savings = float(config.get("min_personal_savings_eur", 25))
@@ -690,6 +739,9 @@ def main():
         q_start = time.time()
         target_items_count = 0
         target_new_count = 0
+        target_candidates = 0   # nuevos que superan los filtros locales: alimenta el reparto adaptativo
+        target_alerts = 0       # alertas enviadas en este sondeo (pesan más que un candidato)
+        fresh_ages = []         # edad (s) de los candidatos al verlos por primera vez (texto relativo de la ficha)
         eval_before = round_evaluated
 
         for _ in (0,):
@@ -786,8 +838,7 @@ def main():
                     _age_min = parse_relative_age_minutes(upload_date)
                     vinted_published_ts = (time.time() - _age_min * 60.0) if _age_min is not None else None
                     if seller_info:
-                        if not seller_info.get("country_code") and item.get("country_code"):
-                            seller_info["country_code"] = item["country_code"]
+                        merge_catalog_seller(seller_info, item)
                         item["seller"] = seller_info
                         if seller_info.get("country_code") and not item.get("country_code"):
                             item["country_code"] = seller_info["country_code"]
@@ -814,6 +865,9 @@ def main():
                         continue
 
                     item["platform"] = "VINTED"
+                    target_candidates += 1
+                    if price_drop_info is None and _age_min is not None and _age_min <= 60.0:
+                        fresh_ages.append(_age_min * 60.0)
                     t["enrich"] = time.perf_counter()
                     enrich_seller_profile(item, http_session=vinted.session if 'vinted' in locals() else None)
                     item["landed_cost"] = landed_cost
@@ -867,6 +921,14 @@ def main():
                         mark_item_seen(conn, "VINTED", item_id, title, base_price)
                         continue
 
+                    # La foto de portada se descarga ya, en paralelo con la Puerta 1 (ahorra su latencia
+                    # antes de la visión); si la Puerta 1 rechaza, solo se pierde una descarga de CDN.
+                    photo_urls = extra_photos if extra_photos else (item.get("photos") or ([item["photo"]] if item.get("photo") else []))
+                    cover_url = photo_urls[0] if photo_urls else ""
+                    _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
+                        photo_urls, rotator=rotator, timings=t, eager=True
+                    )
+
                     # PUERTA 1: Criba ultra-ligera por texto (0 fotos, 0 thinking tokens)
                     t["p1"] = time.perf_counter()
                     ps_decision, ps_reason, ps_conf, from_cache = prescreen_item_text(
@@ -910,11 +972,6 @@ def main():
                         current_seller_id = str(seller).strip()
 
                     text_for_embed = f"{title}\n{desc}".strip()
-                    photo_urls = extra_photos if extra_photos else (item.get("photos") or ([item["photo"]] if item.get("photo") else []))
-                    cover_url = photo_urls[0] if photo_urls else ""
-                    _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
-                        photo_urls, rotator=rotator, timings=t
-                    )
                     sem_action, ai_data, sem_rej, item_vec, _ = evaluate_semantic_duplicate(
                         conn, "VINTED", item_id, title, desc, base_price,
                         radar_id=target.get("id", ""),
@@ -930,6 +987,7 @@ def main():
 
                     if ai_data is None:
                         # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
+                        _img_hash_provider()  # recoge la foto descargada en paralelo con la Puerta 1
                         if _img_prefetch["photos"] is not None:
                             raw_photos = _img_prefetch["photos"]
                         else:
@@ -1122,6 +1180,7 @@ def main():
                         is_flash=False
                     )
                     t["alert_end"] = time.perf_counter()
+                    target_alerts += 1
                     ms_final = _emit_pipeline("alerted")
                     try:
                         conn.execute(
@@ -1135,8 +1194,9 @@ def main():
 
             print(f"[RADAR VINTED] {target.get('name', task.radar_id)} ('{q}'): {target_items_count} items ({target_new_count} nuevos)")
 
-        scheduler.done(task)
+        scheduler.done(task, yield_count=scheduler.yield_score(target_candidates, target_alerts))
         q_dur = round(time.time() - q_start, 3)
+        _fresh_sorted = sorted(fresh_ages)
         log_metric(
             event="query_completed",
             service="vinted",
@@ -1149,6 +1209,13 @@ def main():
             items_new=target_new_count,
             items_evaluated=round_evaluated - eval_before,
             rate_per_s=round(bucket.rate, 3),
+            candidates=target_candidates,
+            alerts=target_alerts,
+            interval_eff_s=round(task.effective_interval, 1),
+            yield_per_h=round(task.yield_rate * 3600.0, 3),
+            fresh_new=len(_fresh_sorted),
+            fresh_age_min_s=round(_fresh_sorted[0], 1) if _fresh_sorted else None,
+            fresh_age_med_s=round(_fresh_sorted[len(_fresh_sorted) // 2], 1) if _fresh_sorted else None,
         )
 
         queries_in_round += 1

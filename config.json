@@ -19,7 +19,14 @@
       "standard_interval_s": 240,
       "rate_per_s": 0.30
     },
-    "night_multiplier": 3
+    "night_multiplier": 3,
+    "adaptive": {
+      "enabled": true,
+      "min_factor": 0.5,
+      "max_factor": 1.6,
+      "tau_s": 10800,
+      "prior_per_hour": 0.5
+    }
   },
   "stores": {
     "milanuncios": {"enabled": true},
@@ -43,7 +50,9 @@
     "push_offer_min_profit_eur": 80,
     "push_max_per_hour": 4,
     "push_zero_review_sellers": false,
-    "push_high_risk": false
+    "push_high_risk": false,
+    "push_top_deals_always": true,
+    "push_top_deal_min_profit_eur": 25
   },
   "global_blacklist": [
     "busco",

@@ -469,6 +469,14 @@ def main():
                             mark_item_seen(conn, plat, item_id, title, price)
                             continue
 
+                        # La foto de portada se descarga ya, en paralelo con la Puerta 1 (ahorra su latencia
+                        # antes de la visión); si la Puerta 1 rechaza, solo se pierde una descarga de CDN.
+                        img_urls = item.get("images", [])
+                        cover_url = img_urls[0] if img_urls else ""
+                        _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
+                            img_urls, rotator=rotator, force_safari=store["img_safari"], timings=t, eager=True
+                        )
+
                         # PUERTA 1: Criba ultra-ligera por texto (0 fotos, 0 thinking tokens)
                         t["p1"] = time.perf_counter()
                         ps_decision, ps_reason, ps_conf, from_cache = prescreen_item_text(
@@ -506,11 +514,6 @@ def main():
                             current_seller_id = str(seller).strip()
 
                         text_for_embed = f"{title}\n{desc}".strip()
-                        img_urls = item.get("images", [])
-                        cover_url = img_urls[0] if img_urls else ""
-                        _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
-                            img_urls, rotator=rotator, force_safari=store["img_safari"], timings=t
-                        )
                         sem_action, ai_data, sem_rej, item_vec, _ = evaluate_semantic_duplicate(
                             conn, plat, item_id, title, desc, price,
                             radar_id=target.get("id", ""),
@@ -527,6 +530,7 @@ def main():
 
                         if ai_data is None:
                             # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
+                            _img_hash_provider()  # recoge la foto descargada en paralelo con la Puerta 1
                             if _img_prefetch["photos"] is not None:
                                 raw_photos = _img_prefetch["photos"]
                             else:

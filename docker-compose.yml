@@ -14,6 +14,8 @@ services:
       - SCAN_INTERVAL_SECONDS=8
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
+      # Tope mensual de IA decidido por el usuario el 17/11/2026 (prevalece sobre .env)
+      - AI_MONTHLY_BUDGET_USD=3
     volumes:
       - ./data:/app/data
       - ./kits:/app/kits
@@ -46,6 +48,7 @@ services:
       - VINTED_SCAN_INTERVAL_SECONDS=45
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
+      - AI_MONTHLY_BUDGET_USD=3
     volumes:
       - ./data:/app/data
       - ./kits:/app/kits
@@ -77,6 +80,7 @@ services:
       - MULTI_SCAN_INTERVAL_SECONDS=45
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
+      - AI_MONTHLY_BUDGET_USD=3
     volumes:
       - ./data:/app/data
       - ./kits:/app/kits
@@ -110,6 +114,7 @@ services:
       - PYTHONIOENCODING=utf-8
       - LANG=C.UTF-8
       - LC_ALL=C.UTF-8
+      - AI_MONTHLY_BUDGET_USD=3
     volumes:
       - ./data:/app/data
       - ./kits:/app/kits
@@ -143,6 +148,7 @@ services:
       - TZ=Europe/Madrid
       - PYTHONIOENCODING=utf-8
       - OUTCOME_BACKFILL_DAYS=14
+      - AI_MONTHLY_BUDGET_USD=3
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json:ro

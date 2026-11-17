@@ -35,10 +35,11 @@ from core_engine import (
     record_fraud_sample,
     enrich_seller_profile, evaluate_seller_risk,
     find_semantic_duplicate, save_item_embedding, evaluate_semantic_duplicate, make_image_hash_prefetcher, is_ai_budget_paused,
-    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, estimate_cex_from_title
+    CONSOLE_RADAR_IDS, evaluate_bundle_cex_bonus, pre_gate_cex_offer_margin, estimate_cex_from_title, DB_PATH
 )
 
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL_SECONDS", "8"))
+SCHEDULER_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "scheduler_state.wallapop.json")
 
 ITALIAN_OR_FOREIGN_HINTS = [
     "azzurra", "spedizione", "perfettamente", "funzionante", "scatola",
@@ -52,6 +53,44 @@ health_monitor = AntiBanHealthMonitor("WALLAPOP SNIPER")
 parser_tracker = ParserHealthTracker("WALLAPOP SNIPER", default_threshold=3)
 logger = setup_logger("WALLAPOP-SNIPER")
 default_rate_limiter.register_platform("WALLAPOP", SCAN_INTERVAL)
+
+
+class SecondPagePolicy:
+    """Decide si merece pedir la 2.ª página de una búsqueda que devolvió pocos resultados.
+
+    Con `order_by=newest` los anuncios nuevos entran por la 1.ª página; la 2.ª solo completa el fondo.
+    En las consultas escasas casi siempre llega vacía y cada petición gasta un token del cubo, es decir,
+    retrasa el siguiente sondeo. Tras `empty_streak` páginas sin nada nuevo se deja de pedir durante
+    `skip_polls` sondeos y luego se vuelve a comprobar.
+    """
+
+    def __init__(self, empty_streak=2, skip_polls=40):
+        self.empty_streak = max(1, int(empty_streak))
+        self.skip_polls = max(0, int(skip_polls))
+        self._lock = threading.Lock()
+        self._state = {}
+
+    def should_fetch(self, query) -> bool:
+        with self._lock:
+            st = self._state.get(str(query))
+            if not st or st["skip"] <= 0:
+                return True
+            st["skip"] -= 1
+            return False
+
+    def record(self, query, added: int):
+        with self._lock:
+            st = self._state.setdefault(str(query), {"empty": 0, "skip": 0})
+            if int(added or 0) > 0:
+                st["empty"] = 0
+                st["skip"] = 0
+            else:
+                st["empty"] += 1
+                if st["empty"] >= self.empty_streak:
+                    st["skip"] = self.skip_polls
+
+
+second_page_policy = SecondPagePolicy()
 
 
 def get_wallapop_queries_for_target(target):
@@ -71,6 +110,29 @@ def is_foreign_listing(item, title, desc):
     if any(h in full_text for h in ITALIAN_OR_FOREIGN_HINTS):
         return True, "IT/EU"
     return False, "ES"
+
+
+def listing_age_seconds(item, now=None):
+    """Segundos desde la publicación (`created_at`) del anuncio, o None si no trae fecha válida."""
+    raw = (item or {}).get("created_at") or (item or {}).get("creation_date")
+    if not raw:
+        return None
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1e11:
+        ts /= 1000.0
+    age = (time.time() if now is None else float(now)) - ts
+    return age if age >= 0 else None
+
+
+def summarize_ages(ages):
+    """(n, mínimo, mediana) en segundos de una lista de edades; (0, None, None) si está vacía."""
+    vals = sorted(float(a) for a in ages or [])
+    if not vals:
+        return 0, None, None
+    return len(vals), round(vals[0], 1), round(vals[len(vals) // 2], 1)
 
 
 def is_item_local(item):
@@ -252,7 +314,8 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
         )
 
         next_token = data.get("meta", {}).get("next_page")
-        if fetch_second_page_if_sparse and len(items) < 8 and next_token:
+        if (fetch_second_page_if_sparse and len(items) < 8 and next_token
+                and second_page_policy.should_fetch(keywords)):
             try:
                 bkt = get_platform_bucket("WALLAPOP")
                 if bkt is not None:
@@ -262,6 +325,9 @@ def fetch_wallapop(keywords, min_price, max_price, fetch_second_page_if_sparse=T
                 if r2.status_code == 200:
                     d2 = r2.json()
                     items_p2 = d2.get("data", {}).get("section", {}).get("payload", {}).get("items") or []
+                    p1_ids = {it.get("id") for it in items if isinstance(it, dict)}
+                    added = sum(1 for it in items_p2 if isinstance(it, dict) and it.get("id") not in p1_ids)
+                    second_page_policy.record(keywords, added)
                     items.extend(items_p2)
             except Exception:
                 pass
@@ -381,10 +447,12 @@ def main():
     send_startup_ping(len(targets), min_profit, min_score)
 
     scheduler = QueryScheduler.from_config(
-        config, platform="wallapop", config_path=CONFIG_PATH, heartbeat=touch_heartbeat
+        config, platform="wallapop", config_path=CONFIG_PATH, heartbeat=touch_heartbeat,
+        state_path=SCHEDULER_STATE_PATH
     )
     bucket = scheduler.bucket
     set_platform_bucket("WALLAPOP", bucket)
+    print(f"[PLANIFICADOR WALLAPOP] {scheduler.describe()}")
 
     global_blacklist = config.get("global_blacklist", [])
     min_personal_savings = float(config.get("min_personal_savings_eur", 25))
@@ -439,6 +507,9 @@ def main():
         q_start = time.time()
         target_items_count = 0
         target_new_count = 0
+        target_candidates = 0   # nuevos que superan los filtros locales: alimenta el reparto adaptativo
+        target_alerts = 0       # alertas enviadas en este sondeo (pesan más que un candidato)
+        fresh_ages = []         # edad (s) de los anuncios nuevos al verlos por primera vez
         eval_before = round_evaluated
 
         for _ in (0,):
@@ -512,6 +583,13 @@ def main():
                         mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                         continue
 
+                    # Retraso de detección: cuánto llevaba publicado al verlo por primera vez.
+                    # Mide el índice de Wallapop + nuestra cadencia con miles de muestras, no solo alertas.
+                    if price_drop_info is None:
+                        _age_s = listing_age_seconds(item)
+                        if _age_s is not None and _age_s <= 3600.0:
+                            fresh_ages.append(_age_s)
+
                     # FASE 1: Pre-Filtro Determinista (0 tokens, 0 descargas de fotos)
                     t["filters"] = time.perf_counter()
                     if not passes_filters(title, desc, price, target, global_blacklist):
@@ -560,6 +638,7 @@ def main():
 
                     # EVALUACIÓN DE FRAUDE DETERMINISTA EN CAPAS (P2)
                     item["platform"] = "WALLAPOP"
+                    target_candidates += 1
                     t["enrich"] = time.perf_counter()
                     enrich_seller_profile(item, http_session=None, conn=conn, health_monitor=health_monitor)
                     item["landed_cost"] = landed_cost
@@ -621,6 +700,12 @@ def main():
                         mark_item_seen(conn, "WALLAPOP", item_id, title, price)
                         continue
 
+                    # La foto de portada se descarga ya, en paralelo con la Puerta 1 (ahorra su latencia
+                    # antes de la visión); si la Puerta 1 rechaza, solo se pierde una descarga de CDN.
+                    _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
+                        img_urls, rotator=rotator, timings=t, eager=True
+                    )
+
                     # PUERTA 1: Criba ultra-ligera por texto (0 imágenes, 0 thinking tokens)
                     t["p1"] = time.perf_counter()
                     ps_decision, ps_reason, ps_conf, from_cache = prescreen_item_text(
@@ -657,9 +742,6 @@ def main():
 
                     # FASE 5: Comprobación de duplicado semántico (P1-6 / T3.1)
                     text_for_embed = f"{title}\n{desc}".strip()
-                    _img_hash_provider, _img_prefetch = make_image_hash_prefetcher(
-                        img_urls, rotator=rotator, timings=t
-                    )
                     sem_action, ai_data, sem_rej, item_vec, _ = evaluate_semantic_duplicate(
                         conn, "WALLAPOP", item_id, title, desc, price,
                         radar_id=target.get("id", ""),
@@ -678,6 +760,7 @@ def main():
 
                     if ai_data is None:
                         # PUERTA 2: Visión adaptativa (1 foto primero, hasta 3 si la confianza visual es baja)
+                        _img_hash_provider()  # recoge la foto descargada en paralelo con la Puerta 1
                         if _img_prefetch["photos"] is not None:
                             raw_photos = _img_prefetch["photos"]
                         else:
@@ -869,6 +952,7 @@ def main():
                         is_flash=False
                     )
                     t["alert_end"] = time.perf_counter()
+                    target_alerts += 1
                     ms_final = _emit_pipeline("alerted")
                     try:
                         conn.execute(
@@ -882,8 +966,9 @@ def main():
 
             print(f"[RADAR WALLAPOP] {target.get('name', task.radar_id)} ('{q}'): {target_items_count} items ({target_new_count} nuevos)")
 
-        scheduler.done(task)
+        scheduler.done(task, yield_count=scheduler.yield_score(target_candidates, target_alerts))
         q_dur = round(time.time() - q_start, 3)
+        fresh_n, fresh_min_s, fresh_med_s = summarize_ages(fresh_ages)
         log_metric(
             event="query_completed",
             service="wallapop",
@@ -896,6 +981,13 @@ def main():
             items_new=target_new_count,
             items_evaluated=round_evaluated - eval_before,
             rate_per_s=round(bucket.rate, 3),
+            candidates=target_candidates,
+            alerts=target_alerts,
+            interval_eff_s=round(task.effective_interval, 1),
+            yield_per_h=round(task.yield_rate * 3600.0, 3),
+            fresh_new=fresh_n,
+            fresh_age_min_s=fresh_min_s,
+            fresh_age_med_s=fresh_med_s,
         )
 
         queries_in_round += 1

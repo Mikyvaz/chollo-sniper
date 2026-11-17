@@ -78,7 +78,7 @@ CONFIG_PATH = os.getenv("CONFIG_PATH", "/app/config.json" if os.path.exists("/ap
 KITS_DIR = os.getenv("KITS_DIR", "/app/kits" if os.path.exists("/app") else "./kits")
 
 # Marca de versión del pipeline: se guarda en cada alerta (alert_context_json). Incrementar en cada despliegue.
-PIPELINE_VERSION = "2026.11.11-f1"
+PIPELINE_VERSION = "2026.11.17-v1"
 
 AI_DAILY_BUDGET_USD = float(os.getenv("AI_DAILY_BUDGET_USD", "0.10"))
 AI_MONTHLY_BUDGET_USD = float(os.getenv("AI_MONTHLY_BUDGET_USD", "0.10"))
@@ -1733,17 +1733,42 @@ def should_inherit_semantic_rejection(
     return False, "different_seller_and_photo"
 
 
-def make_image_hash_prefetcher(img_urls, rotator=None, force_safari=False, timings=None):
-    """Descarga 1 foto bajo demanda para comprobar dHash en dedup y reutilizarla en Puerta 2."""
+_IMG_PREFETCH_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="img-prefetch")
+
+
+def make_image_hash_prefetcher(img_urls, rotator=None, force_safari=False, timings=None, eager=False):
+    """Descarga 1 foto para comprobar dHash en dedup y reutilizarla en Puerta 2.
+
+    Por defecto la descarga es bajo demanda (primera llamada al proveedor). Con `eager=True` arranca
+    ya en un hilo aparte, para solaparla con la Puerta 1 de texto; el proveedor recoge el resultado.
+    La descarga y el dHash se hacen una sola vez en ambos modos.
+    """
     state = {"photos": None, "dhash": None}
+    pending = {"future": None}
+
+    def _download():
+        return download_item_images(img_urls, rotator=rotator, max_images=1, force_safari=force_safari)
+
+    if eager and img_urls:
+        try:
+            pending["future"] = _IMG_PREFETCH_POOL.submit(_download)
+        except Exception:
+            pending["future"] = None
 
     def _provide():
         if state["dhash"] is not None:
             return [state["dhash"]] if state["dhash"] else []
         if img_urls:
-            if isinstance(timings, dict):
-                timings["image"] = time.perf_counter()
-            photos = download_item_images(img_urls, rotator=rotator, max_images=1, force_safari=force_safari)
+            fut = pending["future"]
+            if fut is not None:
+                try:
+                    photos = fut.result(timeout=12.0)
+                except Exception:
+                    photos = []
+            else:
+                if isinstance(timings, dict):
+                    timings["image"] = time.perf_counter()
+                photos = _download()
             state["photos"] = photos
             if photos and photos[0]:
                 state["dhash"] = calculate_dhash(photos[0]) or ""
@@ -2142,6 +2167,8 @@ def build_ntfy_analysis_payload(ai_data, cex_data, net_profit, target=None, scor
         "p2p_net_profit": float(net_profit or 0.0),
         "deal_tier": ai.get("deal_tier", 1),
         "push": ai.get("_alert_push", True),
+        # send_discord_alert ya lanzó el push en paralelo con Discord: el escáner no debe repetirlo
+        "already_sent": bool(ai.get("_ntfy_dispatched", False)),
     }
 
 
@@ -2157,6 +2184,8 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         return False
     if not is_flash and (analysis_result or {}).get("push") is False:
         return False
+    if not is_flash and (analysis_result or {}).get("already_sent"):
+        return True
 
     try:
         title = item_data.get("title", "")
@@ -2178,6 +2207,8 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         model_name = analysis.get("identified_model") or title
         location = item_data.get("seller_city") or item_data.get("country_tag") or ""
 
+        top = (not is_flash) and is_top_deal(analysis.get("deal_type", "direct_chollo"),
+                                             analysis.get("deal_score"), analysis.get("mode", "resale"))
         if is_flash:
             priority = "5"
             plat_u = str(platform or "").upper()
@@ -2185,7 +2216,7 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
             flash_model = _compact_text(model_name, max(12, 110 - 2 - len(flash_suffix)))
             title_header = _compact_text(f"⚡ {flash_model}{flash_suffix}", 110)
         else:
-            priority = "5" if deal_tier == 1 else "4"
+            priority = "5" if (deal_tier == 1 or top) else "4"
             if analysis.get("alert_title"):
                 title_header = _compact_text(analysis["alert_title"], 110)
             else:
@@ -2211,14 +2242,16 @@ def send_one_tap_ntfy_alert(item_data, analysis_result=None, is_flash=False):
         body = "\n".join(body_lines)
 
         base, topic = NTFY_TOPIC_URL.rstrip("/").rsplit("/", 1)
-        actions = [{"action": "view", "label": "Abrir anuncio", "url": clean_url, "clear": True}] if _valid_http(clean_url) else []
+        # Compra asistida: en un nivel 1 el botón dice lo que hay que hacer (abre el anuncio en la app)
+        action_label = f"⚡ Comprar ya ({price:.0f} €)" if top else "Abrir anuncio"
+        actions = [{"action": "view", "label": action_label, "url": clean_url, "clear": True}] if _valid_http(clean_url) else []
         payload = {
             "topic": topic,
             "title": title_header[:110],
             "message": body[:4000],
             "click": clean_url,
             "priority": int(priority),
-            "tags": ["moneybag"],
+            "tags": ["rotating_light", "moneybag"] if top else ["moneybag"],
             "actions": actions,
         }
         headers = {"Authorization": f"Bearer {NTFY_TOKEN}"} if NTFY_TOKEN else {}
@@ -5546,6 +5579,10 @@ NOTIFICATION_DEFAULTS = {
     "push_max_per_hour": 4,            # tope de avisos sonoros por hora (entre todos los escáneres)
     "push_zero_review_sellers": False, # ¿sonar con vendedores sin valoraciones?
     "push_high_risk": False,           # ¿sonar con "alto riesgo / precio anómalo"?
+    # Compra asistida: la compra directa nota 10 (arbitraje CeX nivel 1) suena aunque se haya llegado a
+    # push_max_per_hour y con su propio mínimo de margen. Las reglas de seguridad no cambian.
+    "push_top_deals_always": True,
+    "push_top_deal_min_profit_eur": 25,
 }
 DISCORD_SILENT_FLAG = 4096  # SUPPRESS_NOTIFICATIONS
 _notif_cache = {"t": 0.0, "policy": dict(NOTIFICATION_DEFAULTS)}
@@ -5575,13 +5612,23 @@ def _seller_review_count(seller):
     return None
 
 
-def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", seller=None, valuation_confidence=None):
+def is_top_deal(deal_type, score, mode="resale"):
+    """Compra directa con nota 10 (arbitraje CeX nivel 1: efectivo CeX >= coste + 12 € y riesgo <= 2)."""
+    try:
+        return deal_type == "direct_chollo" and int(score or 0) >= 10 and mode != "personal"
+    except (TypeError, ValueError):
+        return False
+
+
+def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", seller=None, valuation_confidence=None,
+                      score=None):
     """Decide si una alerta final debe sonar. Devuelve (push: bool, motivo_silencio: str)."""
     pol = get_notification_policy()
     plat = str(platform or "").upper()
     profit = float(net_profit or 0)
     reviews = _seller_review_count(seller)
     is_shop = "CASH" in plat
+    top = bool(pol.get("push_top_deals_always", True)) and is_top_deal(deal_type, score, mode)
     if deal_type == "high_risk_opportunity" and not pol.get("push_high_risk"):
         return False, "alto riesgo / precio anómalo"
     # T1.4: solo un 0 confirmado silencia; reviews None (perfil no consultado) no.
@@ -5592,9 +5639,13 @@ def decide_alert_push(conn, platform, deal_type, net_profit, mode="resale", sell
         required *= 1.5
     if deal_type == "offer_opportunity":
         required = max(required, float(pol.get("push_offer_min_profit_eur", 80)))
+    if top:
+        required = float(pol.get("push_top_deal_min_profit_eur", 25))
     if profit < required:
         reason = "regateo con margen" if deal_type == "offer_opportunity" else "margen"
         return False, f"{reason} < {required:g}€"
+    if top:
+        return True, ""  # compra asistida: el tope por hora no retiene un nivel 1
     try:
         recent = conn.execute(
             "SELECT COUNT(*) FROM deals WHERE created_at >= datetime('now', '-1 hour') "
@@ -5738,6 +5789,8 @@ def format_seller_line(seller):
         return ""
     s_name = seller.get("name") or seller.get("seller_name")
     parts = []
+    if seller.get("is_business"):
+        parts.append("🏪 vendedor profesional")
     reviews = _seller_review_count(seller)
     rating = seller.get("seller_rating", seller.get("rating"))
     if reviews is not None:
@@ -5816,7 +5869,8 @@ def save_alert_context(conn, deal_id, seller=None, ai_data=None, fraud_banner=""
         a = ai_data if isinstance(ai_data, dict) else {}
         seller_keys = ("name", "seller_reviews_count", "seller_rating", "sales", "seller_joined_days", "seller_age_source",
                        "seller_sold_count", "seller_bought_count", "seller_listings", "seller_followers",
-                       "seller_reports", "seller_verified", "seller_banned", "age_days", "seller_profile_status")
+                       "seller_reports", "seller_verified", "seller_banned", "age_days", "seller_profile_status",
+                       "is_business")
         sel = {k: s.get(k) for k in seller_keys if s.get(k) is not None}
         # Nombres cortos y estables para el análisis
         if "seller_rating" in sel:
@@ -6502,6 +6556,27 @@ def _delete_flash_message(flash_message):
         _discord_send("DELETE", del_url, timeout=5, attempts=1)
 
 
+def _dispatch_ntfy_push(ai_data, cex_data, net_profit, target, score, should_push, item_data):
+    """Lanza el push ntfy de la alerta final en un hilo aparte (no espera a Discord).
+
+    Marca `ai_data["_ntfy_dispatched"]` para que la llamada posterior del escáner a
+    send_one_tap_ntfy_alert no lo repita. Devuelve el hilo, o None si no había nada que enviar.
+    """
+    if not NTFY_TOPIC_URL or not should_push:
+        return None
+    try:
+        analysis = build_ntfy_analysis_payload(ai_data, cex_data, net_profit, target=target, score=score)
+        analysis["already_sent"] = False
+        th = threading.Thread(target=send_one_tap_ntfy_alert, args=(item_data, analysis),
+                              kwargs={"is_flash": False}, name="ntfy-push", daemon=True)
+        th.start()
+        ai_data["_ntfy_dispatched"] = True
+        return th
+    except Exception as e:
+        print(f"[WARN] No se pudo lanzar el push ntfy: {_redact(e)}")
+        return None
+
+
 def send_discord_alert(
     conn, platform, item_id, title, description, price, landed_cost, fees,
     target, ai_data, cex_data, enhanced_cover_bytes=None, kit_folder="", optimal_price=0.0,
@@ -6513,6 +6588,7 @@ def send_discord_alert(
     plat = platform.upper()
     deal_id = f"{plat[:3]}_{item_id}"[:40]
     mode = target.get("mode", "resale")
+    ai_data.pop("_ntfy_dispatched", None)  # un veredicto reutilizado no debe arrastrar la marca
 
     clean_item_url, clean_checkout_url = normalize_and_build_links(plat, item_id, item_url, checkout_url)
     clean_item_url = sanitize_item_url(clean_item_url, plat) or clean_item_url
@@ -6539,19 +6615,33 @@ def send_discord_alert(
         item_vec=item_vec, seller_id=s_id
     )
     should_push, quiet_reason = decide_alert_push(conn, plat, deal_type, net_profit, mode=mode, seller=seller,
-                                                valuation_confidence=ai_data.get("valuation_confidence"))
+                                                valuation_confidence=ai_data.get("valuation_confidence"),
+                                                score=score)
     ai_data["_alert_push"] = should_push
+    top_deal = is_top_deal(deal_type, score, mode)
     save_alert_context(conn, deal_id, seller=seller, ai_data=ai_data, fraud_banner=fraud_banner,
                        country_tag=country_tag,
                        extra={"seller_id": s_id, "listing_age_text": str(listing_age_text or "")[:60],
                               "published_at_utc": _to_utc_iso(listing_published_at),
-                              "push": should_push, "quiet_reason": quiet_reason})
+                              "push": should_push, "quiet_reason": quiet_reason, "top_deal": top_deal})
 
     silent_mode = str(get_notification_policy().get("silent_mode", "individual")).strip().lower()
     if not should_push and silent_mode == "digest":
         _delete_flash_message(flash_message)
         print(f"[SILENT DIGEST] {deal_id} ({plat}) guardado para resumen diario ({quiet_reason})")
         return False
+
+    # El push al móvil (ntfy) sale ya, en paralelo con el montaje y el envío del mensaje de Discord:
+    # no espera a Discord ni se retrasa si Discord responde lento o con 429.
+    _dispatch_ntfy_push(
+        ai_data, cex_data, net_profit, target, score, should_push,
+        item_data={
+            "title": title, "price": price, "platform": plat, "url": clean_item_url,
+            # En Vinted seller_city es una etiqueta ("Vinted (Sony)"): para el titular vale el país
+            "seller_city": "" if (plat == "VINTED" or seller_city in ("", "España")) else seller_city,
+            "country_tag": country_tag, "seller": seller if isinstance(seller, dict) else {},
+        },
+    )
 
     if deal_type == "high_risk_opportunity":
         score_badge = "⚠️ 7/10 • ALTO RIESGO / PRECIO ANÓMALO (REVISAR CON CAUTELA)"

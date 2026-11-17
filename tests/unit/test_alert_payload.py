@@ -1,6 +1,7 @@
 import tests.unit._harness  # noqa: F401
 import json
 import sqlite3
+import threading
 import unittest
 from unittest import mock
 
@@ -101,10 +102,10 @@ class TestAlertPayload(unittest.TestCase):
             "sales": 24,
             "account_age": "3 años",
         }
-        captured = []
+        discord_posts, ntfy_posts = [], []
 
         def _fake_post(url, **kwargs):
-            captured.append(kwargs.get("json", {}))
+            (ntfy_posts if "ntfy.sh" in str(url) else discord_posts).append(kwargs.get("json", {}))
             return _FakeResp(200, {"id": "disc-msg-1"})
 
         with mock.patch.object(ce, "decide_alert_push", return_value=(should_push, quiet_reason)), \
@@ -116,8 +117,13 @@ class TestAlertPayload(unittest.TestCase):
                 item_url=item_url, checkout_url=checkout_url, image_url=image_url,
                 seller_city=seller_city, country_tag=country_tag, seller=seller_obj,
             )
-        self.assertEqual(len(captured), 1)
-        return captured[0]
+            for th in threading.enumerate():
+                if th.name == "ntfy-push":
+                    th.join(timeout=5)
+        self.assertEqual(len(discord_posts), 1)
+        # El push ntfy sale en paralelo desde send_discord_alert: uno si la alerta suena, ninguno si es silenciosa
+        self.assertEqual(len(ntfy_posts), 1 if should_push else 0)
+        return discord_posts[0]
 
     def _assert_common_discord_snapshot(self, payload, expected_model_substr, expected_price_str, expected_profit_str):
         raw_json = json.dumps(payload, ensure_ascii=False)
