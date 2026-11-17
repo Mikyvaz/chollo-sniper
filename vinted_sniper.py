@@ -681,7 +681,7 @@ def main():
 
     scheduler = QueryScheduler.from_config(
         config, platform="vinted", config_path=CONFIG_PATH, heartbeat=touch_heartbeat,
-        state_path=SCHEDULER_STATE_PATH
+        state_path=SCHEDULER_STATE_PATH, config_loader=load_config
     )
     bucket = scheduler.bucket
     set_platform_bucket("VINTED", bucket)

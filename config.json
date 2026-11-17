@@ -406,10 +406,10 @@
           "unless_any": [
             "new"
           ],
-          "max_price": 76
+          "max_price": 95
         }
       ],
-      "cex_cash_ref": "58€ (3DS) | 102€ (3DS XL) | 129€ (New 2DS XL) | 148€-170€ (New 3DS XL) efectivo CeX",
+      "cex_cash_ref": "58€ (3DS) | 151€-170€ (3DS XL) | 129€ (New 2DS XL) | 148€-170€ (New 3DS XL) efectivo CeX (nov 2026)",
       "est_resale": "135€ - 210€",
       "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Pokémon, Mario o Layton, cajas vacías, cartuchos R4 o consolas DSi/DS Lite antiguas). Identifica con precisión en identified_model si es 'Nintendo 3DS' original (2011), 'Nintendo 2DS' plana (forma de cuña), 'Nintendo 3DS XL', 'New Nintendo 3DS', 'New Nintendo 3DS XL' o 'New Nintendo 2DS XL' para aplicar su tope exacto. En cex_search_query pon exactamente 'New Nintendo 3DS XL', 'Nintendo 3DS XL', 'New Nintendo 2DS XL' o 'Nintendo 3DS Consola' según lo que veas en las fotos.",
       "must_contain_any": [
@@ -464,9 +464,9 @@
         "nintendo switch oled"
       ],
       "min_price": 55,
-      "max_price": 98,
-      "cex_cash_ref": "94€ (Sin Caja) | 101€ (Con Caja) efectivo CeX | 165€-175€ PVP CeX",
-      "est_resale": "145€ - 175€",
+      "max_price": 130,
+      "cex_cash_ref": "88€-103€ (estándar) | 110€-154€ (ediciones especiales) efectivo CeX | PVP CeX 200€-280€",
+      "est_resale": "185€ - 200€",
       "ai_valuation_guide": "CRÍTICO: Debe ser la consola Nintendo Switch OLED funcional (marco fino y soporte trasero ancho) CON SUS DOS JOY-CONS acoplados. Distingue obligatoriamente en identified_model entre 'Nintendo Switch OLED' y ediciones especiales. RECHAZA SIEMPRE si en las fotos aparece solo la pantalla/tablet sin Joy-Cons, si tiene drift o pantalla rayada/rota, o si es solo la caja o el dock suelto. En cex_search_query usa 'Nintendo Switch OLED'.",
       "must_contain_any": [
         "oled"
@@ -582,7 +582,7 @@
       "name": "📸 Digicams Cotizadas (Canon G7X / SX740 / SX730 / Sony RX100)",
       "enabled": true,
       "mode": "resale",
-      "tier": "hot",
+      "tier": "standard",
       "platforms": [
         "wallapop",
         "vinted",
@@ -702,7 +702,7 @@
       "name": "📷 Mirrorless & Vlogging (Sony A6000/ZV-E10 / Fujifilm X-T20/X-T30)",
       "enabled": true,
       "mode": "resale",
-      "tier": "hot",
+      "tier": "standard",
       "platforms": [
         "wallapop",
         "vinted",
@@ -791,7 +791,7 @@
       "name": "🐉 Joyas Pokémon DS/GBA (HeartGold/SoulSilver/Platino/Blanco 2/Esmeralda)",
       "enabled": true,
       "mode": "resale",
-      "tier": "hot",
+      "tier": "standard",
       "platforms": [
         "wallapop",
         "todocoleccion",
@@ -867,18 +867,21 @@
       "keywords": "mac mini m1 m2 ipad 9 ipad 10 ipad air m1",
       "wallapop_keywords": [
         "mac mini",
-        "ipad 10"
+        "ipad 10",
+        "ipad air"
       ],
       "vinted_keywords": [
         "mac mini m1",
         "mac mini m2",
         "ipad 9",
-        "ipad 10"
+        "ipad 10",
+        "ipad air"
       ],
       "multi_keywords": [
         "mac mini m1",
         "mac mini m2",
-        "ipad 10 generacion"
+        "ipad 10 generacion",
+        "ipad air"
       ],
       "min_price": 85,
       "max_price": 245,
@@ -964,10 +967,10 @@
             "256gb",
             "256 gb"
           ],
-          "max_price": 198
+          "max_price": 220
         }
       ],
-      "cex_cash_ref": "123€ (iPad 9) | 182€ (iPad 10) | 195€ (Mac Mini M1) | 208€ (iPad Air M1) | 261€ (Mac Mini M2) en CeX",
+      "cex_cash_ref": "123€-174€ (iPad 9) | 238€-259€ (iPad 10) | 195€ (Mac Mini M1) | 268€ (iPad Air 5 M1) | 261€ (Mac Mini M2) en CeX",
       "est_resale": "175€ - 355€",
       "ai_valuation_guide": "CRÍTICO: Rechaza cualquier equipo con bloqueo iCloud, MDM, cristal con grietas o pantalla rota. Distingue en identified_model entre 'iPad 9', 'iPad 10', 'iPad Air 4', 'iPad Air 5 M1', 'iPad Pro 11 M1', 'iPad Pro 11 M2', 'iPad Mini 6' o 'Mac Mini M1', 'Mac Mini M2', 'Mac Mini M4' y su RAM/SSD. Rechaza cualquier Mac Mini Intel (2018 o anterior). En cex_search_query pon el modelo exacto con su capacidad de almacenamiento.",
       "must_contain_any": [
@@ -982,7 +985,8 @@
         "ipad air m1",
         "ipad air m2",
         "m1",
-        "m2"
+        "m2",
+        "ipad air"
       ],
       "blacklist": [
         "bloqueado",
@@ -1043,10 +1047,10 @@
     },
     {
       "id": "switch_std_lite",
-      "name": "🔋 Switch Estándar (<=62€) / Switch Lite (<=42€)",
+      "name": "🔋 Switch Estándar (<=70€) / Switch Lite (<=42€)",
       "enabled": true,
       "mode": "resale",
-      "tier": "standard",
+      "tier": "hot",
       "platforms": [
         "wallapop",
         "vinted",
@@ -1066,7 +1070,7 @@
         "consola nintendo switch"
       ],
       "min_price": 25,
-      "max_price": 62,
+      "max_price": 70,
       "submodel_price_caps": [
         {
           "match_any": [
@@ -1079,8 +1083,8 @@
           "max_price": 42
         }
       ],
-      "cex_cash_ref": "50€ (Lite Sin Caja) | 70€ (Estándar Sin Caja) en efectivo CeX",
-      "est_resale": "80€ (Lite) - 108€ (Estándar)",
+      "cex_cash_ref": "48€-66€ (Lite) | 83€ (V2 HAC-001-01) en efectivo CeX",
+      "est_resale": "80€ (Lite) - 130€ (V1/V2)",
       "ai_valuation_guide": "CRÍTICO: SOLO CONSOLAS NINTENDO SWITCH COMPLETAS Y FUNCIONALES (RECHAZA SIEMPRE videojuegos sueltos como Zelda, Mario, Pokémon o Animal Crossing, cajas vacías, fundas, mandos sueltos o pantallas rotas/con drift). Distingue obligatoriamente en identified_model entre 'Nintendo Switch Lite' (una sola pieza sin Joy-Con extraíbles), 'Nintendo Switch V1/V2' (marco negro ancho) y 'Nintendo Switch OLED' (pantalla grande con marco fino y soporte ancho trasero). Si es OLED o V1/V2 sin dock ni cargador original, marca has_defect_or_missing_parts: true. En cex_search_query pon exactamente 'Nintendo Switch Lite' o 'Nintendo Switch Consola'.",
       "must_contain_any": [
         "switch"
@@ -1353,7 +1357,7 @@
         "thrustmaster t300"
       ],
       "min_price": 35,
-      "max_price": 82,
+      "max_price": 85,
       "submodel_price_caps": [
         {
           "match_any": [
@@ -1376,10 +1380,10 @@
             "shifter",
             "palanca"
           ],
-          "max_price": 65
+          "max_price": 85
         }
       ],
-      "cex_cash_ref": "55€ (G920) | 72€ (G29 + Pedales) | 91€ (T300 RS) | 98€ (G923) en efectivo CeX",
+      "cex_cash_ref": "55€ (G920) | 68€ (G29 + Pedales) | 91€ (T300 RS) | 98€ (G923) en efectivo CeX",
       "est_resale": "115€ - 165€",
       "ai_valuation_guide": "CRÍTICO: Verifica en las fotos que incluya VOLANTE Y PEDALES. Distingue en identified_model entre 'Logitech G29', 'Logitech G920', 'Logitech G923', 'Thrustmaster T300 RS GT', 'Moza R5' o 'Fanatec CSL DD'. Rechaza siempre si venden solo los pedales sueltos, solo el aro suelto o un soporte de metal sin electrónica. En cex_search_query pon 'Logitech G29 Volante + Pedales', 'Logitech G920 Volante + Pedales', 'Logitech G923 Volante + Pedales' o 'Thrustmaster T300 RS Volante + Pedales'.",
       "must_contain_any": [
@@ -1402,8 +1406,8 @@
     },
     {
       "id": "kindle_ereaders",
-      "name": "📖 Kindle Paperwhite (10ª / 11ª Gen) y Oasis",
-      "enabled": true,
+      "name": "📖 Kindle Paperwhite / Oasis (Pausado: 0 alertas en noviembre, CeX paga poco)",
+      "enabled": false,
       "mode": "resale",
       "tier": "standard",
       "platforms": [
@@ -1637,6 +1641,169 @@
         "baneada"
       ],
       "shipping_tier": "heavy"
+    },
+    {
+      "id": "switch2_consoles",
+      "name": "🆕 Nintendo Switch 2 (Consola completa)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "hot",
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios"
+      ],
+      "keywords": "nintendo switch 2",
+      "wallapop_keywords": [
+        "nintendo switch 2"
+      ],
+      "vinted_keywords": [
+        "nintendo switch 2"
+      ],
+      "multi_keywords": [
+        "nintendo switch 2"
+      ],
+      "min_price": 200,
+      "max_price": 300,
+      "cex_cash_ref": "288€-308€ efectivo CeX (Switch 2 256GB + Joy-Con 2) | PVP CeX 430€-460€",
+      "est_resale": "370€ - 400€",
+      "ai_valuation_guide": "CRÍTICO ANTI-ESTAFA (consola nueva y cara, objetivo habitual de anzuelos): 1) SOLO la consola Nintendo Switch 2 completa y funcional con sus Joy-Con 2 y dock. RECHAZA Switch 1 / OLED / Lite anunciadas como 'Switch 2', cajas vacías, juegos o tarjetas Game-Key sueltos y mandos o docks sueltos. 2) RECHAZA si pide pago fuera de la app (bizum, transferencia, PayPal amigos) o si las fotos son de catálogo. 3) En identified_model pon 'Nintendo Switch 2' o 'Nintendo Switch 2 + Mario Kart World' si trae el pack; en cex_search_query pon 'Nintendo Switch 2 Consola'; en bundled_games_queries los juegos extra (máx 4).",
+      "must_contain_any": [
+        "switch 2",
+        "switch2"
+      ],
+      "blacklist": [
+        "solo juego",
+        "juego switch 2",
+        "game key",
+        "game-key",
+        "solo caja",
+        "caja vacia",
+        "solo dock",
+        "dock suelto",
+        "solo mando",
+        "mando suelto",
+        "joy-con suelto",
+        "joycon suelto",
+        "pro controller",
+        "funda para",
+        "solo funda",
+        "amiibo"
+      ],
+      "shipping_tier": "standard"
+    },
+    {
+      "id": "psp_consoles",
+      "name": "🎮 PSP (1000 / 2000 / 3000 / Go)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters",
+        "todocoleccion"
+      ],
+      "keywords": "psp",
+      "wallapop_keywords": [
+        "psp"
+      ],
+      "vinted_keywords": [
+        "psp"
+      ],
+      "multi_keywords": [
+        "psp consola"
+      ],
+      "min_price": 20,
+      "max_price": 50,
+      "submodel_price_caps": [
+        {
+          "match_any": [
+            "e1000",
+            "e-1000",
+            "psp street"
+          ],
+          "unless_any": [],
+          "max_price": 25
+        }
+      ],
+      "cex_cash_ref": "37€ (E1000 Street) | 44€-60€ (1000/2000) | 70€-83€ (3000) | hasta 92€ con caja, efectivo CeX",
+      "est_resale": "70€ - 110€",
+      "ai_valuation_guide": "CRÍTICO: SOLO consolas PSP completas y funcionales con batería y tapa (PSP 1000 'Fat', 2000 'Slim', 3000 'Slim & Lite', PSP Go o E1000 'Street', sin wifi). RECHAZA juegos UMD sueltos, PS Vita, baterías o cargadores sueltos, pantallas rotas, 'no carga', placas o consolas desmontadas. Identifica el modelo en identified_model ('PSP 3000', 'PSP 2000 Slim', 'PSP 1000', 'PSP Go', 'PSP E1000 Street') por la etiqueta de la batería o el diseño (la E1000 no tiene wifi ni altavoces estéreo). En cex_search_query pon ese mismo modelo.",
+      "must_contain_any": [
+        "psp"
+      ],
+      "blacklist": [
+        "ps vita",
+        "psvita",
+        "playstation vita",
+        "solo juego",
+        "umd suelto",
+        "solo bateria",
+        "solo cargador",
+        "solo funda",
+        "funda para",
+        "carcasa para",
+        "no carga"
+      ],
+      "shipping_tier": "standard"
+    },
+    {
+      "id": "meta_quest_vr",
+      "name": "🥽 Meta Quest 3 / 3S (Realidad Virtual)",
+      "enabled": true,
+      "mode": "resale",
+      "tier": "standard",
+      "platforms": [
+        "wallapop",
+        "vinted",
+        "milanuncios",
+        "cashconverters"
+      ],
+      "keywords": "meta quest 3",
+      "wallapop_keywords": [
+        "meta quest 3"
+      ],
+      "vinted_keywords": [
+        "meta quest 3"
+      ],
+      "multi_keywords": [
+        "meta quest 3"
+      ],
+      "min_price": 100,
+      "max_price": 230,
+      "submodel_price_caps": [
+        {
+          "match_any": [
+            "quest 3s",
+            "quest3s"
+          ],
+          "unless_any": [],
+          "max_price": 130
+        }
+      ],
+      "cex_cash_ref": "257€-306€ (Quest 3 512GB con mandos) | hasta 181€ (Quest 3S) efectivo CeX",
+      "est_resale": "180€ (3S) - 350€ (Quest 3 512GB)",
+      "ai_valuation_guide": "CRÍTICO: SOLO gafas Meta Quest 3 (128/512GB) o Quest 3S (128/256GB) completas, con sus 2 mandos y funcionando. RECHAZA Quest 2 / Quest Pro, mandos, correas, baterías o interfaces faciales sueltos, gafas vinculadas a otra cuenta ('no se puede resetear', 'cuenta bloqueada') y lentes rayadas. En identified_model pon modelo y capacidad ('Meta Quest 3 512GB', 'Meta Quest 3S 128GB'). En cex_search_query pon 'Meta Quest 3 512GB' o 'Meta Quest 3S'.",
+      "must_contain_any": [
+        "quest 3",
+        "quest3"
+      ],
+      "blacklist": [
+        "quest 2",
+        "quest pro",
+        "solo mando",
+        "mando suelto",
+        "solo correa",
+        "correa para",
+        "solo bateria",
+        "interfaz facial",
+        "funda para",
+        "estuche para",
+        "lentes graduadas"
+      ],
+      "shipping_tier": "standard"
     }
   ],
   "_iter": 49

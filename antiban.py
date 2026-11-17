@@ -943,6 +943,7 @@ class QueryScheduler:
         adaptive: dict = None,
         state_path: str = None,
         wall_clock=None,
+        config_loader=None,
     ):
         self._lock = threading.Lock()
         self.platform = (platform or "wallapop").lower()
@@ -960,6 +961,10 @@ class QueryScheduler:
         self.utilization = min(1.0, max(0.5, float(utilization)))
         self.adaptive = dict(adaptive) if isinstance(adaptive, dict) else dict(ADAPTIVE_DEFAULTS)
         self.state_path = state_path
+        # Cargador de config.json para las recargas en caliente. Los escáneres pasan core_engine.load_config,
+        # que amplía max_price con offer_scan_multiplier: con json.load a secas, tras editar config.json
+        # dejaban de buscar la zona de regateo hasta el siguiente reinicio.
+        self._config_loader = config_loader
         self._wall_clock = wall_clock or time.time
         self._last_fit = None
         self._last_save = None
@@ -996,6 +1001,7 @@ class QueryScheduler:
         heartbeat=None,
         rng=None,
         state_path: str = None,
+        config_loader=None,
     ):
         plat = (platform or "wallapop").lower()
         sched_cfg = (config or {}).get("scheduling", {}) or {}
@@ -1026,6 +1032,7 @@ class QueryScheduler:
             utilization=cls._cfg_number(plat_cfg, sched_cfg, "utilization", 0.97),
             adaptive=parse_adaptive_config(sched_cfg, plat_cfg),
             state_path=state_path,
+            config_loader=config_loader,
         )
 
     @staticmethod
@@ -1291,8 +1298,11 @@ class QueryScheduler:
         new_cfg = None
         if path and os.path.exists(path):
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    new_cfg = json.load(f)
+                if self._config_loader is not None:
+                    new_cfg = self._config_loader()
+                else:
+                    with open(path, "r", encoding="utf-8") as f:
+                        new_cfg = json.load(f)
             except Exception:
                 return False
         if not isinstance(new_cfg, dict):

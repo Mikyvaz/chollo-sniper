@@ -2478,7 +2478,8 @@ PRE_AI_DEFECT_TOKENS = DEFECT_TOKENS
 
 CONSOLE_RADAR_IDS = {
     "new_3ds_family", "switch_oled", "switch_std_lite",
-    "ps_vita", "retro_handhelds", "steam_deck_handhelds", "ps5_consoles_gta6"
+    "ps_vita", "retro_handhelds", "steam_deck_handhelds", "ps5_consoles_gta6",
+    "switch2_consoles", "psp_consoles",
 }
 
 CONSOLE_HARDWARE_WORDS = (
@@ -2654,7 +2655,22 @@ RADAR_ALLOWED_CEX_CATEGORIES = {
     "rtx_gpus": ("tarjetas graficas", "componentes"),
     "simracing_wheels": ("accesorios", "volantes", "playstation", "pc", "xbox"),
     "kindle_ereaders": ("ereaders", "tablets"),
+    "switch2_consoles": ("consolas",),
+    "psp_consoles": ("consolas",),
+    "meta_quest_vr": ("vr",),
 }
+
+# Modelos de PSP que CeX paga distinto (E1000 «Street» ~37 € frente a ~80 € la 3000)
+_PSP_MODEL_TOKENS = ("1000", "2000", "3000", "e1000", "go")
+_QUEST_ACCESSORY_WORDS = ("strap", "correa", "battery", "bateria", "facial", "funda", "case", "estuche",
+                          "cable", "lens", "lente", "mount", "soporte", "charging", "carga", "cover")
+
+
+def _psp_models(text):
+    found = {m for m in _PSP_MODEL_TOKENS if re.search(rf"\b{m}\b", text)}
+    if re.search(r"\bstreet\b", text):
+        found.add("e1000")
+    return found
 
 SPECIAL_EDITION_CONSOLE_TOKENS = (
     "pokemon", "pokémon", "zelda", "hyrule", "majora", "mario", "luigi", "peach",
@@ -2740,8 +2756,8 @@ def _box_matches_query_and_radar(bname=None, cat="", clean_q=None, target=None, 
         # Si la ficha de CeX contiene nombre de juego pero NO es una consola/edición, es un juego suelto -> descartar ficha CeX
         is_console_box = any(
             cw in bname_norm for cw in (
-                "consola", "console", "nintendo switch", "switch oled", "switch lite",
-                "3ds", "2ds", "ps vita", "steam deck", "rog ally", "legion go", "ps5", "playstation 5"
+                "consola", "console", "nintendo switch", "switch oled", "switch lite", "switch 2",
+                "3ds", "2ds", "ps vita", "psp", "steam deck", "rog ally", "legion go", "ps5", "playstation 5"
             )
         )
         if not is_console_box:
@@ -2838,6 +2854,27 @@ def _box_matches_query_and_radar(bname=None, cat="", clean_q=None, target=None, 
             return False
         if ("lite" in bname_norm) != ("lite" in ctx_norm):
             return False
+        # Switch 2 y Switch 1 no se cruzan: CeX paga ~290 € por una Switch 2 y ~83 € por una V2
+        wants_switch2 = bool(re.search(r"\bswitch ?2\b", q_norm)) or radar_id == "switch2_consoles"
+        if bool(re.search(r"\bswitch ?2\b", bname_norm)) != wants_switch2:
+            return False
+
+    if radar_id == "psp_consoles" or re.search(r"\bpsp\b", q_norm):
+        if "vita" in bname_norm:
+            return False
+        q_models, b_models = _psp_models(q_norm), _psp_models(bname_norm)
+        if q_models and not (q_models & b_models):
+            return False
+        if "e1000" in b_models and "e1000" not in q_models:
+            return False
+
+    if radar_id == "meta_quest_vr" or "quest" in q_norm:
+        if not any(w in bname_norm for w in ("gafas", "headset", "realidad virtual")):
+            return False
+        if any(re.search(rf"\b{w}\b", bname_norm) for w in _QUEST_ACCESSORY_WORDS):
+            return False
+        if bool(re.search(r"\bquest ?3s\b", bname_norm)) != bool(re.search(r"\bquest ?3s\b", q_norm)):
+            return False
 
     if "steam deck" in q_norm or radar_id == "steam_deck_handhelds":
         if ("oled" in bname_norm) != ("oled" in ctx_norm):
@@ -2911,7 +2948,10 @@ CEX_MASTER_QUERIES = [
     "Mac Mini",
     "Sony RX100",
     "Canon G7X",
-    "Logitech G29"
+    "Logitech G29",
+    "Nintendo Switch 2 Consola",
+    "PSP Consola",
+    "Meta Quest 3"
 ]
 
 
@@ -4254,8 +4294,11 @@ def cex_product_family(text):
                 (r"steam deck", "steam_deck"), (r"rog ally", "rog_ally"), (r"legion go", "legion_go"),
                 (r"xbox series", "xbox_series"), (r"xbox one", "xbox_one"), (r"ipad", "ipad"),
                 (r"iphone", "iphone"), (r"mac\s*mini", "mac_mini"), (r"macbook", "macbook"),
-                (r"rtx\s*\d+", "rtx"), (r"rx\s*\d+", "radeon"), (r"g29|g920|g923|t300", "simracing"))
+                (r"rtx\s*\d+", "rtx"), (r"rx\s*\d+", "radeon"), (r"g29|g920|g923|t300", "simracing"),
+                (r"switch 2", "switch2"), (r"psp", "psp"), (r"quest 3s?", "meta_quest"))
     families = {family for pattern, family in patterns if re.search(r"\b(?:" + pattern + r")\b", text)}
+    if "switch2" in families:
+        families.discard("switch")  # «nintendo switch 2» también contiene «nintendo switch»
     return next(iter(families)) if len(families) == 1 else ""
 
 
