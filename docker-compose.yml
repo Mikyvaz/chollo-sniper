@@ -1,3 +1,6 @@
+# Nombre fijo: evita que compose derive "opt_servidor" al lanzarse desde el bind /home/miky/opt_servidor
+name: wallapop-sniper
+
 services:
   wallapop-sniper:
     build: .

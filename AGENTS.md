@@ -1,15 +1,21 @@
 # 🚨 Entorno Remoto (Samba + SSH) — LECTURA OBLIGATORIA
 
-Este directorio es un montaje en red (Samba SMB) correspondiente al servidor Linux remoto `miky-p6657es` (`100.114.8.117`).
+El proyecto reside en el servidor Linux `miky-p6657es` (`100.114.8.117`). Desde el portátil se accede mediante un montaje en red (Samba SMB); dentro del propio servidor también está disponible como bind local en `/home/miky/opt_servidor`. Comprueba primero en qué entorno estás.
 
 ## Reglas Obligatorias de Operación
+
+0. **Comprobar el entorno antes de ejecutar:**
+   - Antes de recurrir a SSH, comprueba si estás en el portátil o dentro del servidor. No lo deduzcas solo por la ruta de trabajo: puede ser un montaje Samba.
+   - Comprueba el sistema operativo, el hostname y la disponibilidad de la ruta canónica `/opt/wallapop-sniper`. Si el entorno es Linux y el hostname es `miky-p6657es`, ejecuta directamente en `/opt/wallapop-sniper`.
+   - Si estás en el portátil (Windows o cualquier otro sistema), ejecuta en el servidor por SSH con el alias `servidor`. Si no puedes determinar el entorno, no ejecutes runtimes ni builds localmente hasta aclararlo.
 
 1. **PROHIBIDO ejecutar herramientas de ejecución/build en Windows local:**
    - No ejecutes `npm`, `pnpm`, `pip`, `python`, `pytest`, `cargo`, `docker`, etc. directamente en el PowerShell/CMD local de Windows. Las dependencias y el runtime residen en el servidor Linux.
 
-2. **Ejecución remota vía SSH:**
-   - Cualquier comando de consola (instalar paquetes, correr tests, compilar, arrancar scripts o contenedores) debe ejecutarse a través de SSH con el alias `servidor`:
+2. **Ejecución en el servidor, directa o vía SSH según el entorno:**
+   - Desde el portátil, cualquier comando de consola (instalar paquetes, correr tests, compilar, arrancar scripts o contenedores) debe ejecutarse a través de SSH con el alias `servidor`:
      `ssh servidor "cd /opt/wallapop-sniper && <comando>"`
+   - Si ya estás dentro de `miky-p6657es` en Linux, ejecuta directamente desde `/opt/wallapop-sniper`; no es necesario conectar por SSH al mismo servidor.
 
 3. **Traducción de Rutas (Path Translation):**
    - Windows `\\100.114.8.117\Descargas_Servidor\opt_servidor` (o `Z:\opt_servidor`) --> Linux `/opt/wallapop-sniper` (también montado como bind en `/home/miky/opt_servidor`).

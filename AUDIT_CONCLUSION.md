@@ -1,138 +1,226 @@
 # Conclusión de Auditoría Adversarial
 
-- **Fecha:** 2026-11-09
-- **Estado del Proyecto:** `COMPLETED`
-- **Resumen Ejecutivo:** La plataforma cumple sólidamente las invariantes de arquitectura y modelos de `AGENTS.md`, así como la suite actual de tests (`Puntos 2-6` y `Tasks 01-06`). Sin embargo, el pase ciego multi-agente y el filtro del Juez Escéptico han confirmado **2 fallos críticos (`P0`)** y **4 fallos de alto impacto (`P1`)** demostrables y reproducibles en producción: (1) un bug de indentación en el bloque `finally:` de `bot.py` que lanza `UnboundLocalError` / `InteractionResponded` al pulsar los botones `🚫 Descartar`, `📋 Mensajes` o `📊 Grados CeX`; (2) un cortocircuito en el bucle de fallback de modelos y envenenamiento de cachés (`ai_prompt_cache` / `ai_eval_cache`) en Puerta 2 cuando `ai_gateway_call` recibe `schema_defaults`; (3) una contradicción algebraica en `evaluate_deal_math_and_score` que impide aprobar oportunidades de regateo (`OPORTUNIDAD_OFERTA`); (4) fugas de cancelación del 2º push (`resolve_flash_discord_alert`) en `vinted_sniper.py` y disparo espurio de alertas Flash `ntfy.sh` fuera de `direct_max` en `sniper.py`; (5) evaluación prematura de `passes_filters` con vendedor sin enriquecer en `sniper.py` junto con desconexión de `fraud_risk_score` hacia `classify_deal_tier`; y (6) ausencia de mantenimiento periódico de BD (`run_db_maintenance`), refresco del espejo CeX y actualización de `touch_heartbeat()` por radar en operación continua 24/7.
+- **Fecha:** 2026-11-12
+- **Estado del Proyecto:** `ACTION_REQUIRED`
+- **Resumen Ejecutivo:** La arquitectura cubre captura, filtrado determinista, evaluación multimodal, rentabilidad, alertas y seguimiento. La revisión confirma **13 fallos P1** por trazado estático y demostración matemática; **ningún P0 demostrado**. Afectan a reputación, cachés, identidad de productos, cotizaciones, márgenes, cobertura de búsquedas y entrega de avisos. Las correcciones propuestas son acotadas y preservan la infraestructura actual. Este informe no implementa ni despliega cambios.
+
+**Alcance y validación.** Tres auditores independientes revisaron rendimiento/concurrencia, fiabilidad/seguridad y coherencia arquitectónica; después se realizaron exactamente dos rondas de contraste escéptico. Se leyeron AGENTS.md, ROADMAP.md, despliegue, configuración, módulos principales, pruebas y registros anteriores. El alias SSH `servidor` no resuelve en este entorno; usando la IP documentada, el servidor rechaza la autenticación. Por tanto, no se ejecutaron Python, Docker, tests, scrapers ni consultas a la BD viva. Los escenarios siguientes son reproducibles a partir del código, pero **no se han ejecutado en esta sesión**. Las frecuencias y latencias actuales de producción no están verificadas.
+
+**Lectura funcional.** Hay 17 radares, 15 habilitados: uno de compra personal de HDD y 14 de reventa. Cinco servicios Docker separan Wallapop, Vinted, mercados secundarios, bot y seguimiento; comparten SQLite y configuración. Wallapop consulta búsqueda API; Vinted combina catálogo/ficha HTML y perfil; Milanuncios, Cash Converters, eBay y TodoColección dependen de estructuras web específicas. El pipeline aplica filtros, reputación, pre-gate, IA de texto, deduplicación, fotos, IA multimodal, cotización y matemáticas antes del aviso. Discord permite registrar compras/ventas, calificar oportunidades y preparar la reventa. No se encontró una compra automática en plataforma.
+
+**Valor comercial de los datos.** ROADMAP registra 506 alertas, tres compras y una venta entre el 31 de octubre y el 10 de noviembre: son cifras históricas, no recalculadas aquí. `price_history` contiene precios pedidos de anuncios que la IA considera válidos, no importes de ventas cerradas; el código ya advierte de ello en el prompt (`core_engine.py:4390-4399`). Una desaparición tampoco acredita una venta ni revela su precio final. La reventa toma la estimación positiva de IA como `optimal_price`, sin cota externa obligatoria (`4684-4688`), y aplica una fricción fija del 8 %. Esto exige calibración con compras/ventas verificadas y feedback antes de interpretar el beneficio estimado como rentabilidad realizada. No se propone entrenar un predictor con la muestra comercial actual.
+
+**Documentación y despliegue.** El resumen de ROADMAP del 11 de noviembre quedó por detrás del código: `docs/audits/registro.md`, hasta A-040, documenta cambios posteriores de fases 2 y 3. Esas entradas declaran que no están desplegados; la auditoría no pudo comprobarlo. Los 212 tests citados como correctos en A-040 son una verificación anterior, no un resultado de esta sesión.
 
 ## 1. Invariantes Respetadas (Extraídas de AGENTS.md)
-- **Prohibido `thinkingConfig` en Gemini API v1beta:** Ninguna llamada REST a `generativelanguage.googleapis.com` incluye `thinkingConfig` dentro de `generationConfig`.
-- **Enrutamiento estricto de modelos y cadena de fallback:** Uso exclusivo de `gemini-3.5-flash-lite` (Puerta 1 y anuncios unitarios) y `gemini-3.5-flash` (lotes complejos), manteniendo la cadena de fallback a OpenRouter (`google/gemini-2.5-flash-lite`, `openai/gpt-4o-mini`).
-- **Fail-Open sin envenenar caché:** Ante fallos de red, cuota (`BudgetExceededError`), timeout de concurrencia o JSON truncado, el sistema no debe persistir resultados de emergencia en `ai_prescreen_cache`, `ai_prompt_cache` ni `ai_eval_cache`.
-- **Concurrencia SQLite:** Uso exclusivo de `get_db()` (`PRAGMA journal_mode=WAL;`, `busy_timeout=30000`) sin compartir conexiones entre hilos sin lock.
-- **Normalización de Ratings y Reputación:** Conversión de escala `0-100` de Wallapop a `0.0-5.0` en `enrich_seller_profile` y no confundir un vendedor aún no enriquecido (`sales: None`) con `0 valoraciones`.
-- **Thread-Safety en Clases Compartidas:** Preservación de `threading.Lock` en `AdaptiveRateLimiter`, `ParserHealthTracker`, gestores de sesión y caché de perfiles de vendedor.
-- **Preservación de Contratos de Tests Existentes:** Toda modificación mantiene el 100% de compatibilidad con `tests/test_verify_all.py` (`Puntos 2-6`) y `tests/test_verify_task01.py` a `test_verify_task06.py`.
+
+- Ejecutar runtimes y validaciones por SSH desde `/opt/wallapop-sniper`; no ejecutar el proyecto localmente ni usar tests sobre contenedores/BD de producción.
+- Mantener Gemini REST sin `thinkingConfig`, flash-lite para el flujo general y flash únicamente para lote complejo y ticket >=150 € con el interruptor habilitado, conservando OpenRouter.
+- Mantener el fail-open de Puerta 1 sin cachear la respuesta de emergencia. El gateway actual detecta truncado y conserva fallback; no se reabre el fallo histórico ya corregido.
+- Usar `get_db()`, WAL y `busy_timeout=30000`, con conexiones por hilo; mantener locks de limitadores, parser, sesiones y cachés.
+- Conservar ratings Wallapop normalizados y la distinción entre perfil desconocido (`None`) y cero valoraciones confirmadas. El error específico Vinted se documenta en A12-01.
+- Mantener embeddings locales deterministas de **64 dimensiones**, sin API externa; A12-04 corrige su función de mezcla, no esta decisión arquitectónica.
+- Respetar tasas, backoff, flash desactivado y política de avisos. No reiniciar servicios ni modificar presupuestos, credenciales o límites de compra durante esta auditoría.
+
+Fortalezas comprobadas: caché CeX de candidatos por consulta con selección contextual y frescura; caché negativa sin persistir errores de red; sesiones HTTP por hilo; mantenimiento periódico; métricas separadas por servicio; dependencias fijadas; feedback con contexto y cartera con eventos. El arnés `tools/run_isolated.sh` usa red desactivada, código de solo lectura, copia consistente de SQLite y ausencia de secretos. Son bases útiles que deben conservarse.
 
 ## 2. Plan de Ejecución Paso a Paso (Solo P0 y P1 Supervivientes)
 
-### [ID-01] Corrección de indentación en el bloque `finally:` de `on_interaction` que rompe los botones de Discord — Severidad: P0
-- **Archivo y Líneas:** `bot.py:L1012-L1088`
-- **Detectado por:** Consenso Ciego (Agentes 2 y 3)
-- **Problema Real (Evidencia):** En `bot.py:L919`, `on_interaction` abre `conn = get_db()` y `try:` (`L920`). Las ramas `if action == "hide":` (`L923-L933`), `if action == "msg":` (`L961-L977`) y `elif action == "cex":` (`L980-L1010`) terminan con `return`. Sin embargo, en `L1028` se declara `finally: conn.close()`, y todo el código de post-procesado de compra (`L1031-L1087`, desde `try: img_urls = json.loads(...)` hasta `return`) está indentado con 8 espacios **dentro del bloque `finally:`**. En Python, el bloque `finally:` se ejecuta siempre antes de salir de la función aunque haya habido un `return` previo en `try:`. Como consecuencia:
-  1. Pulsar `🚫 Descartar` (`action == "hide"`) hace `return` en `L933`, entra en `finally:` y lanza `UnboundLocalError: cannot access local variable 'image_urls_json'` en `L1032`.
-  2. Pulsar `📋 Mensajes` (`action == "msg"`) o `📊 Grados CeX` (`action == "cex"`) responde a la interacción, hace `return` y entra en `finally:`, lanzando `UnboundLocalError` (sobre `ai_data_kit` en `L1048` o `real_paid_landed` en `L1075`) o `discord.errors.InteractionResponded` en `L1080`.
-- **Veredicto del Debate Adversarial:** Bug crítico P0 indiscutible y determinista que inutiliza 3 de los 4 botones interactivos de las alertas en Discord.
-- **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `bot.py:L1028-L1087`, mantén únicamente `conn.close()` dentro del bloque `finally:` (`L1028-L1029`).
-  2. Des-indenta en 4 espacios (de 8 espacios a 4 espacios, al mismo nivel que el `try:` de `L920`) todo el bloque de las líneas `L1031-L1087` (desde `try: img_urls = json.loads(image_urls_json or "[]")` hasta el `return` final de `L1087`), precediéndolo inmediatamente después de `conn.close()` con `if action != "buy": return` (indentado a 4 espacios, fuera del `finally:`).
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 -m py_compile bot.py && python3 -c \"import ast; tree=ast.parse(open('bot.py', encoding='utf-8').read()); fn=[n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name=='on_interaction'][0]; tr=[n for n in ast.walk(fn) if isinstance(n, ast.Try) and n.finalbody][0]; assert len(tr.finalbody)==1, f'finalbody debe tener solo conn.close(), tiene {len(tr.finalbody)}'; print('ID-01_OK')\""`
+Todos los puntos siguientes son **P1 pendientes**. Los comandos son criterios para el agente que implemente las regresiones indicadas, no pruebas ya superadas. A12-03 depende del versionado de A12-02; A12-11 debe conservar la semántica de entrega/push de A12-10. Los demás pueden abordarse de forma independiente mediante diffs mínimos.
 
-### [ID-02] Prevención de cortocircuito en fallback de modelos y envenenamiento de cachés (`ai_prompt_cache` / `ai_eval_cache`) en `ai_gateway_call` y `analyze_and_generate_kit` — Severidad: P0
-- **Archivo y Líneas:** `core_engine.py:L823-L895`, `core_engine.py:L3857-L3898`
-- **Detectado por:** Agente 2 validado por Juez Escéptico
-- **Problema Real (Evidencia):**
-  1. En `core_engine.py:L827` (bucle Gemini) y `L874` (bucle OpenRouter), `ai_gateway_call` llama a `repair_and_parse_json(raw_text, schema_defaults=schema_defaults)`. Cuando `schema_defaults` no es `None`, `repair_and_parse_json` devuelve una copia de `schema_defaults` incluso si el modelo devolvió texto truncado o no-JSON. Eso hace que `if parsed_result is not None:` (`L828`) sea `True`, asigne `used_model = model` y ejecute `break` (`L831-L832`), **cortocircuitando la cadena de fallback** (no prueba el segundo modelo de Gemini ni OpenRouter) y **guardando el diccionario por defecto en `ai_prompt_cache` durante 7 días** (`L883-L891`).
-  2. En `analyze_and_generate_kit` (`core_engine.py:L3872`), a diferencia de `prescreen_item_text` (`L3401` que pasa `schema_defaults=None`), se pasa `schema_defaults=vision_schema_defaults` (`{"is_valid_deal": False, ...}`). Si el semáforo `_AI_GATEWAY_SEMAPHORE` agota el timeout (`L763-L766`) o todos los modelos fallan/devuelven JSON truncado, `ai_gateway_call` retorna `vision_schema_defaults` sin `"_api_error": True`. En consecuencia, `analyze_and_generate_kit` (`L3889-L3896`) **envenena `ai_eval_cache` con `is_valid_deal: False` por 7 días**, y los snipers guardan el rechazo falso en `item_embeddings` y cancelan la Flash Alert en Discord.
-- **Veredicto del Debate Adversarial:** Viola directamente las Invariantes 2 y 3 de `AGENTS.md` (cadena de fallback a OpenRouter y prohibición de envenenar cachés ante fallos de API/red). La corrección debe mantener intacto el contrato de `repair_and_parse_json` y `ai_gateway_call` verificado en `tests/test_verify_punto6.py`.
-- **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `core_engine.py:L827` (dentro del bucle de `candidate_models` de Gemini) y en `core_engine.py:L874` (dentro del bucle de `openrouter_models`), verifica primero si la respuesta del modelo contiene un JSON válido llamando a `raw_parsed = repair_and_parse_json(text_str, schema_defaults=None)`. Solo si `raw_parsed is not None`, obtén `parsed_result = repair_and_parse_json(text_str, schema_defaults=schema_defaults)`, asigna `used_model = model` (o `fallback_model`) y haz `break`.
-  2. En `core_engine.py:L895` (justo antes de `return parsed_result` al final de `ai_gateway_call`), si `parsed_result is None and schema_defaults is not None:`, devuelve `dict(schema_defaults)` (como `used_model` es `None`, el bloque `L883` no habrá envenenado `ai_prompt_cache`, y se respeta el contrato de `tests/test_verify_punto6.py:L153`).
-  3. En `analyze_and_generate_kit` (`core_engine.py:L3872`), pasa `schema_defaults=None` a `ai_gateway_call` (igual que hace `prescreen_item_text` en `L3401`). Justo después (en `L3882`), si `parsed_result and isinstance(parsed_result, dict):`, normaliza el diccionario con `parsed_result = repair_and_parse_json(json.dumps(parsed_result, ensure_ascii=False), schema_defaults=vision_schema_defaults)`. Así, si el semáforo expira o todas las APIs fallan, `ai_gateway_call` devuelve `None` y `analyze_and_generate_kit` devuelve `None` (activando el fail-open limpio de los snipers sin envenenar `ai_prompt_cache`, `ai_eval_cache` ni `item_embeddings`).
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 tests/test_verify_punto6.py && python3 tests/test_verify_all.py"`
+### [A12-01] Normalizar una sola vez la reputación Vinted — Severidad: P1
 
-### [ID-03] Corrección de contradicción algebraica en el cálculo de ofertas (`evaluate_deal_math_and_score`) — Severidad: P1
-- **Archivo y Líneas:** `core_engine.py:L4174-L4191`
-- **Detectado por:** Agente 2 validado por Juez Escéptico
-- **Problema Real (Evidencia):** En `core_engine.py:L4177`, el motor calcula `target_offer = int(min(direct_max_cap, round(optimal_price - req_margin - est_fees)))` sobre el 100% de `optimal_price` (sin descontar el factor de comisión/fricción P2P `0.92`). Cinco líneas después (`L4181-L4183`), evalúa `offer_landed = round(target_offer + est_fees, 2)` y `offer_profit = round((optimal_price * 0.92) - offer_landed, 2)`, exigiendo `if offer_profit >= req_margin:`. Algebraicamente, cuando `target_offer` viene dado por `optimal_price - req_margin - est_fees`, `offer_profit` es igual a `req_margin - 0.08 * optimal_price`, lo cual es **siempre menor que `req_margin`**. Como resultado, `if offer_profit >= req_margin:` evalúa siempre a `False` y descarta determinísticamente las oportunidades de regateo (`OPORTUNIDAD_OFERTA`).
-- **Veredicto del Debate Adversarial:** Fallo matemático demostrable que inutiliza la funcionalidad de sniping por oferta en la franja `+30%`.
+- **Archivo y Líneas:** `vinted_sniper.py:423-429`; `fraud_signals.py:674-675,881-885,931-954`.
+- **Detectado por:** Auditor 2, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Para un vendedor con 20 valoraciones y `feedback_reputation=0.2`, el adaptador convierte a 1/5. El enriquecimiento vuelve a multiplicar ratings <=1 por cinco: el resultado es 5/5. Se pierde la señal de puntuación baja y puede asignarse un distintivo de confianza. Sucede tanto con datos SSR como con la consulta de perfil.
+- **Veredicto del Debate Adversarial:** Error determinista en una señal antifraude, independiente de los fallos de red y distinto del caso ya resuelto de valoraciones desconocidas.
 - **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `core_engine.py:L4176-L4177`, calcula el techo neto de reventa `net_optimal_p2p = optimal_price * 0.92` y reemplaza la condición y el cálculo de `target_offer` por:
-     ```python
-     net_optimal_p2p = optimal_price * 0.92
-     if allow_offers and net_optimal_p2p > (req_margin + est_fees + 10):
-         target_offer = int(min(direct_max_cap, math.floor(net_optimal_p2p - req_margin - est_fees)))
-     ```
-     (Usa `math.floor` en lugar de `round` para evitar que un redondeo al alza deje `offer_profit` unos céntimos por debajo de `req_margin`).
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 -c \"import core_engine as ce; ok, sc, opt, prof, _, tag = ce.evaluate_deal_math_and_score(price=110.0, landed_cost=118.99, target={'id':'switch_oled','mode':'resale','max_price':98,'direct_buy_max_price':98,'min_profit_eur':35}, ai_data={'is_valid_deal':True,'visual_confidence':'alta','identified_model':'Nintendo Switch OLED','estimated_resale_price':145}, cex_data={'cash':94.0,'voucher':110.0,'sell':165.0}, min_profit=35.0, min_score=8); assert ok is True and tag=='OPORTUNIDAD_OFERTA' and prof>=35.0, f'Fallo oferta: {ok} {tag} {prof}'; print('ID-03_OK:', sc, tag, prof)\" && python3 tests/test_bloque3.py && python3 tests/test_fase7_3.py"`
+  1. Convertir la escala por procedencia del campo; no inferirla exclusivamente a partir de que un número sea <=1.
+  2. Conservar ratings ya normalizados, `None` desconocido y la conversión Wallapop.
+- **Criterio de Verificación (Test de Aceptación):** Añadir en `test_seller_unknown.py` casos SSR/API con 0.19, 0.2 y 0.98 y valoraciones confirmadas: obtener 0.95, 1.0 y 4.9, con señal de baja reputación en los dos primeros. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_seller_unknown.py -v"
 
-### [ID-04] Cierre de fugas del 2º Push (`resolve_flash_discord_alert`) en Vinted/Multi-Sniper y filtro `price <= direct_max` en Flash `ntfy.sh` de Wallapop — Severidad: P1
-- **Archivo y Líneas:** `sniper.py:L478-L494`, `vinted_sniper.py:L768-L772`, `vinted_sniper.py:L808-L813`, `vinted_sniper.py:L859-L862`, `multi_sniper.py:L338-L348`, `multi_sniper.py:L363`, `multi_sniper.py:L372`, `multi_sniper.py:L405`, `multi_sniper.py:L450`, `multi_sniper.py:L504`, `multi_sniper.py:L542`
-- **Detectado por:** Consenso Ciego (Agentes 1, 2 y 3)
-- **Problema Real (Evidencia):**
-  1. En `sniper.py:L478`, el condicional de Alerta Flash omite `and price <= direct_max` (a diferencia de `vinted_sniper.py:L690` y `multi_sniper.py:L329`). Aunque `send_flash_discord_alert` aborta internamente si `price > direct_cap`, la línea `sniper.py:L493` ejecuta incondicionalmente `send_one_tap_ntfy_alert(..., is_flash=True)`, enviando notificaciones push Flash falsas al móvil para anuncios en el tramo de regateo (`+30%`) y bloqueando el hilo con un `POST` HTTP síncrono.
-  2. En `vinted_sniper.py`, tras enviar `flash_msg = send_flash_discord_alert(...)` en `L692`, si el anuncio es descartado en `L768-L772` (duplicado semántico rechazado), en `L808-L813` (foto robada/reutilizada detectada por `dHash` con `risk >= 4`), o en `L859-L862` (rechazo en inspección visual multimodal de Puerta 2), el código hace `continue` **sin llamar a `resolve_flash_discord_alert(flash_msg, approved=False, ...)`**, dejando la alerta Flash activa en Discord sin el aviso `🛑 ¡DETÉN LA COMPRA!`.
-  3. En `multi_sniper.py:L348, L363, L372, L405, L450, L504, L542`, las 7 llamadas a `resolve_flash_discord_alert` omiten `title=title, price=price, item_url=item.get("url", "")`, mostrando `📦 ~~ (0€)~~` en Discord; y en `multi_sniper.py:L338` se pasa `image_url=item.get("photo", "")` cuando la clave en `multi_sniper` es `item.get("images", [""])[0]`.
-- **Veredicto del Debate Adversarial:** Riesgo operativo directo de comprar a ciegas un artículo defectuoso o fraudulento en Vinted al no emitirse la cancelación del Flash Alert, y ruido de falsos positivos Flash en `ntfy.sh` en Wallapop.
-- **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `sniper.py:L478`, define `direct_max = float(target.get("direct_buy_max_price") or target.get("max_price", 9999))` y añade `and price <= direct_max` a la condición `if fraud_eval["risk"] < 2 and can_flash and price <= direct_max and (age_days is None or age_days <= 1.0):`.
-  2. En `vinted_sniper.py`, añade `if flash_msg: resolve_flash_discord_alert(flash_msg, approved=False, reason=..., title=title, price=base_price, item_url=item.get("url", ""))` antes del `mark_item_seen` / `continue` en los tres bloques donde falta:
-     - `L770-L772` (`reason=f"Duplicado semántico rechazado: {rej}"`),
-     - `L811-L813` (`reason=f"Foto reutilizada de {r_info['platform']} ({r_info['item_id']})"`) y
-     - `L860-L862` (`reason=reason`).
-     Añade también `item_url=item.get("url", "")` en `vinted_sniper.py:L710`.
-  3. En `multi_sniper.py:L338`, pasa `image_url=(item.get("images") or [""])[0]`, y en las 7 llamadas a `resolve_flash_discord_alert` (`L348, L363, L372, L405, L450, L504, L542`) añade `title=title, price=price, item_url=item.get("url", "")`.
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 -m py_compile sniper.py vinted_sniper.py multi_sniper.py && python3 tests/test_verify_task06.py"`
+### [A12-02] Conservar negaciones y relaciones en claves de caché — Severidad: P1
 
-### [ID-05] Corrección del orden `passes_filters` vs `enrich_seller_profile` y propagación de `fraud_risk_score` a `classify_deal_tier` — Severidad: P1
-- **Archivo y Líneas:** `sniper.py:L412, L685`, `vinted_sniper.py:L666-L676, L891`, `multi_sniper.py:L300-L314, L534`, `core_engine.py:L4127`
-- **Detectado por:** Consenso Ciego (Agentes 1 y 3)
-- **Problema Real (Evidencia):**
-  1. En `sniper.py:L253-L268`, `fetch_wallapop` inicializa `item["seller"]` con `"rating": None, "sales": None`. En `sniper.py:L412`, se invoca `passes_filters(..., seller=item.get("seller"))` **antes** de `enrich_seller_profile(item)` (`L452`). Dentro de `passes_filters` -> `evaluate_fraud_risk` -> `evaluate_seller_risk` (`fraud_signals.py:L653-L654`), `sales: None` se convierte en `reviews_count = 0`, penalizando con `SELLER_ZERO_REVIEWS` (`weight: 2`) a todos los vendedores de Wallapop antes de enriquecerlos (lo que descarta anuncios legítimos de vendedores 5⭐ si el texto tiene cualquier señal leve de peso 2, violando la Invariante 5 de `AGENTS.md`).
-  2. A la inversa, en `vinted_sniper.py:L666` y `multi_sniper.py:L300`, se ejecuta `enrich_seller_profile(item)` (que en Vinted realiza una petición HTTP síncrona a `/api/v2/users/{id}`) **antes** de `passes_filters(title, desc, ...)`, desperdiciando llamadas HTTP y evaluando dos veces seguidas `evaluate_fraud_risk` con el mismo `seller`.
-  3. En `core_engine.py:L4127`, `evaluate_deal_math_and_score` lee `fraud_risk_num = int(ai_data.get("fraud_risk_score", 0) or 0)` para `classify_deal_tier`, pero ninguno de los 3 snipers inyecta `fraud_eval["risk"]` en `ai_data["fraud_risk_score"]`, haciendo que `fraud_risk_score` sea siempre `0` y permitiendo que anuncios con `risk == 3` se clasifiquen como `NIVEL 1 (10/10 Compra a Ciegas)`.
-- **Veredicto del Debate Adversarial:** Alinea los 3 snipers con el flujo exacto del pipeline definido en `AGENTS.md` §3.2–3.4 (primero filtro rápido local de texto/precio `passes_filters` sin `seller`, después `enrich_seller_profile` + `evaluate_fraud_risk` en Puerta 0, y finalmente propagación de `fraud_risk_score` a Puerta 2/Clasificador de 3 Niveles), manteniendo intacto el contrato de `passes_filters(..., seller=...)` para `tests/test_fase3.py`.
+- **Archivo y Líneas:** `core_engine.py:1142-1167,3872-3880,4297-4305`.
+- **Detectado por:** Auditor 2, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** La normalización elimina `no`, `sin`, `ni` y `con`. Con igual radar, título y precio, «No incluye consola. Incluye dos mandos.» y «Incluye consola. Incluye dos mandos.» generan la misma clave. Una decisión legítima sobre el primer producto puede transferirse al segundo antes de consultar IA. «Con caja» y «sin caja» también colisionan.
+- **Veredicto del Debate Adversarial:** No es un problema de estilo de normalización: se pierde información que decide si el producto existe o está completo.
 - **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `sniper.py:L412`, cambia `passes_filters(title, desc, price, target, global_blacklist, seller=item.get("seller"))` por `passes_filters(title, desc, price, target, global_blacklist)` (sin `seller`, ya que el vendedor se enriquece en `L452` y se evalúa en `L460`).
-  2. En `vinted_sniper.py:L665-L670`, ejecuta primero `if not passes_filters(title, desc, base_price, target, global_blacklist, extra_text=extra_meta_str): mark_item_seen(...); continue` y justo después ejecuta `item["platform"] = "VINTED"` y `enrich_seller_profile(item, http_session=vinted.session if 'vinted' in locals() else None)` antes de `evaluate_fraud_risk` (`L672`).
-  3. En `multi_sniper.py:L299-L304`, ejecuta primero `if not passes_filters(title, desc, price, target, global_blacklist): mark_item_seen(...); continue` y después (tras `is_duplicate_recent_deal` en `L305-L307`) ejecuta `item["platform"] = plat` y `enrich_seller_profile(item)` justo antes de `evaluate_fraud_risk` (`L310`).
-  4. En `sniper.py` (justo antes de `evaluate_deal_math_and_score` en `L685`), en `vinted_sniper.py` (justo antes de `L891`) y en `multi_sniper.py` (justo antes de `L534`), asigna `ai_data["fraud_risk_score"] = int(fraud_eval.get("risk", 0) or 0)`.
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 tests/test_fase2.py && python3 tests/test_fase3.py && python3 tests/test_bloque2.py && python3 tests/test_verify_task06.py"`
+  1. Conservar las negaciones y relaciones relevantes para disponibilidad, estado y piezas incluidas.
+  2. Versionar las claves de prescreen y visión; coordinar un namespace final con A12-03 para no reutilizar entradas antiguas contaminadas. No purgar datos financieros.
+- **Criterio de Verificación (Test de Aceptación):** En `test_ai_gateway.py`, comprobar claves distintas y que un rechazo precargado no se hereda en el ejemplo positivo. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_ai_gateway.py -v"
 
-### [ID-06] Ejecución periódica de `run_db_maintenance`, refresco de `cex_catalog_mirror` y actualización de `touch_heartbeat()` por radar en operación 24/7 — Severidad: P1
-- **Archivo y Líneas:** `core_engine.py:L196-L220`, `sniper.py:L314-L350`, `vinted_sniper.py:L552-L585`, `multi_sniper.py:L182-L208`
-- **Detectado por:** Consenso Ciego (Agentes 1 y 3)
-- **Problema Real (Evidencia):**
-  1. `run_db_maintenance(conn)` (`core_engine.py:L196-L220`) y el hilo de sincronización `sync_cex_catalog_mirror` (`core_engine.py:L495`) solo se ejecutan una vez dentro de `init_db()` al arrancar el contenedor. Como las consultas `SELECT` de `cex_cache`, `ai_prescreen_cache`, `ai_eval_cache` y `ai_prompt_cache` no filtran por `WHERE created_at > ...`, en ejecución continua 24/7 sin reinicios las cachés nunca expiran, `price_history` y `fraud_log` crecen indefinidamente, `item_eval_fails` acumula claves sin límite y el espejo `cex_catalog_mirror` no se refresca tras las primeras 12 horas.
-  2. `healthcheck.py` marca el contenedor como `unhealthy` si `/tmp/heartbeat` supera `300s`. En `sniper.py`, `vinted_sniper.py` y `multi_sniper.py`, `touch_heartbeat()` solo se invoca al inicio de la ronda (`while True:`) y en el `sleep_with_heartbeat()` final, pero nunca dentro del bucle `for target in targets:`. Cuando `multi_sniper.py` o `vinted_sniper.py` procesan múltiples radares con esperas de red e IA, la ronda supera los 300s y Docker reporta falsos positivos de contenedor `unhealthy`.
-- **Veredicto del Debate Adversarial:** Mejora de resiliencia y mantenimiento 24/7 de coste cero y riesgo nulo que garantiza el cumplimiento de los TTL documentados en `AGENTS.md` §4 y evita reinicios espurios de Docker.
+### [A12-03] Hacer efectivo el reintento visual con más fotos — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:4292-4305,4322-4332,4453-4460`; `sniper.py:723-733`; `vinted_sniper.py:974-986`; `multi_sniper.py:572-584`.
+- **Detectado por:** Auditor 1 y orquestador, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** La primera evaluación con una foto y confianza baja se cachea. El retry descarga fotos adicionales, pero conserva la firma de la primera y devuelve la evaluación anterior antes del gateway. Además, lite con precio <60 € y sin lote mantiene un límite de una imagen aunque la llamada sea `vision_retry`: cambiar solamente la caché no soluciona ese caso.
+- **Veredicto del Debate Adversarial:** El mecanismo de recuperación no inspecciona la evidencia adicional. Es distinto de la optimización histórica descartada de evitar redescargar la primera foto.
 - **Instrucción Exacta para el Agente Ejecutor:**
-  1. En `core_engine.py:L213` (dentro de `run_db_maintenance`), añade la purga de registros antiguos de `fraud_log` y `price_history`:
-     ```python
-     c.execute("DELETE FROM fraud_log WHERE detected_at < datetime('now', '-60 days')")
-     c.execute("DELETE FROM price_history WHERE recorded_at < datetime('now', '-90 days')")
-     ```
-  2. En `sniper.py:L316-L318` (dentro del bloque `if time.time() - last_kit_purge > 21600:`), añade `run_db_maintenance(conn)`, `threading.Thread(target=sync_cex_catalog_mirror, daemon=True).start()` (importando `run_db_maintenance` y `sync_cex_catalog_mirror` de `core_engine` e `import threading` si no está importado) y `item_eval_fails.clear()`.
-  3. En `vinted_sniper.py` y `multi_sniper.py`, añade también una variable `last_maintenance = time.time()` antes del `while True:` y al inicio del `while True:` si `time.time() - last_maintenance > 21600:` ejecuta `run_db_maintenance(conn)`, ` item_eval_fails.clear()` y actualiza `last_maintenance = time.time()`.
-  4. Añade `touch_heartbeat()` al inicio de cada iteración de `for target in targets:` en `sniper.py:L347`, `vinted_sniper.py:L581` y `multi_sniper.py:L203`.
-- **Criterio de Verificación (Test de Aceptación):**
-  `ssh servidor "cd /opt/wallapop-sniper && python3 -m py_compile core_engine.py sniper.py vinted_sniper.py multi_sniper.py bot.py fraud_signals.py antiban.py && python3 tests/test_verify_punto5.py && python3 tests/test_verify_all.py"`
+  1. Firmar el conjunto ordenado de imágenes efectivamente enviado y distinguir el retry cuando cambie la inspección.
+  2. Permitir evidencia ampliada en el retry normal, hasta el máximo previsto de tres fotos. Conservar una foto en `DEGRADED` y omitir reintentos que no añadan evidencia.
+  3. Coordinar el versionado con A12-02.
+- **Criterio de Verificación (Test de Aceptación):** En `test_vision_minimal.py`, gateway simulado y SQLite temporal: [foto1] devuelve baja confianza; [foto1,foto2] alcanza realmente el gateway y cambia el veredicto; una repetición idéntica usa caché. Capturar `images_b64` también con precio <60 € y en modo degradado. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_vision_minimal.py -v"
+
+### [A12-04] Evitar colisiones estructurales del hashing local — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:1279-1301,1407-1414,1625-1630`; flujo de visión `sniper.py:677-718`.
+- **Detectado por:** Observaciones ciegas convergentes de Auditores 1 y 2, validadas matemáticamente por Juez Escéptico.
+- **Problema Real (Evidencia):** Cada dimensión usa solo `crc32(... ) & 1`. Cambiar el último byte mediante XOR 1 cambia el CRC en `0x77073096`, con bit inferior cero. Los tokens `m4` y `m5`, del mismo peso y sin trigramas, aportan exactamente lo mismo. «Sony RX100 M4» y «Sony RX100 M5», con igual descripción, tienen el mismo vector. Si coinciden vendedor y rango de precio, se reutilizan identificación y `cex_search_query` del modelo anterior sin inspeccionar las fotos del nuevo.
+- **Veredicto del Debate Adversarial:** Colisión exacta demostrable, no una queja genérica sobre la calidad semántica de 64 dimensiones. La ejecución remota de la regresión sigue pendiente.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Mantener hashing determinista local de 64 dimensiones, usando una mezcla adecuada con `hashlib` ya disponible.
+  2. Versionar/aislar o regenerar los vectores anteriores antes de compararlos con los nuevos.
+  3. Verificar que modelos incompatibles no evitan visión por este bypass; añadir una guarda acotada si la regresión lo requiere.
+- **Criterio de Verificación (Test de Aceptación):** Añadir a `test_semantic_dedup_seller.py` los embeddings reales M4/M5, sin vectores artificiales, y el caso de un vendedor con dos generaciones a precios próximos. Deben distinguirse y evitar la herencia del modelo incorrecto. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_semantic_dedup_seller.py -v"
+
+### [A12-05] No deduplicar productos distintos solo por título y precio — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:1639-1655`; `sniper.py:521-523`; `vinted_sniper.py:774-776`; `multi_sniper.py:414-416`.
+- **Detectado por:** Auditor 2, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Durante 48 h, un título normalizado idéntico y una diferencia <=10 € bastan para descartar. Después de una Switch OLED a 95 €, otro ID y vendedor con el mismo título a 90 € se marcan vistos sin evaluar. Este filtro actúa antes de la deduplicación semántica que sí exige evidencia de identidad.
+- **Veredicto del Debate Adversarial:** Títulos genéricos y precios próximos son entradas normales de un mercado; no demuestran que sea el mismo producto.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Exigir identidad de anuncio o evidencia suficiente de republicación del mismo vendedor/producto.
+  2. Ante título/precio únicamente, continuar. Conservar la deduplicación por ID.
+  3. Revisar la expectativa antigua de `tests/test_fase5.py:205-233` que valida el descarte insuficiente.
+- **Criterio de Verificación (Test de Aceptación):** En `test_semantic_dedup_seller.py`, dos IDs/vendedores distintos con igual título/precio continúan; el mismo ID sigue siendo omitido por `market_seen_items`. Ejecutar el comando de A12-04.
+
+### [A12-06] Exigir la generación correcta al seleccionar una ficha CeX — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:2615-2623,2888-2910,3020-3033,3089-3092`; `config.json:646`.
+- **Detectado por:** Auditor 2, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Una consulta «Sony RX100 M4» pierde `M4` en la búsqueda SQL por su longitud. Si el espejo contiene solo «Sony RX100 M5», los guardas de cámara no la excluyen: solo manejan II/III. El scorer elige un candidato válido sin exigir todos los discriminantes, y el acierto de espejo impide buscar M4 en Algolia. El importe de otra generación llega al cálculo de rentabilidad.
+- **Veredicto del Debate Adversarial:** La guía del radar exige distinguir esas generaciones. Tener una cotización de otra cámara es peor que declarar ausencia de referencia.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Conservar discriminantes cortos y validar la generación especificada antes de puntuar, incluidas formas M4–M7 y Mark IV–VII.
+  2. Rechazar generaciones incompatibles también en los fallbacks de búsqueda; si falta una ficha válida, continuar por Algolia o devolver ausencia.
+- **Criterio de Verificación (Test de Aceptación):** En `test_cex_lookup.py`, espejo fresco solo M5 y consulta M4 separada por espacio: nunca devolver M5; permitir el fallback simulado correcto o `None`. Con ambas fichas, elegir M4. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_cex_lookup.py -v"
+
+### [A12-07] Descontar el cargador al calcular ofertas — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:4666-4668,4746-4761,6239,6259`.
+- **Detectado por:** Auditor 2 y orquestador; contrastado con Auditor 1 y Juez Escéptico.
+- **Problema Real (Evidencia):** Los 12 € de reposición entran en compra directa y desaparecen en regateo. Ejemplo: anuncio 110 €, coste entregado 118,99 €, reventa 145 €, tope 98 € y mínimo 35 €. Sin cargador, recomienda 89 €, calcula 97,99 € de coste y anuncia 35,41 € de beneficio. Al incluir la reposición ya reconocida por el sistema, quedan **23,41 €**.
+- **Veredicto del Debate Adversarial:** La pérdida de coste es algebraica; no depende de si la estimación de reventa es acertada.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Restar `charger_penalty` al calcular la oferta máxima y al comprobar el beneficio.
+  2. Mantener `offer_landed_cost` como compra más envío: la presentación CeX ya añade el cargador; evitar descontarlo dos veces.
+  3. Mantener coherentes los campos económicos mostrados para la oferta.
+- **Criterio de Verificación (Test de Aceptación):** Añadir a `test_thresholds_coherence.py`: el caso debe ofrecer 77 € con límite de descuento 35 %, o rechazarse con límite 25 %. Comprobar siempre `beneficio = reventa*0.92 - offer_landed_cost - charger_penalty`. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_thresholds_coherence.py -v"
+
+### [A12-08] No descartar una salida P2P viable por efectivo CeX insuficiente — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:4033-4043,4746-4761`; persistencia del rechazo en `sniper.py:614-620`.
+- **Detectado por:** Orquestador, contrastado con Auditor 1 y Juez Escéptico.
+- **Problema Real (Evidencia):** Con precio 120 €, tope directo 98 €, efectivo CeX 60 € y PVP CeX 180 €, el pre-gate supone compra mínima 78 €, coste 85,39 € y descarta porque 60-85,39 no cubre 24,50 €. El motor final, con reventa P2P 150 € y coste actual 129,49 €, aprobaría oferta de 93 €, coste 102,49 €, beneficio **35,51 €** y rebaja 22,5 %. El título puede no contener ningún marcador de lote.
+- **Veredicto del Debate Adversarial:** El efectivo de liquidación no es el techo de una salida P2P. La restricción contradice los niveles 2/3 y elimina candidatos antes de obtener su valoración.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. No declarar imposibilidad de una oportunidad P2P únicamente por cash CeX insuficiente.
+  2. Usar una referencia P2P coherente con la decisión final cuando exista; si no hay un techo fiable, permitir el análisis.
+  3. No presentar `sell*0.85` como techo universal: tomar el máximo de dos aproximaciones rescata el ejemplo, pero no demuestra resolver el problema general.
+  4. Revisar las expectativas de rechazo basadas solo en cash en `test_thresholds_coherence.py`, conservando la precedencia del umbral del radar sobre el global.
+- **Criterio de Verificación (Test de Aceptación):** El ejemplo permite llegar al motor y obtiene 93 €/35,51 €. Una referencia exclusivamente CeX insuficiente no basta para descartar P2P. Mantener las pruebas de prioridad de umbrales. Ejecutar el comando de A12-07.
+
+### [A12-09] Aplicar las reglas de juegos según el producto buscado — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:2203-2214,2322-2323,3897-3899,4365`; `config.json:781-843`.
+- **Detectado por:** Auditor 2; alcance de prompts validado por orquestador y Juez Escéptico.
+- **Problema Real (Evidencia):** «Juego Pokémon Platino Nintendo DS ESP», 45 €, original con caja, se descarta por empezar con «Juego», aunque el radar activo busca precisamente ese producto. La definición efectiva del tuple está en core y oculta el import de `fraud_signals`. Además, las dos puertas IA reciben instrucciones generales de rechazar juegos sueltos, también cuando evalúan el radar Pokémon.
+- **Veredicto del Debate Adversarial:** Cambiar únicamente el tuple importado o el primer filtro dejaría rutas contradictorias activas.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Condicionar al tipo de radar los prefijos de juegos, modificando la definición efectiva usada por `passes_filters`.
+  2. Ajustar las instrucciones de texto y visión para aceptar el producto buscado en Pokémon.
+  3. Conservar rechazo de cajas vacías, fundas, reproducciones y juegos sueltos en radares de consolas.
+- **Criterio de Verificación (Test de Aceptación):** En `test_console_classifier.py`, Pokémon válido supera filtros y sus prompts no ordenan rechazar el juego por ser juego; Mario Kart sigue rechazado en Switch. Incluir negativos de repro/caja vacía. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_console_classifier.py -v"
+
+### [A12-10] Recuperar avisos tras agotar los reintentos de Discord — Severidad: P1
+
+- **Archivo y Líneas:** `core_engine.py:6210-6228,6465-6497`; `sniper.py:762,824-870`; `vinted_sniper.py:1014,1079-1123`; `multi_sniper.py:614,670-702`.
+- **Detectado por:** Consenso ciego de Auditores 2 y 3, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Los escáneres marcan visto y registran el deal antes de entregar. Si fallan todos los POST y el webhook, `send_discord_alert` devuelve `False`; sus llamadores lo ignoran y emiten `alerted`. Al recuperarse Discord, la deduplicación impide reenviar. En una alerta silenciosa, ntfy tampoco proporciona un aviso alternativo.
+- **Veredicto del Debate Adversarial:** Los reintentos inmediatos no resuelven una interrupción más larga. Persistir un candidato no equivale a entregar su alerta.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Persistir entrega pendiente/fallida y reintentar de forma acotada con backoff desde SQLite, usando el análisis ya disponible.
+  2. Separar entrega confirmada, fallo de transporte y `queued_digest`; conservar la decisión original de push.
+  3. Evitar barreras de deduplicación en el reenvío y preservar compras, ventas y kits. No prometer ausencia absoluta de duplicados ante timeouts ambiguos.
+- **Criterio de Verificación (Test de Aceptación):** En `test_discord_send.py`, fallo completo y recuperación en una pasada posterior: una fila, una evaluación IA y una entrega confirmada tras recuperar. Digest no se reenvía individualmente y `delivery_failed` no cuenta como `alerted`. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_discord_send.py -v"
+
+### [A12-11] Despachar ntfy final para los mercados secundarios — Severidad: P1
+
+- **Archivo y Líneas:** `multi_sniper.py:33-34,459,670-712`; comparación `sniper.py:862-868` y `vinted_sniper.py:1115-1121`.
+- **Detectado por:** Auditor 3, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Multi solo llama a ntfy para flash. Con `flash_mode=off`, los chollos de Cash Converters, Milanuncios, eBay y TodoColección nunca generan el ntfy final, aunque el canal esté configurado y la decisión de push sea positiva.
+- **Veredicto del Debate Adversarial:** Omisión sistemática en cuatro fuentes del canal previsto. No se presupone que ntfy esté configurado actualmente.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Usar el constructor común `build_ntfy_analysis_payload` y el despacho final equivalente a los otros escáneres.
+  2. Respetar `_alert_push`, URL/modelo/margen y flash desactivado; no cambiar umbrales.
+- **Criterio de Verificación (Test de Aceptación):** Ampliar `test_alert_payload.py` recorriendo el despacho de Multi: candidato aprobado y flash off envía un ntfy final; push falso no lo envía. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_alert_payload.py -v"
+
+### [A12-12] Garantizar cobertura del scheduler bajo carga real — Severidad: P1
+
+- **Archivo y Líneas:** `antiban.py:718-750,883-925`; `config.json:11-22` y consultas de radares habilitados.
+- **Detectado por:** Auditor 1, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** Wallapop solicita 21 consultas hot/20 s y 10 estándar/80 s: **1,175 consultas/s**, con límite 1. Vinted solicita 22/60 s y 8/240 s: **0,40 consultas/s**, con límite 0,30. Estas sumas excluyen fichas, perfiles y paginación. Las tareas vencidas se ordenan primero por intervalo: una estándar muy atrasada pierde frente a una hot recién vencida. Con reloj virtual, jitter 1 y carga Vinted, las hot pueden ocupar el servicio indefinidamente.
+- **Veredicto del Debate Adversarial:** Priorizar hot es deliberado; permitir espera indefinida no garantiza la cobertura declarada. Los intervalos nominales son inviables con la capacidad actual.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Introducir envejecimiento o prioridad por retraso relativo que garantice servicio a estándar.
+  2. Ajustar cadencias a las consultas y peticiones adicionales reales, conservando los límites de tasa y backoff.
+  3. No elevar peticiones ni añadir workers para ocultar la sobrecarga.
+- **Criterio de Verificación (Test de Aceptación):** En `test_scheduler.py`, simulación de una hora con tareas construidas desde la configuración real, ambos buckets, jitter fijo y semilla: todas las estándar se ejecutan repetidamente con demora acotada y sin superar la tasa. El test previo usa una carga más pequeña. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_scheduler.py -v"
+
+### [A12-13] Evitar que el backoff de una plataforma bloquee las demás — Severidad: P1
+
+- **Archivo y Líneas:** `outcome_tracker.py:370-388,531-555`; patrón correcto existente `400-417`.
+- **Detectado por:** Auditor 3, validado por Juez Escéptico.
+- **Problema Real (Evidencia):** El seguimiento selecciona 25 pendientes globales y después omite los de plataformas en backoff. Si los 25 primeros son Vinted, un Wallapop posterior nunca entra mientras dure esa retirada. Lo mismo ocurre con cinco vendedores. Los backoffs configurados son de 15 min, 30 min y 120 min; las comprobaciones temporales omitidas no se reconstruyen después.
+- **Veredicto del Debate Adversarial:** La retirada debe aislar una plataforma. La muestra de fraude ya contiene la solución correcta, lo que permite un cambio pequeño y coherente.
+- **Instrucción Exacta para el Agente Ejecutor:**
+  1. Excluir plataformas en backoff en ambos SELECT antes de aplicar LIMIT, parametrizando como `check_pending_fraud_samples`.
+  2. Conservar su plazo de retirada, ritmo de peticiones y checkpoints.
+- **Criterio de Verificación (Test de Aceptación):** Añadir en `test_fraud_sampling.py` regresiones para las dos colas: 25 Vinted bloqueadas y un Wallapop vencido posterior deben permitir comprobar Wallapop; repetir con cinco vendedores Vinted y uno Wallapop. Ejecutar:
+  
+      ssh servidor "cd /opt/wallapop-sniper && tools/run_isolated.sh -m unittest discover -s tests/unit -p test_fraud_sampling.py -v"
+
+Tras implementar los cambios, ejecutar la suite unitaria completa en aislado y comparar los scripts históricos con su baseline documentado. Los tests que codifican la conducta económica incorrecta deben actualizarse justificadamente, no usarse para preservar el bug. Ningún reinicio o despliegue forma parte de esta auditoría.
 
 ## 3. Registro de Críticas Descartadas (Bloqueo Anti-Bucle)
 
-- **[Descartado - `core_engine.py:L3261` y `multi_sniper.py:L218`]:** El Auditor 1 propuso reemplazar `with ThreadPoolExecutor(...) as executor:` por gestión manual de `executor.shutdown(wait=False, cancel_futures=True)` alegando bloqueo indefinido en `__exit__` → **Motivo de rechazo:** Hipotético y de bajo ROI. Todas las llamadas HTTP internas usan `timeout=5` / `timeout=10` en `curl_cffi`, y en `download_item_images` la estructura del `ThreadPoolExecutor` está explícitamente validada por `tests/test_verify_punto6.py:L101-L135`.
-- **[Descartado - `bot.py:L58, L343, L919, L1113, L1692`]:** El Auditor 1 propuso envolver todas las consultas SQLite y lecturas de `KITS_DIR` de `bot.py` en `asyncio.to_thread` y añadir callbacks `on_timeout` en `PhotoChoiceView` para limpiar `active_sessions` → **Motivo de rechazo:** Sobre-ingeniería sin beneficio real. `bot.py` es un centro de mando personal monousuario en homelab; `active_sessions` se indexa por `interaction.user.id` (máximo 1 entrada, sobrescrita en cada sesión) y las consultas SQLite locales con `WAL` tardan `<2ms`.
-- **[Descartado - `core_engine.py:L2723, L3018` y `vinted_sniper.py:L58`]:** El Auditor 1 propuso invocar `.close()` explícitamente antes de reasignar `self.session = requests.Session(...)` en la rotación TLS → **Motivo de rechazo:** Innecesario en CPython, cuyo recolector por conteo de referencias destruye la instancia previa de `Session` y libera el handle de `libcurl` de forma inmediata al perder la referencia.
-- **[Descartado - `core_engine.py:L2781, L2859, L2944, L3008, L3168`]:** El Auditor 3 propuso pasar `health_monitor` a todas las funciones `fetch_*` de `core_engine.py` para conectarlo con `default_parser_tracker` → **Motivo de rechazo:** Redundante. `multi_sniper.py:L593-L596` ya monitoriza las rondas vacías por plataforma usando su propio `parser_tracker.record_platform_empty(plat, health_monitor, threshold=4, ...)` conectado a `health_monitor`.
-- **[Descartado - `fraud_signals.py:L974-L1032`]:** El Auditor 1 propuso refactorizar `evaluate_fraud_risk` para reutilizar `rep_row` en el `UPDATE` de `seller_reputation` y el Auditor 3 propuso pasar `cex_cash` en Puerta 0 → **Motivo de rechazo:** En Puerta 0 aún no se ha llamado a `fetch_cex_live` (que ocurre en Fase 3 tras la IA para ahorrar llamadas a Algolia; además, el freno de precio inverosímil con `cex_cash` ya se aplica en `evaluate_deal_math_and_score` en `core_engine.py:L4150` y `evaluate_fraud_risk` con `cex_cash` está cubierto por `tests/test_verify_task05.py`). La doble lectura de `seller_reputation` sobre clave primaria en SQLite WAL toma `<0.05ms` (P2-Menor descartado).
-- **[Descartado - `logger.py:L43-L84`]:** El Auditor 1 señaló ausencia de `self.file_handler.lock` en `StdoutStreamToLogger.write` (`P2-Menor`) → **Motivo de rechazo:** Descartado por regla de eliminación del 100% de hallazgos `P2-Menor` y porque `logger.py` ya fue validado por `tests/test_verify_task06.py`.
-- **[Descartado - `core_engine.py:L3218, L3482, L3904`, `fraud_signals.py:L302, L898` y `multi_sniper.py:L547`]:** Hallazgos `P2-Menor` (descarga de 1ª foto en `vision_retry`, doble `save_item_embedding` al alertar, escala en `pre_gate_cex_offer_margin` validada por `tests/test_verify_task03.py`, negaciones en `DEFECT_TOKENS`, código legacy de Telegram/`seen_items`/`init_fraud_tables` validado por `tests/test_verify_task05.py`, y resolución `384x384` en `compress_image_to_jpeg_640` exigida por `tests/test_verify_task04.py`) → **Motivo de rechazo:** Eliminados al 100% por filtro de severidad `P2-Menor` y protección de contratos de tests existentes.
+Se conservan los descartes del informe del 2026-11-09 y se incorporan los de esta revisión. No reabrirlos sin evidencia nueva que cambie su fundamento.
 
-## 4. Registro de Ejecución Quirúrgica (Worker Log)
-- **Fecha de Ejecución:** 2026-11-09 17:44
-- **Resultado Global:** `COMPLETED`
-
-| ID | Severidad | Archivo | Estado Final | Test de Aceptación | Notas / Motivo de Rollback |
-|---|---|---|---|---|---|
-| [ID-01] | P0 | `bot.py:L1028-L1087` | `APPLIED_AND_VERIFIED` | PASS | Des-indentado el post-procesado fuera de `finally:`. `finalbody` contiene exclusivamente `conn.close()`. AST verificado. |
-| [ID-02] | P0 | `core_engine.py:L827-L895, L3872-L3888` | `APPLIED_AND_VERIFIED` | PASS | Verificación de JSON con `schema_defaults=None` antes de asignar `used_model`. Normalización de defaults post-gateway en visión sin envenenar caché ante fallos de API. Suite Punto 6 superada. |
-| [ID-03] | P1 | `core_engine.py:L3972, L4174-L4195` | `APPLIED_AND_VERIFIED` | PASS | Cálculo de `target_offer` sobre `net_optimal_p2p = optimal_price * 0.92` con `math.floor` y cobertura CeX >= 100% en Nivel 2. Tests de oferta, Bloque 3 y Fase 7.3 superados. |
-| [ID-04] | P1 | `sniper.py:L478`, `vinted_sniper.py:L710, L770, L811, L861`, `multi_sniper.py:L338-L542` | `APPLIED_AND_VERIFIED` | PASS | Condición `price <= direct_max` en Flash Wallapop `ntfy.sh`. Resuelto el 2º push en rechazos de Vinted/Multi-Sniper con metadatos completos y foto corregida. Test Task 06 superado. |
-| [ID-05] | P1 | `sniper.py:L412, L685`, `vinted_sniper.py:L666, L896`, `multi_sniper.py:L300, L533`, `fraud_signals.py:L688-L740, L933` | `APPLIED_AND_VERIFIED` | PASS | Orden `passes_filters` (precio/texto) antes de `enrich_seller_profile`. Propagación de `fraud_risk_score` a `classify_deal_tier`. Tests Fase 2, Fase 3, Bloque 2 y Task 06 superados. |
-| [ID-06] | P1 | `core_engine.py:L213`, `sniper.py:L316, L350`, `vinted_sniper.py:L550, L585`, `multi_sniper.py:L180, L207` | `APPLIED_AND_VERIFIED` | PASS | Purga TTL en `fraud_log`/`price_history`, refresco periódico 6h de `run_db_maintenance`/espejo CeX y `touch_heartbeat()` por radar en los 3 snipers. Suite Punto 5 y Suite Maestra superadas. |
+- **[Descartado — multi_sniper.py:301-319]:** Sustituir obligatoriamente `ALL_COMPLETED` por procesamiento inmediato de cada worker. El escenario de espera tras una tienda lenta existe, pero falta frecuencia y contribución actuales al retraso; queda como hipótesis de perfilado P2, fuera del plan.
+- **[Descartado — arquitectura general]:** Reescribir a asyncio, dividir módulos por tamaño, introducir patrones abstractos, embeddings externos, Bloom filters, headless para Milanuncios o proxies/VPS sin medición. No se ha demostrado beneficio suficiente para justificar esos cambios.
+- **[Descartado histórico — ThreadPoolExecutor]:** Gestión manual de `shutdown(wait=False)` por un supuesto bloqueo indefinido. Las peticiones tienen timeouts; A12-03 no reabre esta propuesta.
+- **[Descartado histórico — bot.py]:** Pasar indiscriminadamente todas las consultas SQLite a otro hilo y rehacer sesiones interactivas. No hay evidencia nueva de un cuello de botella general; el bot ya dispone de `db_call` con conexión por trabajo.
+- **[Descartado histórico — sesiones HTTP]:** Añadir cierres por preferencia o rehacer la rotación sin una fuga demostrada. Se mantiene la gestión actual por hilo.
+- **[Descartado histórico — monitorización de parsers]:** Conectar monitores redundantes a cada fetcher. Multi ya registra éxito/vacío por plataforma.
+- **[Descartado histórico — fraud_signals.py]:** Eliminar una segunda consulta de reputación por limpieza o adelantar CeX a Puerta 0. Sin beneficio nuevo demostrado; no altera el plan.
+- **[Descartado histórico — logger.py]:** Reabrir la antigua crítica menor sobre locks de escritura. El código actual separa métricas por servicio y protege el handler.
+- **[Descartado histórico — detalles P2]:** Evitar la redescarga de foto1, una segunda escritura de embedding, limpiar legado Telegram/tablas o cambiar resolución solo por preferencia. El cortocircuito funcional de A12-03 y la colisión matemática de A12-04 son evidencia distinta.
+- **[Descartado — outcome_tracker.py:505-514 / core_engine.py:5911-5916]:** Restaurar en Discord una reserva liberada se mantiene como limitación menor de ciclo de vida, fuera del plan P0/P1.
+- **[Descartado — core_engine.py:5341-5378]:** Refinar el digest según estado financiero no justifica ampliar esta intervención. La modalidad actual es `individual`.
+- **[Descartado — documentación/canales]:** El desfase de ROADMAP, los tests antiguos de 768 dimensiones y el legado de Telegram no justifican refactorizaciones. Telegram no tiene despacho operativo en los escáneres examinados; se informa del alcance real sin eliminarlo.
+- **[No reabrir — arreglos anteriores]:** Los seis hallazgos del informe del 2026-11-09 constaban como aplicados. Se conservan su contexto y pruebas históricas; A12-07 trata el coste del cargador, no deshace la corrección anterior de la fórmula de ofertas. Los IDs A12-* distinguen este plan de aquellos ID-01 a ID-06.
+- **[Fuera del plan quirúrgico — calibración comercial]:** La valoración P2P, probabilidad de cierre, coste del tiempo y ROI realizado deben contrastarse con feedback y operaciones verificadas. El histórico disponible no demuestra por sí solo el precio final ni autoriza cambiar los topes de compra o el presupuesto IA.
 
 

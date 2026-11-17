@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tools/run_isolated.sh:*)", "Bash(python3 -m py_compile:*)",
+      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git switch:*)"
+    ],
+    "deny": [
+      "Bash(docker compose up:*)", "Bash(docker compose restart:*)",
+      "Bash(docker compose down:*)", "Bash(docker compose stop:*)",
+      "Bash(docker exec:*)", "Bash(docker restart:*)",
+      "Bash(git push:*)", "Read(./.env)"
+    ]
+  }
+}
