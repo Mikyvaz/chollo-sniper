@@ -736,7 +736,12 @@ class TokenBucket:
                     self._recent.popleft()
 
             self._recent.append(token_ready)
-            self.grants += 1
+            if priority:
+                # Ficha/perfil sin crédito: espera su turno, pero sigue siendo un token de anuncio, no un
+                # coste de la búsqueda (si no, las consultas con muchos candidatos se sondearían menos).
+                self.priority_grants += 1
+            else:
+                self.grants += 1
             wait_s = max(0.0, token_ready - now)
 
         if wait_s > 0.0:

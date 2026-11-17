@@ -88,7 +88,27 @@ class TestPriorityTokens(unittest.TestCase):
         self.assertEqual(bucket.acquire(priority=True), 0.0)
         waited = bucket.acquire(priority=True)   # crédito agotado
         self.assertGreater(waited, 0.0)
-        self.assertEqual(bucket.priority_grants, 2)
+        # Sigue contando como token de anuncio (no como coste de la búsqueda) aunque haya tenido que esperar
+        self.assertEqual(bucket.priority_grants, 3)
+        self.assertEqual(bucket.grants, 1)
+
+    def test_candidate_burst_does_not_inflate_query_cost(self):
+        """Una búsqueda que trae 8 candidatos (fichas/perfiles > crédito) sigue costando 1 token."""
+        from antiban import TokenBucket, QueryTask, QueryScheduler
+
+        clock = FakeClock()
+        bucket = TokenBucket(rate_per_s=0.3, burst=2, clock=clock, sleeper=clock.sleep, max_debt=3)
+        task = QueryTask(0.0, "switch2", "nintendo switch 2", 1, 2, 60.0)
+        sched = QueryScheduler([task, QueryTask(0.0, "otro", "otro", 1, 2, 60.0)], bucket=bucket, clock=clock,
+                               sleeper=clock.sleep, now_fn=clock.now_dt, stagger_initial=False)
+        for _ in range(6):
+            t = sched.next()
+            if t.radar_id == "switch2":
+                for _ in range(8):
+                    bucket.acquire(priority=True)
+            sched.done(t, yield_count=8 if t.radar_id == "switch2" else 0)
+        self.assertLess(task.cost, 1.05)
+        self.assertGreaterEqual(bucket.priority_grants, 8)
 
     def test_max_debt_zero_disables_priority(self):
         from antiban import TokenBucket
